@@ -57,6 +57,10 @@ fn uploads_are_copied_from_authorized_files_to_private_session_staging() {
     large_file(&source, 2 * 1024 * 1024 + 3);
     let session = f.private.join("browser-session");
     std::fs::create_dir(&session).unwrap();
+    #[cfg(unix)] {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&session, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
     let files = UnifiedFiles::open(f.config(FileScope::AllowedRoots(vec![f.external.clone()]))).unwrap();
     let staged = files.stage_uploads(DesktopProfile::FullControl, &[source.to_string_lossy().into_owned()], &session).unwrap();
     assert_eq!(staged.len(), 1);
