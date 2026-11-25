@@ -10,6 +10,11 @@ const RESOURCE: &str = "https://capability-test.example.invalid/mcp";
 struct TemporaryState(PathBuf);
 impl TemporaryState {
     fn new() -> Self {
+        // Unix state ancestors must not be group or world writable, which
+        // excludes /tmp; the test binary's own directory satisfies the check.
+        #[cfg(unix)]
+        let base = fs::canonicalize(std::env::current_exe().unwrap().parent().unwrap()).unwrap();
+        #[cfg(not(unix))]
         let base = fs::canonicalize(std::env::temp_dir()).unwrap();
         let base = base.to_str().and_then(|path| path.strip_prefix(r"\\?\"))
             .map(PathBuf::from).unwrap_or(base);
