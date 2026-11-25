@@ -48,5 +48,8 @@
   ],
   "workers/browser-playwright/validation.mjs": [
     "// Agent Bridge browser contract. DeskMCP 0.9.17 validation provenance: NOTICE."
+  ],
+  "docs/TOOLS.md": [
+    "The 27 desktop tools keep the names of the 27 production tools of the upstream gateway they adapt (DeskMCP 0.9.17, Apache-2.0). Its development-only `desktop_ping`, `desktop_read_test` and `desktop_write_test` are not published."
   ]
 }

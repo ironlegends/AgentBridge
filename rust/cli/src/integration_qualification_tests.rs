@@ -364,9 +364,33 @@ fn exercise_every_tool(os_user: bool) {
     // Documentary skills. Skill sources stay workspace-relative in both
     // file scopes.
     assert_eq!(run.ok("desktop_skill_manage",json!({"action":"validate","source_path":"skill-src","name":"catalogue-skill"}))["valid"],true);
-    run.ok("desktop_skill_manage",json!({"action":"install","source_path":"skill-src","name":"catalogue-skill","activate":true}));
+    let first_skill=run.ok("desktop_skill_manage",json!({"action":"install","source_path":"skill-src","name":"catalogue-skill","activate":true}));
+    let first_version=first_skill["version"].clone();
+    assert_eq!(first_skill["active_version"],first_version,"{first_skill}");
     assert!(run.ok("desktop_skill_manage",json!({"action":"list"})).to_string().contains("catalogue-skill"));
     run.ok("desktop_skill_manage",json!({"action":"get","name":"catalogue-skill"}));
+    assert!(run.ok("desktop_skill_manage",json!({"action":"read","name":"catalogue-skill"}))["content"]
+        .as_str().unwrap().contains("Catalogue skill body"));
+    run.refused("desktop_skill_manage",json!({"action":"validate","source_path":workspace.join("skill-src"),
+        "name":"catalogue-skill"}));
+    // A second version is installed inactive, activated, then rolled back.
+    std::fs::write(workspace.join("skill-src/SKILL.md"),
+        "---
+name: catalogue-skill
+description: qualification
+version: 0.2.0
+---
+# Catalogue skill second body
+").unwrap();
+    let second_version=run.ok("desktop_skill_manage",json!({"action":"install","source_path":"skill-src",
+        "name":"catalogue-skill","activate":false}))["version"].clone();
+    assert_ne!(second_version,first_version);
+    assert_eq!(run.ok("desktop_skill_manage",json!({"action":"get","name":"catalogue-skill"}))["active_version"],first_version);
+    assert_eq!(run.ok("desktop_skill_manage",json!({"action":"activate","name":"catalogue-skill","version":second_version}))
+        ["active_version"],second_version);
+    assert!(run.ok("desktop_skill_manage",json!({"action":"read","name":"catalogue-skill"}))["content"]
+        .as_str().unwrap().contains("Catalogue skill second body"));
+    assert_eq!(run.ok("desktop_skill_manage",json!({"action":"rollback","name":"catalogue-skill"}))["active_version"],first_version);
     assert!(run.ok("desktop_skill_manage",json!({"action":"read","name":"catalogue-skill"}))["content"]
         .as_str().unwrap().contains("Catalogue skill body"));
 
@@ -390,6 +414,23 @@ fn exercise_every_tool(os_user: bool) {
     run.ok("desktop_read_process",json!({"session_id":session,"timeout_ms":250}));
     let sleeper=run.ok("desktop_start_process",json!({"command":"Start-Sleep -Seconds 60","shell":"powershell","timeout_ms":250}));
     run.ok("desktop_terminate_process",json!({"session_id":sleeper["session_id"]}));
+    // Direct argv, explicit hidden window and short temporary directory: the
+    // exact exit code and the private TEMP are observed.
+    let argv=run.ok("desktop_start_process",json!({"program":"cmd.exe","args":["/d","/c","echo argv46 %TEMP% & exit 7"],
+        "window_mode":"hidden","temp_mode":"short","timeout_ms":5000}));
+    let mut receipt=argv.clone();
+    let deadline=std::time::Instant::now()+std::time::Duration::from_secs(15);
+    let mut text=argv.to_string();
+    while receipt["running"]!=false {
+        assert!(std::time::Instant::now()<deadline,"argv process did not exit: {receipt}");
+        receipt=run.ok("desktop_read_process",json!({"session_id":argv["session_id"],"timeout_ms":1000}));
+        text.push_str(&receipt.to_string());
+    }
+    assert_eq!(receipt["exit_code"],7,"{receipt}");
+    assert_eq!(receipt["window_mode"],"hidden","{receipt}");
+    assert_eq!(receipt["temp_mode"],"short","{receipt}");
+    assert!(text.contains("argv46"),"{text}");
+    run.refused("desktop_start_process",json!({"program":"cmd.exe","shell":"cmd","args":[]}));
 
     // Missions shared by two contexts, including subtasks and transfer.
     let first=run.ok("agent_bridge_context_create",json!({}));
