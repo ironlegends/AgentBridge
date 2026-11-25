@@ -9,22 +9,22 @@
     "read-only": {
       badge: "READ",
       cls: "",
-      hint: "Safe: AI can only view files in your folder",
+      hint: "Read files only",
     },
     "workspace-write": {
       badge: "WRITE",
       cls: "",
-      hint: "Edit: AI can read and edit files in your folder",
+      hint: "Read and edit workspace files",
     },
     "full-control": {
       badge: "FULL",
       cls: "warn",
-      hint: "Advanced: adds approved commands & window controls",
+      hint: "Approved commands and window tools",
     },
     "fully-unlocked": {
       badge: "UNLOCK",
       cls: "danger",
-      hint: "Unrestricted: full local access for this session",
+      hint: "Direct commands when enabled; OS account access",
     },
   };
   const THEMES = ["system", "light", "dark"];
@@ -50,6 +50,16 @@
   let onboardingProfile = "read-only";
   let activePage = "pageMain";
   let approvalsRead = 0;
+  let approvalsInFlight = 0;
+  let approvalsSnapshotKey = null;
+  let missionsRead = 0;
+  let missionsInFlight = 0;
+  let diagnosticsRead = 0;
+  let diagnosticsInFlight = 0;
+  let diagnosticsMutation = false;
+  let pageRefreshTimer = null;
+  let pageEpoch = 0;
+  let recentFoldersKey = null;
   let extensionDecisionInFlight = false;
   let extensionPollTimer = null;
   let extensionPollRequest = null;
@@ -97,7 +107,7 @@
       html += '<div class="item-meta">Historical Task Room import: ' +
         (selection.allow_import ? "locally authorized" : "disabled") + "</div>";
     }
-    return html + '<details class="extension-proposal"><summary>Selected permissions and resources</summary>' +
+    return html + '<details class="extension-proposal"><summary>Permissions and resources</summary>' +
       '<pre class="extension-payload">' + escapeHtml(JSON.stringify(selection, null, 2)) + "</pre></details>";
   }
 
@@ -187,7 +197,7 @@
     const meta = known ? PROFILE_META[profile] : null;
     $("profileBadge").textContent = meta ? meta.badge : "-";
     $("profileBadge").className = "profile-badge " + (meta ? meta.cls : "");
-    $("profileHint").textContent = meta ? meta.hint : "Waiting for the active session";
+    $("profileHint").textContent = meta ? meta.hint : "Waiting for Bridge";
   }
 
   function renderProfileControl() {
@@ -202,7 +212,7 @@
     $("profileTitle").textContent = configured ? "Active mode" : "Saved preference";
     $("profileCeiling").classList.toggle("hidden", !configured);
     $("profileCeiling").textContent = connected
-      ? "Session ceiling: " + PROFILE_META[runtime.maxProfile].badge
+      ? "Max: " + PROFILE_META[runtime.maxProfile].badge
       : "Session ceiling unavailable";
     const error = stateError || profileError || (runtime && runtime.error);
     const phase = gatewayControls().phase;
@@ -210,9 +220,9 @@
       ? "Bridge is " + phase + ". Mode changes are unavailable."
       : profileChanging ? "Applying mode…"
       : (error || (configured
-        ? (connected ? "Changes apply immediately. Your connection stays open."
-          : isNativeStopped() ? "Bridge is stopped. Start it to change the active mode." : "Waiting for the running Bridge.")
-        : (state ? "Attach a workstation session to apply a mode live." : "Connecting to Agent Bridge…")));
+        ? (connected ? "Changes apply live."
+          : isNativeStopped() ? "Start Bridge to change modes." : "Waiting for Bridge.")
+        : (state ? "Attach a workstation to apply live." : "Connecting to Agent Bridge…")));
     $("profileStatus").classList.toggle("error", Boolean(error && !profileChanging));
     $("profileSelector").setAttribute("aria-busy", String(profileChanging));
     document.querySelectorAll("[data-profile]").forEach((btn) => {
@@ -243,7 +253,7 @@
     localControls.forEach((id) => { $(id).disabled = busy || external; });
     document.querySelectorAll("[data-theme-choice]").forEach((btn) => { btn.disabled = busy; });
     document.querySelectorAll("[data-recent]").forEach((btn) => { btn.disabled = busy || external; });
-    document.querySelectorAll("[data-skill-rb]").forEach((btn) => { btn.disabled = operatorMutationsBlocked(); });
+    document.querySelectorAll("[data-skill-rb]").forEach((btn) => { btn.disabled = operatorMutationsBlocked() || diagnosticsMutation; });
     $("powerBtn").disabled = busy || !(live ? controls.canRestart : controls.canStart);
     $("stopBtn").disabled = busy || !controls.canStop;
     $("powerBtn").textContent = controls.phase
@@ -260,8 +270,8 @@
     else if (!state || !state.liveProfile || !state.liveProfile.connected || stateError) {
       notice.push("The configured session is unavailable.");
     } else notice.push(isNative()
-      ? "This application manages the running Bridge."
-      : "Attached to the running Bridge. The session stays open independently.");
+      ? "Managed locally."
+      : "Connected to an independent Bridge.");
     if (isNative() && state.tunnel && state.tunnel.configured) {
       if (state.tunnel.error) notice.push("Tunnel unavailable: " + state.tunnel.error);
       else if (state.tunnel.childRunning) notice.push("Tunnel running. Remote connectivity not verified.");
@@ -270,7 +280,7 @@
     $("quitAppBtn").textContent = isNative() ? "Quit and stop Bridge" : "Quit";
     if (controls.reason) notice.push(controls.reason);
     if (controls.canStart || controls.canRestart) {
-      notice.push("Starting or restarting uses the configured startup profile.");
+      notice.push("Restart uses the startup profile.");
     }
     $("externalGatewayNotice").textContent = notice.join(" ");
     renderProfileControl();
@@ -367,8 +377,37 @@
     }
   }
 
+  function schedulePageRefresh() {
+    clearTimeout(pageRefreshTimer);
+    pageRefreshTimer = null;
+    if (activePage === "pageMain") return;
+    const epoch = pageEpoch;
+    pageRefreshTimer = setTimeout(async () => {
+      pageRefreshTimer = null;
+      if (epoch !== pageEpoch) return;
+      try {
+        if (!document.hidden && !panelBusy && !profileChanging && !extensionDecisionInFlight) {
+          if (activePage === "pageMissions" && !missionsInFlight) {
+            await loadMissionsDrawer(true);
+          } else if (activePage === "pageApprovals" && !approvalsInFlight
+            && !refreshInFlight && !extensionPollTimer) {
+            await loadApprovalsDrawer(true, true);
+          } else if (activePage === "pageSettings" && !diagnosticsInFlight && !diagnosticsMutation) {
+            await loadSettingsDiagnostics();
+          }
+        }
+      } finally {
+        if (epoch === pageEpoch) schedulePageRefresh();
+      }
+    }, 3000);
+  }
+
   function showPage(pageId) {
     activePage = pageId;
+    pageEpoch++;
+    missionsRead++;
+    diagnosticsRead++;
+    schedulePageRefresh();
     if (pageId !== "pageApprovals") {
       clearTimeout(extensionPollTimer);
       extensionPollTimer = null;
@@ -420,20 +459,20 @@
     $("liveText").textContent = unavailable ? "Unavailable" : (live ? "Live" : "Off");
 
     $("gwDot").className = "dot " + (live ? "ok" : "warn");
-    $("gwStatus").textContent = live
-      ? "Port " + data.gateway.port
-      : (unavailable ? "Unavailable" : "Stopped");
+    $("gwStatus").textContent = live ? "Running" : (unavailable ? "Unavailable" : "Stopped");
+    $("gwStatus").title = live ? "Local port: " + data.gateway.port : "";
 
     const activeMissions = data.database && data.database.activeMissions ? data.database.activeMissions : 0;
     const pendingTotal = data.pendingApprovalsTotal || 0;
     $("relDot").className = "dot " + (pendingTotal > 0 ? "warn" : (activeMissions > 0 ? "ok" : ""));
     $("relStatus").textContent = pendingTotal > 0
-      ? pendingTotal + " waiting"
-      : (activeMissions > 0 ? activeMissions + " active" : "Idle");
+      ? pendingTotal + (pendingTotal === 1 ? " approval" : " approvals")
+      : (activeMissions > 0 ? activeMissions + (activeMissions === 1 ? " task" : " tasks") : "Idle");
+    $("relStatus").title = activeMissions + " active tasks; " + pendingTotal + " pending approvals";
 
-    $("scopePath").textContent = s.workspace || "No folder chosen";
-    $("scopePill").textContent = data.oauth && data.oauth.configured ? "Web Ready" : "Local";
-    $("versionMeta").textContent = "v" + data.version + " | Runs privately on this PC";
+    $("scopePath").textContent = s.workspace || "Choose a folder";
+    $("scopePill").textContent = data.oauth && data.oauth.configured ? "Web configured" : "Local";
+    $("versionMeta").textContent = "v" + data.version + " | Local";
 
     const badge = $("approvalsBadge");
     if (pendingTotal > 0) {
@@ -461,23 +500,28 @@
     const recents = (s.recentWorkspaces || []).filter((r) => r && r !== s.workspace);
     const wrap = $("recentWorkspacesWrap");
     const list = $("recentWorkspacesList");
+    const recentsKey = JSON.stringify(recents);
     if (recents.length > 0) {
       wrap.classList.remove("hidden");
-      list.innerHTML = recents
-        .map((r) => '<button class="mini-btn recent-item" data-recent="' + escapeHtml(r) + '" type="button">' + escapeHtml(r) + "</button>")
-        .join("");
-      list.querySelectorAll("[data-recent]").forEach((btn) => {
-        btn.addEventListener("click", async () => {
-          if (usesLiveWorkstation()) return;
-          const next = Object.assign({}, state.settings, { workspace: btn.getAttribute("data-recent") });
-          if (await runPanelAction("save_panel_settings", { settings: next })) {
-            showToast("Folder updated.");
-          }
+      if (recentsKey !== recentFoldersKey) {
+        list.innerHTML = recents
+          .map((r) => '<button class="mini-btn recent-item" data-recent="' + escapeHtml(r) + '" type="button">' + escapeHtml(r) + "</button>")
+          .join("");
+        list.querySelectorAll("[data-recent]").forEach((btn) => {
+          btn.addEventListener("click", async () => {
+            if (usesLiveWorkstation()) return;
+            const next = Object.assign({}, state.settings, { workspace: btn.getAttribute("data-recent") });
+            if (await runPanelAction("save_panel_settings", { settings: next })) {
+              showToast("Folder updated.");
+            }
+          });
         });
-      });
+      }
     } else {
       wrap.classList.add("hidden");
+      list.innerHTML = "";
     }
+    recentFoldersKey = recentsKey;
 
     if (!s.onboardingCompleted && !usesLiveWorkstation(data)) {
       $("obWorkspacePath").textContent = s.workspace || "Not chosen yet";
@@ -529,24 +573,32 @@
     }
   }
 
-  async function loadMissionsDrawer() {
+  async function loadMissionsDrawer(passive = false) {
     const body = $("missionsBody");
-    body.innerHTML = '<div class="empty-note">Loading tasks...</div>';
+    const read = ++missionsRead;
+    const epoch = pageEpoch;
+    const generation = stateGeneration;
+    const current = () => read === missionsRead && epoch === pageEpoch
+      && activePage === "pageMissions" && generation === stateGeneration;
+    missionsInFlight++;
+    if (!passive) body.innerHTML = '<div class="empty-note">Loading tasks...</div>';
+    const render = (html) => { if (body.innerHTML !== html) body.innerHTML = html; };
     try {
       const data = await invoke("get_missions_snapshot");
+      if (!current()) return;
       if (!data.configured || !data.exists) {
-        body.innerHTML = '<div class="set-card"><div class="set-title">Not initialized yet</div><div class="set-sub">Open Settings &gt; Advanced settings and click Initialize.</div></div>';
+        render('<div class="set-card"><div class="set-title">Setup required</div><div class="set-sub">Settings &gt; Advanced &gt; Initialize.</div></div>');
         return;
       }
       if (data.needsMigration) {
-        body.innerHTML = '<div class="set-card"><div class="set-title">Database update needed</div><div class="set-sub">Open Settings &gt; Advanced settings and click Initialize.</div></div>';
+        render('<div class="set-card"><div class="set-title">Database update needed</div><div class="set-sub">Settings &gt; Advanced &gt; Initialize.</div></div>');
         return;
       }
       const missions = data.missions || [];
       const rooms = data.task_rooms || [];
       let html = "";
       if (missions.length === 0) {
-        html += '<div class="set-card"><div class="set-title">No active tasks</div><div class="set-sub">Connect ChatGPT, Gemini, or a local coding tool to see live progress here.</div></div>';
+        html += '<div class="set-card"><div class="set-title">No active tasks</div><div class="set-sub">Tasks appear here automatically.</div></div>';
       } else {
         html += missions.map((m) => {
           const pillCls = m.status === "active" || m.status === "completed" ? "ok" : "warn";
@@ -565,15 +617,22 @@
         html += '<div class="mini-label" style="margin: 6px 2px 2px;">Task Rooms (' + rooms.length + ")</div>";
         html += rooms.map((t) => {
           const pillCls = t.status === "completed" || t.status === "active" ? "ok" : "warn";
+          const total = Number(t.steps_total);
+          const completed = Number(t.steps_completed);
+          const progress = Number.isFinite(total) && total > 0 && Number.isFinite(completed)
+            ? '<progress class="task-progress" aria-label="Task progress" max="' + total
+              + '" value="' + Math.max(0, Math.min(completed, total)) + '"></progress>' : "";
           return '<div class="set-card">' +
             '<div class="set-row"><span class="set-title">' + escapeHtml(t.title) + '</span><span class="pill ' + pillCls + '">' + escapeHtml(t.steps_completed) + "/" + escapeHtml(t.steps_total) + "</span></div>" +
-            '<div class="item-meta">' + escapeHtml(t.summary || t.goal) + "</div>" +
+            progress + '<div class="item-meta">' + escapeHtml(t.summary || t.goal) + "</div>" +
           "</div>";
         }).join("");
       }
-      body.innerHTML = html;
+      render(html);
     } catch (err) {
-      body.innerHTML = '<div class="set-card"><div class="set-title">Error</div><div class="set-sub">' + escapeHtml(err) + "</div></div>";
+      if (current()) render('<div class="set-card"><div class="set-title">Tasks unavailable</div><div class="set-sub">' + escapeHtml(err) + "</div></div>");
+    } finally {
+      missionsInFlight--;
     }
   }
 
@@ -717,14 +776,18 @@
     });
   }
 
-  async function loadApprovalsDrawer(polling = false) {
+  async function loadApprovalsDrawer(polling = false, passive = false) {
     if (extensionDecisionInFlight) return;
+    approvalsInFlight++;
     clearTimeout(extensionPollTimer);
     extensionPollTimer = null;
     const currentRead = ++approvalsRead;
     const body = $("approvalsBody");
     rememberOAuthCallbacks();
-    if (!polling) body.innerHTML = '<div class="empty-note">Checking requests...</div>';
+    if (!polling) {
+      approvalsSnapshotKey = null;
+      body.innerHTML = '<div class="empty-note">Checking requests...</div>';
+    }
     const generation = stateGeneration;
     const read = ++nextStateRead;
     try {
@@ -742,7 +805,7 @@
 
       let html = "";
       if (!oauth.configured) {
-        html += '<div class="set-card"><div class="set-title">Web Connections</div><div class="set-sub">To approve ChatGPT Web or Gemini Web connectors here, set up Web Relay under Settings &gt; Advanced settings.</div></div>';
+        html += '<div class="set-card"><div class="set-title">Web Connections</div><div class="set-sub">Set up Web Relay in Advanced settings.</div></div>';
       } else {
         html += '<div class="set-card">' +
           '<div class="set-row">' +
@@ -769,12 +832,17 @@
       }
 
       const ext = panel.extensions || {};
+      const snapshotKey = JSON.stringify([oauth, ext, canDecideExtensions(panel)]);
+      if (passive && !nativeApprovalsRefreshNeeded && snapshotKey === approvalsSnapshotKey) {
+        scheduleExtensionPoll(ext.oauthOperation);
+        return;
+      }
       if (ext.configured && ext.exists) {
         const servers = ext.servers || [];
         const requests = ext.requests || [];
         html += '<div class="set-card"><div class="set-title">Extensions (' + servers.length + ")</div>";
         if (servers.length === 0) {
-          html += '<div class="set-sub">No extra extensions connected yet.</div>';
+          html += '<div class="set-sub">No extensions connected.</div>';
         } else {
           html += servers.map((srv) => {
             const oauthMeta = ext.outboundOauth && ext.outboundOauth[srv.id];
@@ -794,7 +862,7 @@
           }).join("");
         }
         if (!canDecideExtensions(panel)) {
-          html += '<div class="set-sub">Attach and connect this panel to a running workstation to decide extension requests.</div>';
+          html += '<div class="set-sub">Connect Bridge to review requests.</div>';
         }
         if (requests.length > 0) {
           html += '<div class="mini-label" style="margin-top:9px;">Extension requests</div>';
@@ -815,7 +883,7 @@
               '<div class="item-meta">Request: <code>' + escapeHtml(r.requestId) + "</code></div>" +
               '<div class="item-meta">Endpoint: <code>' + escapeHtml(endpoint) + "</code></div>" +
               '<pre class="extension-payload">' + escapeHtml(JSON.stringify(r.payload || {}, null, 2)) + "</pre>" +
-              '<div class="set-sub">Secret environment entries are references, never their stored values.</div>' +
+              '<div class="set-sub">Secrets are shown as references only.</div>' +
               actions + "</details>";
           }).join("");
         }
@@ -829,9 +897,18 @@
         if (!pendingOAuthIds.has(id)) oauthCallbackDrafts.delete(id);
       }
       nativeApprovalsRefreshNeeded = false;
+      approvalsSnapshotKey = snapshotKey;
+      const focused = document.activeElement;
+      const focusedId = focused && focused.getAttribute("data-oauth-cb");
+      const selectionStart = focusedId ? focused.selectionStart : null;
+      const selectionEnd = focusedId ? focused.selectionEnd : null;
       body.innerHTML = html;
       body.querySelectorAll("[data-oauth-cb]").forEach((input) => {
         input.value = oauthCallbackDrafts.get(input.getAttribute("data-oauth-cb")) || "";
+        if (focusedId && input.getAttribute("data-oauth-cb") === focusedId) {
+          input.focus?.();
+          if (selectionStart != null && selectionEnd != null) input.setSelectionRange?.(selectionStart, selectionEnd);
+        }
       });
       renderExtensionControls();
       scheduleExtensionPoll(ext.oauthOperation);
@@ -901,17 +978,27 @@
       if (currentRead !== approvalsRead || activePage !== "pageApprovals" || extensionDecisionInFlight
         || generation !== stateGeneration || read < lastStateRead) return;
       rememberOAuthCallbacks();
-      body.innerHTML = '<div class="set-card"><div class="set-title">Error</div><div class="set-sub">' + escapeHtml(err) + "</div></div>";
+      approvalsSnapshotKey = null;
+      body.innerHTML = '<div class="set-card"><div class="set-title">Requests unavailable</div><div class="set-sub">' + escapeHtml(err) + "</div></div>";
+    } finally {
+      approvalsInFlight--;
     }
   }
 
   async function loadSettingsDiagnostics() {
     const box = $("skillsAndDiagBox");
+    const read = ++diagnosticsRead;
+    const epoch = pageEpoch;
+    const generation = stateGeneration;
+    const current = () => read === diagnosticsRead && epoch === pageEpoch
+      && activePage === "pageSettings" && generation === stateGeneration;
+    diagnosticsInFlight++;
     try {
       const [diag, skills] = await Promise.all([
         invoke("get_diagnostics"),
         invoke("get_skills_overview"),
       ]);
+      if (!current()) return;
       const skillList = (skills && skills.skills) || [];
       const profiles = (diag && diag.mcpBrowserProfiles) || [];
       let html = '<div class="item-meta">Token security: <strong>' + escapeHtml(diag.oauthKeystore) + "</strong></div>";
@@ -930,22 +1017,31 @@
           '</code><button class="mini-btn sm" data-skill-rb="' + escapeHtml(sk.name || sk.id) + '" type="button">Rollback</button></div>'
         ).join("");
       }
+      if (box.innerHTML === html) return;
       box.innerHTML = html;
       renderControls();
       box.querySelectorAll("[data-skill-rb]").forEach((btn) => {
         btn.addEventListener("click", async () => {
-          if (operatorMutationsBlocked()) return;
+          if (operatorMutationsBlocked() || diagnosticsMutation) return;
+          diagnosticsMutation = true;
+          diagnosticsRead++;
+          btn.disabled = true;
           try {
             await invoke("run_skill_action", { action: "rollback", name: btn.getAttribute("data-skill-rb"), version: null });
             showToast("Skill rolled back.");
-            await loadSettingsDiagnostics();
+            if (activePage === "pageSettings") await loadSettingsDiagnostics();
           } catch (err) {
             showToast(String(err));
+          } finally {
+            diagnosticsMutation = false;
+            renderControls();
           }
         });
       });
     } catch (err) {
-      box.textContent = String(err);
+      if (current()) box.textContent = String(err);
+    } finally {
+      diagnosticsInFlight--;
     }
   }
 
@@ -966,7 +1062,7 @@
         pendingElevatedProfile = target;
         $("modalDangerLabel").textContent = target === "fully-unlocked" ? "UNRESTRICTED ACCESS" : "FULL ACCESS";
         $("modalProfileTitle").textContent = target === "fully-unlocked" ? "Save Unlock preference?" : "Save Full preference?";
-        $("modalProfileBody").textContent = "This saves your preferred mode. Attach a workstation session to apply a mode live.";
+        $("modalProfileBody").textContent = "Saves your preference. Connect a running Bridge to apply it.";
         $("modalConfirmBtn").textContent = "Save";
         $("profileModal").classList.remove("hidden");
         return;
@@ -1029,8 +1125,8 @@
       refreshState();
     });
   });
-  $("refreshMissionsBtn").addEventListener("click", loadMissionsDrawer);
-  $("refreshApprovalsBtn").addEventListener("click", loadApprovalsDrawer);
+  $("refreshMissionsBtn").addEventListener("click", () => loadMissionsDrawer());
+  $("refreshApprovalsBtn").addEventListener("click", () => loadApprovalsDrawer());
   $("quitAppBtn").addEventListener("click", async () => {
     if (panelBusy || profileChanging || extensionDecisionInFlight) return;
     panelBusy = true;
@@ -1150,7 +1246,7 @@
     $("obStep3").classList.toggle("hidden", step !== 3);
     $("obTitle").textContent = step === 1
       ? "Pick your folder"
-      : (step === 2 ? "Pick a safety level" : "Ready to go!");
+      : (step === 2 ? "Choose access" : "Ready to connect");
   }
 
   $("obPickWorkspaceBtn").addEventListener("click", async () => {

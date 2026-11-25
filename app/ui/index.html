@@ -53,7 +53,7 @@
             </div>
             <div class="brand-copy" data-tauri-drag-region>
               <h1 class="brand-title" data-tauri-drag-region>Agent Bridge</h1>
-              <p class="brand-sub" data-tauri-drag-region>Connect AI to your folder</p>
+              <p class="brand-sub" data-tauri-drag-region>Web chats. Local agents.</p>
             </div>
           </div>
           <div id="livePill" class="live-pill standby">
@@ -84,7 +84,7 @@
       <section class="section-block">
         <div class="section-head">
           <div class="section-head-copy">
-            <div id="profileTitle" class="section-title">Active mode</div>
+            <div class="section-title access-title"><svg viewBox="0 0 16 16" width="14" height="14" fill="none" aria-hidden="true"><path d="M8 2l5 2v4c0 3-2 5-5 6-3-1-5-3-5-6V4zM6 8l1.5 1.5L10 7" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/></svg><span id="profileTitle">Active mode</span></div>
             <div id="profileHint" class="section-hint">Connecting to Agent Bridge…</div>
           </div>
           <span id="profileBadge" class="profile-badge">-</span>
@@ -108,7 +108,7 @@
         <div class="scope-top">
           <div class="scope-info">
             <div class="scope-label-row">
-              <span class="scope-label">Your folder</span>
+              <span class="scope-label"><svg viewBox="0 0 16 16" width="13" height="13" fill="none" aria-hidden="true"><path d="M2 5V3.5h5l1.5 2H14v7H2z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/></svg> Workspace</span>
               <span id="scopePill" class="scope-pill">Local</span>
             </div>
             <div id="scopePath" class="scope-path">No folder chosen</div>
@@ -156,8 +156,8 @@
     <section id="pageMissions" class="page subpage">
       <div class="subpage-head">
         <button class="mini-btn sm" data-back type="button">&lsaquo; Back</button>
-        <h2 class="subpage-title">Tasks</h2>
-        <button id="refreshMissionsBtn" class="mini-btn sm" type="button">Refresh</button>
+        <h2 class="subpage-title">Tasks <span class="auto-label" title="Updates automatically while open">Auto</span></h2>
+        <button id="refreshMissionsBtn" class="mini-btn sm icon-button" type="button" title="Refresh now" aria-label="Refresh now"><svg viewBox="0 0 16 16" width="14" height="14" fill="none" aria-hidden="true"><path d="M13 7A5 5 0 1 0 11 12M13 3v4H9" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
       </div>
       <div id="missionsBody" class="scroll-body"></div>
     </section>
@@ -166,8 +166,8 @@
     <section id="pageApprovals" class="page subpage">
       <div class="subpage-head">
         <button class="mini-btn sm" data-back type="button">&lsaquo; Back</button>
-        <h2 class="subpage-title">Approvals</h2>
-        <button id="refreshApprovalsBtn" class="mini-btn sm" type="button">Refresh</button>
+        <h2 class="subpage-title">Approvals <span class="auto-label" title="Updates automatically while open">Auto</span></h2>
+        <button id="refreshApprovalsBtn" class="mini-btn sm icon-button" type="button" title="Refresh now" aria-label="Refresh now"><svg viewBox="0 0 16 16" width="14" height="14" fill="none" aria-hidden="true"><path d="M13 7A5 5 0 1 0 11 12M13 3v4H9" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
       </div>
       <div id="approvalsBody" class="scroll-body"></div>
     </section>
@@ -196,7 +196,7 @@
         <div class="set-card">
           <div class="set-row">
             <div class="set-col-grow">
-              <div class="set-title">Your folder</div>
+              <div class="set-title">Workspace</div>
               <div id="setWorkspacePath" class="set-sub path-truncate">Not chosen</div>
             </div>
             <div class="btn-inline">
@@ -212,8 +212,12 @@
 
         <!-- Simple Connect Snippets -->
         <div class="set-card">
-          <div class="set-title">Connect your AI</div>
-          <div class="set-sub">Copy the link for ChatGPT / local clients or the CLI command.</div>
+          <div class="set-title access-title"><svg viewBox="0 0 16 16" width="14" height="14" fill="none" aria-hidden="true"><path d="M6 5l2-2a3 3 0 014 4l-2 2M10 11l-2 2a3 3 0 01-4-4l2-2M6 10l4-4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg> Connect your AI</div>
+          <div class="connect-methods">
+            <div><strong>ChatGPT Web</strong><span>Secure MCP Tunnel</span></div>
+            <div><strong>Gemini Web</strong><span>HTTPS / OAuth</span></div>
+          </div>
+          <div class="set-sub">Local clients use the link or command below.</div>
 
           <div class="snip-row">
             <span class="mini-label">Local link</span>
@@ -239,7 +243,7 @@
             <!-- Local Storage & Port -->
             <div class="set-card">
               <div class="set-title">Storage &amp; Port</div>
-              <div class="set-sub">Database file, private settings folder, and local port.</div>
+              <div class="set-sub">Private state and local port.</div>
 
               <label class="field-label" for="inputDbPath">Database file</label>
               <input id="inputDbPath" class="text-input" type="text" placeholder="missions.sqlite">
@@ -260,7 +264,7 @@
             <!-- Web Relay (OAuth 2.1) -->
             <div class="set-card">
               <div class="set-title">Web Relay (OAuth 2.1)</div>
-              <div class="set-sub">Optional HTTPS relay for Gemini Web or remote ChatGPT Web.</div>
+              <div class="set-sub">Authenticated HTTPS route for web chats.</div>
 
               <label class="field-label" for="inputOauthDir">OAuth folder</label>
               <div class="input-with-btn">
@@ -316,7 +320,7 @@
 
         <div id="obStep1" class="ob-step">
           <p class="modal-body">
-            Choose the folder on your computer that AI is allowed to see.
+            Choose the workspace your AI can access.
           </p>
           <div class="ob-path-box">
             <div class="mini-label">Selected folder</div>
@@ -330,16 +334,16 @@
 
         <div id="obStep2" class="ob-step hidden">
           <p class="modal-body">
-            Choose what AI is allowed to do. You can change this anytime.
+            Choose a starting access mode.
           </p>
           <div class="ob-choices">
             <button class="ob-choice active" data-ob-profile="read-only" type="button">
               <strong>Read Only (Safest)</strong>
-              <span>AI can view files and answer questions without changing anything.</span>
+              <span>Inspect files without changes.</span>
             </button>
             <button class="ob-choice" data-ob-profile="workspace-write" type="button">
               <strong>Can Edit Files</strong>
-              <span>AI can read, create, and edit files inside your chosen folder.</span>
+              <span>Read and edit workspace files.</span>
             </button>
           </div>
           <div class="modal-actions">
@@ -350,12 +354,12 @@
 
         <div id="obStep3" class="ob-step hidden">
           <p class="modal-body">
-            Agent Bridge is ready. It runs quietly in your system tray without opening a browser tab.
+            Ready to run in the system tray.
           </p>
           <div class="ob-checklist">
-            <div class="item-meta">1. Stays private on your own computer</div>
-            <div class="item-meta">2. Click <strong>Start Bridge</strong> to connect your AI</div>
-            <div class="item-meta">3. Closing the window hides it to the tray</div>
+            <div class="item-meta">1. Start Bridge on this computer</div>
+            <div class="item-meta">2. Connect your AI through MCP</div>
+            <div class="item-meta">3. Close to hide to tray</div>
           </div>
           <div class="modal-actions">
             <button id="obFinishBtn" class="action-btn full-w" type="button">Get Started</button>

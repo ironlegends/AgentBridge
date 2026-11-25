@@ -1142,3 +1142,80 @@ test("native Approvals invalidation during a mode mutation is reconciled after c
   assert.deepEqual(ui.active(), ["workspace-write"]);
   assert.equal(action(ui, "approve").disabled, true);
 });
+
+
+test("open Tasks page refreshes automatically and shows real task progress", async () => {
+  const ui = await ready();
+  const snapshot = (completed) => ({ configured: true, exists: true, missions: [],
+    task_rooms: [{ title: "Local work", status: "active", steps_completed: completed, steps_total: 4 }] });
+  await ui.el("missionsNavBtn").fire("click");
+  await ui.settle(ui.pending("get_missions_snapshot"), snapshot(1));
+  assert.match(ui.el("missionsBody").innerHTML, /value="1"/);
+  const refresh = ui.runTimer(3000);
+  assert.match(ui.el("missionsBody").innerHTML, /value="1"/);
+  await ui.settle(ui.pending("get_missions_snapshot"), snapshot(3));
+  await refresh;
+  assert.match(ui.el("missionsBody").innerHTML, /value="3"/);
+  assert.ok(ui.timer(3000));
+});
+
+test("late Tasks refresh cannot replace newer manual results", async () => {
+  const ui = await ready();
+  const snapshot = (goal) => ({ configured: true, exists: true, missions: [
+    { mission_id: "fixture", status: "active", goal }], task_rooms: [] });
+  await ui.el("missionsNavBtn").fire("click");
+  await ui.settle(ui.pending("get_missions_snapshot"), snapshot("Initial"));
+  const passive = ui.runTimer(3000);
+  const old = ui.pending("get_missions_snapshot");
+  const manual = ui.el("refreshMissionsBtn").fire("click");
+  const newer = ui.calls.filter((call) => call.command === "get_missions_snapshot" && !call.settled).at(-1);
+  await ui.settle(newer, snapshot("Newest"));
+  await manual;
+  await ui.settle(old, snapshot("Obsolete"));
+  await passive;
+  assert.match(ui.el("missionsBody").innerHTML, /Newest/);
+  assert.doesNotMatch(ui.el("missionsBody").innerHTML, /Obsolete/);
+});
+
+test("Approvals refreshes automatically without granting consent or losing drafts", async () => {
+  const data = extensionPanel();
+  const oauth = { configured: true, origin: "https://example.invalid", pending: [
+    { id: "request-live", provider: "gemini", clientId: "fixture", redirectUri: "https://client.example.invalid/callback" }] };
+  const ui = await ready(data);
+  await showApprovals(ui, data, oauth);
+  const input = ui.select('[data-oauth-cb="request-live"]')[0];
+  input.value = "https://client.example.invalid/callback?state=typed";
+  const review = ui.select("[data-ext-review]")[0];
+  review.checked = true;
+  await review.fire("change");
+  const unchanged = ui.runTimer(3000);
+  await ui.settle(ui.pending("get_oauth_pending"), oauth);
+  await ui.settle(ui.pending("get_panel_state"), data);
+  await unchanged;
+  assert.equal(ui.select("[data-ext-review]")[0], review);
+  assert.equal(ui.select('[data-oauth-cb="request-live"]')[0].value, input.value);
+  const changed = ui.runTimer(3000);
+  const replacement = extensionPanel(null, { requests: [
+    { ...data.extensions.requests[0], revision: 4, payload: { url: "https://other.example.invalid/mcp" } }] });
+  await ui.settle(ui.pending("get_oauth_pending"), oauth);
+  await ui.settle(ui.pending("get_panel_state"), replacement);
+  await changed;
+  assert.equal(action(ui, "approve").disabled, true);
+  assert.equal(ui.select('[data-oauth-cb="request-live"]')[0].value, input.value);
+  assert.match(ui.el("approvalsBody").innerHTML, /other.example.invalid/);
+  assert.equal(ui.calls.filter((call) => /^(approve_oauth_request|decide_extension_request)$/.test(call.command)).length, 0);
+});
+
+test("Settings diagnostics refresh while open and stop polling after leaving", async () => {
+  const ui = await ready();
+  await ui.el("settingsNavBtn").fire("click");
+  await ui.settle(ui.pending("get_diagnostics"), { oauthKeystore: "Protected", mcpBrowserProfiles: [] });
+  await ui.settle(ui.pending("get_skills_overview"), { skills: [] });
+  const refresh = ui.runTimer(3000);
+  await ui.settle(ui.pending("get_diagnostics"), { oauthKeystore: "Protected", mcpBrowserProfiles: [{}] });
+  await ui.settle(ui.pending("get_skills_overview"), { skills: [{ name: "fixture-skill" }] });
+  await refresh;
+  assert.match(ui.el("skillsAndDiagBox").innerHTML, /fixture-skill/);
+  await ui.select("[data-back]")[0].fire("click");
+  assert.equal(ui.timer(3000), undefined);
+});

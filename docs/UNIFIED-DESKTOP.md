@@ -4,6 +4,20 @@ The configured Agent Bridge desktop application owns the workstation runtime and
 
 The MCP/OAuth listener remains on the configured loopback port (18856 in the example below). The native interface has no separate TCP port. WebView processes and the optional tunnel client are managed components of the application; they do not represent additional independently configured Agent Bridge services.
 
+## Using the desktop interface
+
+The home screen shows the local bridge state, current access mode, workspace, and
+pending activity. The displayed web configuration and tunnel process state do
+not by themselves prove remote connectivity.
+
+Tasks, Approvals, and Settings diagnostics refresh automatically while their
+page is open. The home state refreshes independently. Use the refresh icon for
+an immediate manual read. Automatic reads do not submit approval or extension
+decisions, and unsaved settings and OAuth callback drafts are preserved. An
+updated proposal requires a fresh review. Task Room progress uses the reported
+completed and total steps; it is not estimated. The interface honors the
+system's reduced-motion preference.
+
 ## Choose the operating mode
 
 | Configuration | Owner and operator transport |
