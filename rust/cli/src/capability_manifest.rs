@@ -442,8 +442,7 @@ mod tests {
         fn new() -> Self {
             use std::sync::atomic::{AtomicU64, Ordering};
             static NEXT: AtomicU64 = AtomicU64::new(0);
-            let base=std::fs::canonicalize(std::env::temp_dir()).unwrap();
-            let base=base.to_str().and_then(|s|s.strip_prefix(r"\\?\")).map(PathBuf::from).unwrap_or(base);
+            let base=crate::test_state_base();
             let root=base.join(format!("manifest-{}-{}",std::process::id(),NEXT.fetch_add(1,Ordering::Relaxed)));
             std::fs::create_dir_all(&root).unwrap();
             for path in ["settings","oauth","lifecycle","db","private"] {
@@ -460,7 +459,7 @@ mod tests {
             selected["windows"]["state_root"]=json!(root.join("private/windows"));
             selected["agent_desktop"]["bundle_root"]=json!(root.join("windows-bundle"));
             selected["agent_desktop"]["state_root"]=json!(root.join("private/desktops"));
-            std::fs::write(root.join("settings/unified-v1.json"),selected.to_string()).unwrap();
+            crate::write_private(root.join("settings/unified-v1.json"),selected.to_string());
             drop(agent_bridge_core::CoreDatabase::initialize_new(root.join("db/core.sqlite")).unwrap());
             let context=ManifestContext {
                 workspace:root.join("workspace"),

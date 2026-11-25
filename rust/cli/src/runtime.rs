@@ -26,6 +26,30 @@ pub(crate) type SharedCoreDatabase = Arc<Mutex<CoreDatabase>>;
 
 /// The optional Core connection was qualified once before Task Room startup.
 /// The local operator UI shares this owner instead of reopening a live WAL DB.
+/// Release channel fixed at compile time by the release packager through
+/// `AGENT_BRIDGE_RELEASE_CHANNEL`. Clients cannot change it. Only the exact
+/// `stable` marker reports a production build; any other value, or none,
+/// keeps the conservative development channel.
+pub(crate) fn release_channel() -> (&'static str, bool) {
+    channel_from_marker(option_env!("AGENT_BRIDGE_RELEASE_CHANNEL"))
+}
+
+fn channel_from_marker(marker: Option<&str>) -> (&'static str, bool) {
+    match marker {
+        Some("stable") => ("stable", true),
+        _ => ("development", false),
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn release_channel_is_stable_only_for_the_exact_packager_marker() {
+    assert_eq!(channel_from_marker(Some("stable")), ("stable", true));
+    for marker in [None, Some("development"), Some(""), Some("Stable"), Some("stable "), Some("production")] {
+        assert_eq!(channel_from_marker(marker), ("development", false), "{marker:?}");
+    }
+}
+
 pub(crate) struct WorkstationRuntime {
     pub(crate) router: Router,
     pub(crate) database: Option<SharedCoreDatabase>,
@@ -604,6 +628,7 @@ pub(crate) fn workstation_router(
     // published names + schemas before any bearer request is accepted.
     let count = catalog.len();
     let status_profile = active_profile.clone();
+    let (channel, production) = release_channel();
     handlers.register("agent_bridge_status", move |arguments| {
         if !arguments.is_empty() {
             return Err(ToolDispatchError::invalid_params("status takes no arguments"));
@@ -623,7 +648,7 @@ pub(crate) fn workstation_router(
             "database_schema": if permitted.task_rooms {
                 Some(agent_bridge_core::CURRENT_SCHEMA_VERSION)
             } else { None },
-            "channel":"development","production":false
+            "channel":channel,"production":production
         }).to_string()))
     });
     catalog.push(ToolDefinition::new(
@@ -822,6 +847,7 @@ fn open_qualified(
     let desktop_count = catalog.len() - mission_count;
     let desktop_profile = workspace.as_ref().map(|work| work.profile);
     let version = env!("CARGO_PKG_VERSION");
+    let (channel, production) = release_channel();
     handlers.register("agent_bridge_status", move |arguments| {
         if !arguments.is_empty() {
             return Err(ToolDispatchError::invalid_params("status takes no arguments"));
@@ -830,7 +856,7 @@ fn open_qualified(
             "ok": true, "version": version, "active_backend": "rust",
             "database_schema": agent_bridge_core::CURRENT_SCHEMA_VERSION,
             "vendor_contract": null, "vendor_tools": desktop_count, "desktop_profile": desktop_profile,
-            "channel": "development", "production": false
+            "channel": channel, "production": production
         }).to_string()))
     });
     Ok(McpGateway::new(GatewayConfig::new("agent-bridge", version), catalog, handlers))

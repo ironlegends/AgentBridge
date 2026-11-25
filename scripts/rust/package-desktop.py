@@ -167,6 +167,8 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--out-dir", type=Path, required=True)
     parser.add_argument("--build-dir", type=Path, required=True, help="New isolated Cargo target directory; an existing directory is refused.")
     parser.add_argument("--rust-stdlib-notice")
+    parser.add_argument("--release-channel", choices=COMMON.RELEASE_CHANNELS, default="development",
+                        help="Channel compiled into the status tools; only signed releases use stable.")
     parser.add_argument("--ack-review", action="append", default=[])
     args = parser.parse_args(argv)
     repo, output = args.repo.absolute(), args.out_dir.absolute()
@@ -209,7 +211,8 @@ def main(argv: list[str]) -> int:
         flags = env.get("CARGO_ENCODED_RUSTFLAGS", "").split(chr(31)) if env.get("CARGO_ENCODED_RUSTFLAGS") else env.get("RUSTFLAGS", "").split()
         COMMON.remap_source_root(flags, repo, TARGET, "agent-bridge")
         env["CARGO_ENCODED_RUSTFLAGS"] = chr(31).join(flags)
-        artifact = COMMON.cargo_build_artifact(manifest, TARGET, cargo, env, package_id, args.build_dir.absolute(), False, APP, diagnostics / "build")
+        artifact = COMMON.cargo_build_artifact(manifest, TARGET, cargo, env, package_id, args.build_dir.absolute(), False, APP, diagnostics / "build",
+                                              release_channel=args.release_channel)
         if git_identity(repo) != source or COMMON.rustc_identity(rustc, env) != (compiler, sysroot):
             raise ValueError("source or compiler identity changed during build")
         binary_name, binary = COMMON.verify_binary(artifact, TARGET, APP)
@@ -232,7 +235,8 @@ def main(argv: list[str]) -> int:
         stdlib_path.parent.mkdir(parents=True, exist_ok=True)
         stdlib_path.write_bytes(stdlib)
         build = {"command": "cargo build", "profile": "release", "locked": True, "offline": True,
-                 "isolated_target": True, "target": TARGET, "rustc": compiler}
+                 "isolated_target": True, "target": TARGET, "rustc": compiler,
+                 "release_channel": args.release_channel}
         rust_notices = {"package": APP, "package_id": f"{APP}@{version}", "version": version, "target": TARGET,
                         "build": build, "rustc": compiler, "packages": packages, "sqlite": index.get("sqlite", []),
                         "acknowledged_reviews": acknowledged,

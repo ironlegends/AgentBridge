@@ -162,9 +162,7 @@ mod tests {
     }
     impl Fixture {
         fn new(allow_import: bool) -> Self {
-            let base = std::fs::canonicalize(std::env::temp_dir()).unwrap();
-            let base = base.to_str().and_then(|s|s.strip_prefix(r"\\?\"))
-                .map(PathBuf::from).unwrap_or(base);
+            let base = crate::test_state_base();
             let root = TestRoot(base.join(format!("unified-core-{}-{}",std::process::id(),
                 NEXT.fetch_add(1,Ordering::Relaxed))));
             std::fs::create_dir_all(root.0.join("project")).unwrap();

@@ -8,9 +8,7 @@ const CALLBACK: &str = "https://oauth-redirect.googleusercontent.com/r/native-ca
 struct Fixture { operator: NativeOperator, root: PathBuf, id: String, marker: Value }
 impl Fixture {
     fn new() -> Self {
-        let base = std::fs::canonicalize(std::env::temp_dir()).unwrap();
-        let base = base.to_str().and_then(|s| s.strip_prefix(r"\\?\"))
-            .map(PathBuf::from).unwrap_or(base);
+        let base = crate::test_state_base();
         let root = base.join(format!("native-capability-{}-{}", std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)));
         agent_bridge_lifecycle::initialize_operator_settings(&root).unwrap();
@@ -24,11 +22,11 @@ impl Fixture {
         let marker = json!({"kind":"unified-v1","manifest_sha256":"ab".repeat(32),
             "catalogue_sha256":"cd".repeat(32),"policy_version":1});
         let expires = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as i64 + 60_000;
-        std::fs::write(root.join("requests-workstation").join(format!("{id}.json")),
+        crate::write_private(root.join("requests-workstation").join(format!("{id}.json")),
             serde_json::to_vec(&json!({"id":id,"clientId":format!("gemini_{}", "C".repeat(43)),
                 "redirect":CALLBACK,"scope":"mcp","resource":format!("{ORIGIN}/mcp"),
                 "expires":expires,"bindingHash":"B".repeat(43),"audience":"workstation",
-                "capability":marker})).unwrap()).unwrap();
+                "capability":marker})).unwrap());
         let operator = NativeOperator::new(UiConfig { port: 0, database: None, settings_dir: None,
             oauth_state: Some(root.clone()), oauth_origin: Some(ORIGIN.into()),
             oauth_audience: Some(Audience::Workstation), project: None, open_browser: false,

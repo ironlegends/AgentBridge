@@ -2,6 +2,39 @@
 mod elevation_entry_tests;
 #[cfg(test)]
 mod test_process_fixture;
+
+/// Base directory for synthetic private test state. Unix private-state checks
+/// refuse group or world writable ancestors such as /tmp, so Unix tests use an
+/// owner-only directory under HOME; Windows keeps the temporary directory.
+#[cfg(test)]
+pub(crate) fn test_state_base() -> std::path::PathBuf {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let base = std::path::PathBuf::from(std::env::var_os("HOME").expect("HOME")).join(".ab-embedded-tests");
+        std::fs::create_dir_all(&base).unwrap();
+        std::fs::set_permissions(&base, std::fs::Permissions::from_mode(0o700)).unwrap();
+        base
+    }
+    #[cfg(not(unix))]
+    {
+        let base = std::fs::canonicalize(std::env::temp_dir()).unwrap();
+        base.to_str().and_then(|s| s.strip_prefix(r"\\?\")).map(std::path::PathBuf::from).unwrap_or(base)
+    }
+}
+
+/// Writes synthetic private state with the owner-only mode that the Unix
+/// readers require; on Windows the file inherits the private directory ACL.
+#[cfg(test)]
+pub(crate) fn write_private(path: impl AsRef<std::path::Path>, bytes: impl AsRef<[u8]>) {
+    let path = path.as_ref();
+    std::fs::write(path, bytes).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+}
 // The native elevation broker is compiled but not admitted until relay qualification.
 #[cfg(any(test, windows))]
 #[allow(dead_code)]

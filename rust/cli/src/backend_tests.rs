@@ -118,7 +118,7 @@ fn capability_selection_uses_private_operator_setting_reader() {
     let fixture = Fixture::new();
     let settings = fixture.root.join("settings");
     let expected = b"{\"version\":1,\"policy_version\":1}";
-    fs::write(settings.join("unified-v1.json"), expected).unwrap();
+    crate::write_private(settings.join("unified-v1.json"), expected);
     let actual = agent_bridge_lifecycle::read_operator_setting(&settings, "unified-v1.json")
         .expect("unified selection must use the existing private handle/ACL reader");
     assert_eq!(actual, expected);
