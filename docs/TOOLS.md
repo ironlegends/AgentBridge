@@ -172,3 +172,29 @@ Linux input receipts confirm dispatch (`dispatched: true`, `effect_verified: fal
 | `agent_bridge_project_command` | Runs one fixed-argv diagnostic (`git-branch`, `git-revision`, `git-root`, `git-version`, `rust-version`) whose executable is SHA-256 pinned with `"preapproved": true` in the private `<settings>/commands.json`. Requires active `full-control` or higher. No interactive approval exists; `preapproved: false` always denies. |
 | `desktop_list_allowed_commands` | Lists only the sorted configured command names and whether a private catalogue exists. Executable paths, arguments and secret values are never returned. |
 | `agent_bridge_task_import` | Imports a Task Room task snapshot, identified by its exact context ID, context handle and task ID, into a mission in the same Core database. The source stays unchanged. Requires `"allow_import": true` in the private `unified-v1.json` and an active profile above `read-only`. |
+
+## 11. Upstream Desktop Gateway Compatibility
+
+The 27 desktop tools keep the names of the 27 production tools of the upstream gateway they adapt (DeskMCP 0.9.17, Apache-2.0). Its development-only `desktop_ping`, `desktop_read_test` and `desktop_write_test` are not published.
+
+A comparison of the upstream and Agent Bridge `tools/list` input schemas shows that 23 tools match on parameter names, required fields and accepted values. Four tools differ on purpose:
+
+| Tool | Agent Bridge difference | Reason |
+| --- | --- | --- |
+| `desktop_edit_file` | `observation_id` is required. | An edit must name the read it is based on, so a stale or concurrent change is refused instead of overwritten. |
+| `desktop_move_file` | `source_observation_id` is required. | Same single-use observation rule for the moved source. |
+| `desktop_start_process` | Adds `program` + `args`, with exactly one of `command` or `program`. `shell` also accepts `pwsh`, `powershell`, `cmd`, `sh` and `bash`. | Direct argv runs without shell interpretation. `powershell.exe` and `cmd.exe` remain valid. |
+| `desktop_interact_process` | Adds `eof`; `input` is optional. | Closes stdin with or without a final input. |
+
+`desktop_ui_action.transport` and two `desktop_mcp_manage` enums differ only in JSON Schema form and accept the same values.
+
+Most bounds are stricter:
+- Lease, window and observation IDs are exactly 36 characters.
+- `desktop_number` is at most 128.
+- Artifact IDs are 1 to 128 characters.
+- Extension tool names are at most 193 characters.
+- `oauth_client_secret_env` is at most 128 characters.
+
+Two limits are wider:
+- An extension server `name` may have up to 96 characters (upstream: 64).
+- A process `cwd` may have up to 8192 characters (upstream: 4096).

@@ -227,6 +227,25 @@ mod header_tests {
     }
 
     #[test]
+    fn silent_extension_server_fails_within_the_request_deadline() {
+        // The listener accepts the connection and never answers.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = format!("http://127.0.0.1:{}/mcp", listener.local_addr().unwrap().port());
+        let holder = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            std::thread::sleep(Duration::from_secs(20));
+            drop(stream);
+        });
+        let started = std::time::Instant::now();
+        let error = Session::open(&address, None, &BTreeMap::new()).err().expect("a silent server must fail");
+        let elapsed = started.elapsed();
+        assert!(elapsed >= Duration::from_secs(11), "the deadline must bound the wait, not skip it: {elapsed:?}");
+        assert!(elapsed < Duration::from_secs(18), "the request deadline was not enforced: {elapsed:?}");
+        assert!(!error.to_string().contains("127.0.0.1"), "{error}");
+        drop(holder);
+    }
+
+    #[test]
     fn header_env_missing_injected_and_oversized_values_fail_before_network() {
         let references = BTreeMap::from([("X-Api-Key".into(), "AGENT_BRIDGE_EXTENSION_TEST_KEY".into())]);
         assert!(resolve_headers(&references, |_| None).is_err());
