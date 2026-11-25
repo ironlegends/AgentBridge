@@ -370,13 +370,19 @@ def remap_source_root(flags: list[str], path: Path, target: str, name: str) -> N
         flags.append(f"--remap-path-prefix={spelling}={virtual_source_root(target, name)}")
 
 
+RELEASE_CHANNELS = ("development", "stable")
+
+
 def cargo_build_artifact(
     manifest_path: Path, target: str, cargo: str, env: dict[str, str],
     cargo_package_id: str, target_dir: Path, zigbuild: bool,
     package_name: str = PACKAGE_NAME,
     diagnostics: Path | None = None,
+    release_channel: str = "development",
 ) -> Path:
     """Run one clean, offline release build and bind its compiler-artifact."""
+    if release_channel not in RELEASE_CHANNELS:
+        raise ValueError("release channel must be development or stable")
     cmd = [
         cargo, "zigbuild" if zigbuild else "build",
         "--locked", "--offline", "--release",
@@ -388,6 +394,9 @@ def cargo_build_artifact(
     # Never reuse a pre-existing target/release binary or an arbitrary
     # CARGO_TARGET_DIR supplied by the environment.
     build_env["CARGO_TARGET_DIR"] = str(target_dir)
+    # The status tools report this compile-time channel. Always set it so an
+    # inherited operator variable cannot select it.
+    build_env["AGENT_BRIDGE_RELEASE_CHANNEL"] = release_channel
     # Panic locations can include absolute source paths from Cargo's registry.
     # Use stable release paths in the delivered executable on every platform.
     existing = build_env.get("CARGO_ENCODED_RUSTFLAGS")
@@ -653,6 +662,12 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         help="Explicit Rust target triple (e.g. x86_64-pc-windows-msvc).",
     )
     ap.add_argument(
+        "--release-channel",
+        choices=RELEASE_CHANNELS,
+        default="development",
+        help="Channel compiled into the status tools; only signed releases use stable.",
+    )
+    ap.add_argument(
         "--zigbuild",
         action="store_true",
         help="Use cargo zigbuild instead of cargo build, with the same locked offline release inputs.",
@@ -734,6 +749,7 @@ def main(argv: list[str]) -> int:
         artifact_path = cargo_build_artifact(
             manifest_path, args.target, cargo, tool_env, cargo_package_id,
             build_target_dir, args.zigbuild,
+            release_channel=args.release_channel,
         )
         after_rustc_info, after_sysroot = rustc_identity(rustc, tool_env)
         if after_rustc_info != rustc_info or after_sysroot != sysroot:
@@ -778,6 +794,7 @@ def main(argv: list[str]) -> int:
                 "locked": True,
                 "offline": True,
                 "target": args.target,
+                "release_channel": args.release_channel,
             },
             "rustc": rustc_info,
             "binary": {"name": binary_name, "sha256": sha256_bytes(binary_bytes)},

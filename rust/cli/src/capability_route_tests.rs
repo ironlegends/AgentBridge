@@ -101,9 +101,7 @@ fn fixture_router(unified:bool) -> MissionRouter {
 }
 impl Fixture {
     fn new() -> Self {
-        let base=std::fs::canonicalize(std::env::temp_dir()).unwrap();
-        let base=base.to_str().and_then(|s|s.strip_prefix(r"\\?\"))
-            .map(PathBuf::from).unwrap_or(base);
+        let base=crate::test_state_base();
         let root=TestRoot(base.join(format!("capability-route-{}-{}",std::process::id(),
             NEXT.fetch_add(1,Ordering::Relaxed))));
         agent_bridge_lifecycle::initialize_operator_settings(&root.0).unwrap();

@@ -104,6 +104,7 @@ pub(crate) fn unified_router(
     }
     let identity=manifest.identity()?; let summary=manifest.summary()?;
     let live=profile.clone();
+    let (channel,production)=release_channel();
     handlers.register("agent_bridge_status",move |arguments| {
         if !arguments.is_empty() {return Err(ToolDispatchError::invalid_params("status takes no arguments"));}
         let active=*live.read().map_err(|_|ToolDispatchError::internal("PROFILE_STATE_UNAVAILABLE"))?;
@@ -118,7 +119,7 @@ pub(crate) fn unified_router(
             "project_commands_enabled":processes["project_commands_enabled"],
             "direct_processes_enabled":processes["direct_processes_enabled"],
             "database_schema":agent_bridge_core::CURRENT_SCHEMA_VERSION,
-            "components":summary["components"],"channel":"development","production":false,
+            "components":summary["components"],"channel":channel,"production":production,
         }).to_string()))
     });
     catalogue.push(ToolDefinition::new("agent_bridge_status",
@@ -198,7 +199,7 @@ mod capability_fix_tests {
     #[test]
     fn capability_fix_status_matches_direct_process_startup_minimum() {
         use agent_bridge_gateway::ToolHandler;
-        let root=std::env::temp_dir().join(format!("status-direct-{}",std::process::id()));
+        let root=crate::test_state_base().join(format!("status-direct-{}",std::process::id()));
         std::fs::create_dir_all(root.join("workspace")).unwrap();
         std::fs::create_dir_all(root.join("private")).unwrap();
         agent_bridge_lifecycle::initialize_operator_settings(&root.join("settings")).unwrap();

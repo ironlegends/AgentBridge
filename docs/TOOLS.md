@@ -1,6 +1,6 @@
-# MCP Tool Reference (43 Tools)
+# MCP Tool Reference (46 Tools)
 
-Agent Bridge exposes **16 Mission & Subtask tools** plus **27 Workstation tools** across MCP protocol versions `2025-03-26` and `2025-06-18`.
+Agent Bridge exposes **16 Mission & Subtask tools**, **27 Workstation tools**, **1 pinned project command** and **2 historical utilities** across MCP protocol versions `2025-03-26` and `2025-06-18`. The unified 2.0 workstation publishes all 46 under one sealed catalogue digest.
 
 Only the tools enabled by your local startup profile and explicit CLI flags are published in `tools/list`. The embedded workstation console changes handler admission within that immutable startup catalog; lowering the active profile does not change OAuth authority or tool schemas. `fully-unlocked` retains file-tool confinement and adds direct processes only when explicitly enabled at startup.
 
@@ -33,7 +33,7 @@ Backed by SQLite schema v7 (`contracts/mission-tools-v1.json`). Available in `st
 
 ## 2. Workspace Files & Policy (9 Tools)
 
-All paths are strictly workspace-relative (`..`, absolute paths, symlinks, reparse points, and hard links are rejected).
+By default all paths are strictly workspace-relative (`..`, absolute paths, symlinks, reparse points, and hard links are rejected). A unified workstation whose private `unified-v1.json` selects `"file_scope":{"kind":"os-user"}` also accepts absolute paths to the current OS user's files while the active profile is `fully-unlocked`; the Agent Bridge settings, OAuth, lifecycle and database directories stay refused. Lowering the profile returns the same tools to workspace scope immediately.
 
 | Tool | Profiles | Notes |
 | --- | --- | --- |
@@ -162,3 +162,13 @@ Both adapters expose `desktop_ui_windows`, `desktop_ui_snapshot` and `desktop_ui
 | Linux X11 | Bounded child-window tree, XRes PID ownership and process incarnation | `wait`, centered left `click`, `send_keys` for Enter/Escape/Tab/arrows | Window-owned XComposite pixmap only when already composited and in a supported TrueColor format |
 
 Linux input receipts confirm dispatch (`dispatched: true`, `effect_verified: false`); applications may ignore synthetic events. Neither Unix adapter injects global input, accepts scripts from MCP, changes the selected target, or falls back to a whole-desktop screenshot. Snapshot/action identity changes and expired observations are refused. See [UNIX-PARITY.md](UNIX-PARITY.md).
+
+---
+
+## 10. Project Commands & Historical Utilities (3 Tools)
+
+| Tool | Purpose |
+| --- | --- |
+| `agent_bridge_project_command` | Runs one fixed-argv diagnostic (`git-branch`, `git-revision`, `git-root`, `git-version`, `rust-version`) whose executable is SHA-256 pinned with `"preapproved": true` in the private `<settings>/commands.json`. Requires active `full-control` or higher. No interactive approval exists; `preapproved: false` always denies. |
+| `desktop_list_allowed_commands` | Lists only the sorted configured command names and whether a private catalogue exists. Executable paths, arguments and secret values are never returned. |
+| `agent_bridge_task_import` | Imports a Task Room task snapshot, identified by its exact context ID, context handle and task ID, into a mission in the same Core database. The source stays unchanged. Requires `"allow_import": true` in the private `unified-v1.json` and an active profile above `read-only`. |

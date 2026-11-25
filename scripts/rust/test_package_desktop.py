@@ -56,6 +56,23 @@ class DesktopArchive(unittest.TestCase):
         self.assertTrue(flags)
         self.assertTrue(all(flag.endswith("=C:/agent-bridge-build/cargo") for flag in flags))
 
+    def test_release_channel_is_always_set_by_the_packager_and_validated(self):
+        from unittest import mock
+        seen = []
+        def refuse(cmd, **kwargs):
+            seen.append(kwargs["env"].get("AGENT_BRIDGE_RELEASE_CHANNEL"))
+            raise RuntimeError("stop before any build")
+        inherited = {"AGENT_BRIDGE_RELEASE_CHANNEL": "stable"}
+        with mock.patch.object(PACKAGE.COMMON.subprocess, "run", side_effect=refuse):
+            for channel in ("development", "stable"):
+                with self.assertRaisesRegex(RuntimeError, "stop before any build"):
+                    PACKAGE.COMMON.cargo_build_artifact(self.root / "Cargo.toml", PACKAGE.TARGET, "cargo", inherited,
+                                                        "id", self.root / channel, False, release_channel=channel)
+        self.assertEqual(seen, ["development", "stable"])
+        with self.assertRaisesRegex(ValueError, "development or stable"):
+            PACKAGE.COMMON.cargo_build_artifact(self.root / "Cargo.toml", PACKAGE.TARGET, "cargo", {}, "id",
+                                                self.root / "other", False, release_channel="production")
+
     def test_private_build_paths_are_refused_in_ascii_and_utf16(self):
         private = self.root / "Private-Checkout"
         records = PACKAGE.stage_records(self.stage)
