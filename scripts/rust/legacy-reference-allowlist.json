@@ -1,0 +1,52 @@
+{
+  "NOTICE": [
+    "- Browser behavior adapts DeskMCP 0.9.17, commit"
+  ],
+  "native/agent-bridge-native/Hud.cs": [
+    "// Adapted from DeskMCP control-panel/wpf/AgentDesktopControl.cs (Apache-2.0)."
+  ],
+  "native/agent-bridge-native/NativeApi.cs": [
+    "// Agent Bridge native desktop adapter. Portions adapted from DeskMCP"
+  ],
+  "native/agent-bridge-native/THIRD-PARTY-NOTICES.md": [
+    "the DeskMCP application, gateway, control panel or file-based coordinator.",
+    "`Hud.cs` adapts the window mover and safety overlay from DeskMCP's",
+    "bindings from `agent-desktop-host/Program.cs`. Baseline: DeskMCP 0.9.17,",
+    "included in `notices/DESKMCP-APACHE-2.0.txt`. Agent Bridge supplies the private"
+  ],
+  "rust/cli/src/windows_tools.rs": [
+    "//! The native UI provider owns WinApp directly; no DeskMCP process or endpoint."
+  ],
+  "rust/cli/src/windows_tools/provider.rs": [
+    "if window.is_hud || window.title.starts_with(\"Agent Bridge Agent Desktop\") || window.title.starts_with(\"DeskMCP Agent Desktop\") { return Err(\"UI_SAFETY_HUD_REFUSED\".into()); }"
+  ],
+  "scripts/rust/package-browser-worker.py": [
+    "WORKER_FILES = ['.gitattributes', 'worker.mjs', 'protocol.mjs', 'validation.mjs', 'session.mjs', 'driver.mjs', 'package.json', 'package-lock.json', 'README.md', 'NOTICE', 'notices/DeskMCP-LICENSE']"
+  ],
+  "scripts/rust/package-native-tools.py": [
+    "\"\"\"Package separately pinned native resources; never consult a live DeskMCP app.\"\"\"",
+    "\"DESKMCP-APACHE-2.0.txt\": plain_file(root / \"native/agent-bridge-native/notices/DESKMCP-APACHE-2.0.txt\"),"
+  ],
+  "scripts/rust/source-release.py": [
+    "\"notices/DeskMCP-LICENSE\")),",
+    "\"THIRD-PARTY-NOTICES.md\", \"notices/DESKMCP-APACHE-2.0.txt\","
+  ],
+  "scripts/rust/test_source_release.py": [
+    "\"workers/browser-playwright/notices/DeskMCP-LICENSE\": b\"Apache License fixture\\n\",",
+    "\"native/agent-bridge-native/notices/DESKMCP-APACHE-2.0.txt\": b\"Apache License fixture\\n\","
+  ],
+  "workers/browser-playwright/NOTICE": [
+    "driver.mjs and the compatible browser contract adapt DeskMCP 0.9.17",
+    "e614f938db7f592566384c87a86af2f4ec74cca7, https://github.com/edmen12/deskmcp.",
+    "DeskMCP is licensed under Apache License 2.0; see notices/DeskMCP-LICENSE."
+  ],
+  "workers/browser-playwright/driver.mjs": [
+    "// Adapted from DeskMCP 0.9.17, Apache-2.0. See NOTICE for immutable provenance."
+  ],
+  "workers/browser-playwright/tests/validation.test.mjs": [
+    "test('DeskMCP scroll deltas, duration, text and iframe refs remain usable at their boundaries', () => {"
+  ],
+  "workers/browser-playwright/validation.mjs": [
+    "// Agent Bridge browser contract. DeskMCP 0.9.17 validation provenance: NOTICE."
+  ]
+}

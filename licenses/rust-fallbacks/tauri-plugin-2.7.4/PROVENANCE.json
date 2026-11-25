@@ -1,0 +1,24 @@
+{
+  "crate_sha256": "6c18076d9b04211cb4899387aab97497e8edd0d02cd21710623afcdde27145d1",
+  "license": "Apache-2.0 OR MIT",
+  "package": "tauri-plugin@2.7.4",
+  "registry": "registry+https://github.com/rust-lang/crates.io-index",
+  "source_path": "crates/tauri-plugin",
+  "source_revision": "9319e539f34237035cb4693bed9246660bc0a926",
+  "upstream_notices": [
+    {
+      "file": "LICENSE-APACHE-2.0",
+      "git_blob": "f433b1a53f5b830a205fd2df78e2b34974656c7b",
+      "repository": "tauri-apps/tauri",
+      "revision": "9319e539f34237035cb4693bed9246660bc0a926",
+      "sha256": "0d542e0c8804e39aa7f37eb00da5a762149dc682d7829451287e11b938e94594"
+    },
+    {
+      "file": "LICENSE-MIT",
+      "git_blob": "b08530d59433b3060f4fad8751ac2610c0b0aff3",
+      "repository": "tauri-apps/tauri",
+      "revision": "9319e539f34237035cb4693bed9246660bc0a926",
+      "sha256": "9dd42ea92cff2ede5cd477cbfcce051b2d0115c0ac7f368ee88cb545055dff1d"
+    }
+  ]
+}

@@ -1,0 +1,53 @@
+agent-bridge
+Copyright 2026 Agent Bridge contributors
+
+The root LICENSE file (Apache License, Version 2.0) covers all Agent Bridge
+project source code in this repository, including the Rust crates, scripts,
+contracts, and SQLite schema migrations.
+
+This Apache-2.0 license applies only to Agent Bridge project sources and does
+not relicense the Rust toolchain, the Rust standard library, SQLite, or any
+third-party dependency. Agent Bridge makes no claim of ownership or exclusivity
+over any third-party crate or library; each dependency remains subject to its
+own copyright notices and license terms.
+
+In binary distributions, the accompanying third-party notices under notices/
+identify the dependencies actually linked into the executable:
+
+- The bundled SQLite database engine (SQLite amalgamation) is dedicated to the
+  public domain. This status applies to SQLite itself, not to its Rust bindings
+  or build wrappers.
+- Rust wrappers, binding crates (including rusqlite and libsqlite3-sys when
+  present), and all other third-party crates retain their own license terms as
+  recorded for their specific versions in notices/index.json. Consult the
+  corresponding packaged crate license files; their licenses must not be
+  represented as SQLite public domain or relicensed under Apache-2.0.
+- The official Rust standard-library copyright and third-party attribution
+  document from the toolchain used to build the executable is included as
+  notices/rust-std/COPYRIGHT-library.html. Its SHA-256 and size are recorded in
+  notices/index.json.
+
+Unified desktop distributions also contain independently owned automation
+resources under resources/automation/. Their manifests identify every packaged
+file and its SHA-256; their notices preserve upstream terms and attribution.
+
+- Browser behavior adapts DeskMCP 0.9.17, commit
+  e614f938db7f592566384c87a86af2f4ec74cca7, under Apache-2.0. See
+  workers/browser-playwright/NOTICE and the packaged Browser notices.
+- Native desktop/HUD routines likewise preserve their Apache-2.0 provenance
+  in native/agent-bridge-native/THIRD-PARTY-NOTICES.md.
+- Microsoft WinApp CLI (MIT), VirtualDesktopAccessor (MIT), .NET,
+  Node.js, Playwright, Chromium and their dependencies retain their own
+  notices. The passive-screenshot and background post-message WinApp source
+  patches and their build provenance identify the Agent Bridge modifications;
+  the packaged executable is a derived build. Transitive notices accompany the qualified resources.
+- No user grant, token, cookie, browser profile or machine-specific operator
+  capability is a redistributable release input.
+
+The Windows native desktop distribution also retains original upstream license
+files for specific registry crates whose archives omit them. The WebView2
+loader SDK is separately attributed with the original Microsoft SDK license and
+third-party notices, distinct from the Rust binding license. For each MPL-2.0
+dependency, SOURCE-AVAILABILITY.txt identifies the exact unchanged source
+archive and its locked checksum. The companion MPL source archive is distributed
+with the desktop release. See docs/RELEASE-NOTICES.md for the recorded scope.

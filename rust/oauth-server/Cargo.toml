@@ -1,0 +1,31 @@
+[package]
+name = "agent-bridge-oauth-server"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+publish = false
+description = "Gemini OAuth 2.1 compatibility server logic, without listener or proxy"
+
+[dependencies]
+agent-bridge-oauth-compat = { path = "../oauth-compat" }
+base64 = "0.22"
+fs2 = "0.4"
+getrandom = "0.2"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+sha2 = "0.10"
+subtle = "2"
+thiserror = "2"
+url = "2.5"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Threading",
+] }

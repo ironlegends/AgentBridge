@@ -1,0 +1,223 @@
+{
+  "files": {
+    "excss.4.3.1.nupkg": {
+      "sha256": "9cd9f9f9811aa8a4942e1b43b0898d1329dd53f3079daed5a593541319a8f34a",
+      "sha512": "ZUNhlG7ekZoWwY6a5wu07LwXwDFDECvPgrk5aSMHTFjBOdPruHU1hljVnNwulMc0jvc5sArdyv+QSfUZVvIHIw==",
+      "size": 964343
+    },
+    "microsoft.aspnetcore.app.runtime.win-x64.10.0.13.nupkg": {
+      "sha256": "a0dba5ee37a07a173bc2739f01fee4c530c686e00bf3a3f7508972d6592511f3",
+      "sha512": "/CWAZtcRgPLHRsHm2p7tB/LGZxLd54fbX1H6XOJI4XF13TrkQ0eSXCW70yHE9pR6hsZcl6a+3XHo52RytkeerQ==",
+      "size": 12783840
+    },
+    "microsoft.bcl.asyncinterfaces.1.1.0.nupkg": {
+      "sha256": "4185688dfa9264a6c5f0fe83fda69c7f17ee98c691503f5210441bcf0ef705b7",
+      "sha512": "QnfOJlIz5evxU3Dn1Cz4V0wfznFaiS6tvroTYTbbw2uk14tAkOVSFyk/hCHy64S8/ck0PeQqLV4GuP9bANByPQ==",
+      "size": 92985
+    },
+    "microsoft.debugging.platform.dbgeng.20260319.1511.0.nupkg": {
+      "sha256": "875678516f9ceed4a1c8b9b106d165106fcaa38723ad7c584c47b95b231600de",
+      "sha512": "VM9wbW1JFR8bKNXC65v+LZid30YZZbA8OAQJ8K1OO4Yortqr3zUbU9gMDO/ko9vEXp0++iM6hoZpI9QeBi6NcA==",
+      "size": 21999785
+    },
+    "microsoft.debugging.platform.symsrv.20260319.1511.0.nupkg": {
+      "sha256": "8d24440267581038de0101b36c0d75daf7f063d86f3d6adca61038c236df7ce7",
+      "sha512": "Yd6lFi2qz4ybtgHGclit0vgGw0eBtP7OuQwc/iFIcPBFR2Hm6RAsXylMpEwxyVEmBLniCmQkLswIB7E4PRKKsA==",
+      "size": 2543774
+    },
+    "microsoft.diagnostics.netcore.client.0.2.410101.nupkg": {
+      "sha256": "f860ba99ba1bfa703d9b8d27887109fc66a72d886f031e1156359a7b17239820",
+      "sha512": "hgpQgPeJ2Z9S09xKb1YDFlVje6x5r9QYfRZu3PqS2s8yFfTflA5a3V47yBOyQX1UJgmfHolIwTAs+wZwPygGIw==",
+      "size": 160739
+    },
+    "microsoft.diagnostics.runtime.3.1.512801.nupkg": {
+      "sha256": "9c3134708f685463c4e1a2ac9aaf35a23462cd90bf3a2fb95b837dedb8377380",
+      "sha512": "hCww6vrXZqAUoFk1FIh6G0rshMyoFOwM8LqD078/mr5ulIDEXMBU1vpjHNjWbMU6ukNK4ik6IRbilL5xpxLtMQ==",
+      "size": 882239
+    },
+    "microsoft.diagnostics.runtime.utilities.3.0.442202.nupkg": {
+      "sha256": "e0a9729e88840c544541d18ba4c9d77ab2a7709d5e2e553656e3055ee21f879b",
+      "sha512": "URQNiZPjmQYdjSekZIL8quj4gdTsZAa3a2+nnlTj2CsuOmjjYi3EUPd25BXAvA81lATL6WkGfj74pDo4iDffzQ==",
+      "size": 83800
+    },
+    "microsoft.dotnet.ilcompiler.10.0.13.nupkg": {
+      "sha256": "0d1a1d76813e3d99e880b379cc7f49259bb01c9cd8eacdcb209a12243e7c7a2c",
+      "sha512": "N0hYFEX3bcXO27yi2yJueXNm1ziCqjMSEAbbZwIvPR82tQjPVM8n2IpLED1Jq7ut8ZJlBvTUbn1JK+KYhILlQw==",
+      "size": 94981
+    },
+    "microsoft.extensions.configuration.10.0.5.nupkg": {
+      "sha256": "eab3a6243ec9ceae4c3cb0ddd5a57eee0090c0833d8f873e893d6919e6bf75a2",
+      "sha512": "s5TPJk9GLWnEGsly3swwajC3cOq6TRgD3u1GPvWD2VzPz1Yj4xvgQD3K9/jr0vHlmjKQqn1t7PlueNDPwZBshw==",
+      "size": 188361
+    },
+    "microsoft.extensions.configuration.abstractions.10.0.5.nupkg": {
+      "sha256": "0cd2be94bda3787158c9de37cdf815637d94b2411f43862c4daa73b6e41b630a",
+      "sha512": "wRrCdWTUGqRWFFZ1ctH4wibrvy2svphFSJpg6Utvga8vuR8t5aJmPY+1GXNZYhwCAScu0O+gXyM3/OhaskJc6w==",
+      "size": 146512
+    },
+    "microsoft.extensions.configuration.binder.10.0.5.nupkg": {
+      "sha256": "7151b63445b5ae02df7aafc69e1fd75eacc3c764edf1e72f802001e2e173710a",
+      "sha512": "voqutklFvNVJBxPm0rWzuk0PqNaDSx3511fB4FQ891sXllYKFhzdV2qID3qxOXjiXGzV9yeUtK0AzwYx4iIclw==",
+      "size": 393055
+    },
+    "microsoft.extensions.dependencyinjection.10.0.5.nupkg": {
+      "sha256": "a1f0d18ab515f572d2cf8a24b02a84af004916d02278700215fc99ba41ca1678",
+      "sha512": "Pao7GLMk6Bd0KSCu9Knws7vJUkG0gcZQ6GCm6LGFUldmYSrPSoxoy7fdJAAmxqKDTjJEJQlyO2vATt3X/jKM8A==",
+      "size": 351216
+    },
+    "microsoft.extensions.dependencyinjection.abstractions.10.0.5.nupkg": {
+      "sha256": "2ab3fe844de093ba404db25866c2752c78978f32c0fa7b475bb1bf5468079368",
+      "sha512": "VBjWZ+IvVJLoMfyT6L3DE6hpJQkLsqXGNJ70SuKkWk1Ijx2k19L84rg5ZGkpH10fd0DTDd8bOgmF0HTihvbwuw==",
+      "size": 285669
+    },
+    "microsoft.extensions.logging.10.0.5.nupkg": {
+      "sha256": "e2056b2997e8fd81d92a028db20199658a9aefd5d62bdc0352e8957e0b9457a5",
+      "sha512": "NMCq5DYj4q9Rt7FZKRT1noMLeaBLyBJv8YBTQh+bMkYwg6W07rcLcuLFKZQadSECCaiuYMzyCkyeyf+oNYZBKA==",
+      "size": 229885
+    },
+    "microsoft.extensions.logging.abstractions.10.0.5.nupkg": {
+      "sha256": "7b703f97e208fa7f83eff38fc2377240cd4806d2877c77887659099ae470efbc",
+      "sha512": "64/7OvjzPvfD7xhtFAdMADhTpy3WiXUNDVE8+nNPQ0rWS69FxsCPmDeUbr+qmYj1SQYrgAdSZh5OOc6lKIjj0A==",
+      "size": 822865
+    },
+    "microsoft.extensions.logging.configuration.10.0.5.nupkg": {
+      "sha256": "ca9d1665c0a6f9202430ff54fc1dc383fbf6f36a453176d91d5cc0a7618b1b00",
+      "sha512": "i52eWibcnfdf8xK+CW5Hx7Om4oOetlv0qk8jkS6CPazdAxZY9nA666SkQdJh0qbciNLbDFnMupWRjnrVANpBRQ==",
+      "size": 142168
+    },
+    "microsoft.extensions.logging.console.10.0.5.nupkg": {
+      "sha256": "1297fbd1c3287d58ea290c534e0b2634d456f187291e3e5cf349d7f1c253bf8d",
+      "sha512": "GNfEr/QYsmgkN3IJzQ+Tg94f5VCyFQ83NmSKzu3jpdi8lkShWM+wKqROmOGqIzNMezpBrSWQIy1bIO4lmsGl4Q==",
+      "size": 277178
+    },
+    "microsoft.extensions.options.10.0.5.nupkg": {
+      "sha256": "9f0fa6e955978e6681a99d5a1ff97d491f4ecbad8df5d9a230a96827bf24c6ff",
+      "sha512": "DWMVxmyUy+xqgSwMRAXd7pNa3ptlbb9z4SbEvmKtq2+es0yGWPJv34nlv+X9HLseje3Zy4zuzzqCrMxqHHxSHw==",
+      "size": 497981
+    },
+    "microsoft.extensions.options.configurationextensions.10.0.5.nupkg": {
+      "sha256": "5503cfbebbd8598fd0a668a57ab0b24cd2d57a359e044f661ed19330ec575258",
+      "sha512": "TYXP9ieyQbwDsYaARGzpyw5xuBAX/mjAB/DqGtRVE1WkyMpTf9clOSScMQ++Gegts9cnqXvTRPwfJ0zEdy/RSg==",
+      "size": 132969
+    },
+    "microsoft.extensions.primitives.10.0.5.nupkg": {
+      "sha256": "bafaeeafed1d838cc00107292e49213c0efb493d2d037f84a467439427240be1",
+      "sha512": "QfIpPaeHYggGulNRpRfkFC46i6NU88qYPyN2dkIN/zgz5Y/XhNVTdlaEFJXPPNukQbLKGOc7PFd/NQqXxSEkZA==",
+      "size": 208369
+    },
+    "microsoft.net.illink.tasks.10.0.13.nupkg": {
+      "sha256": "6e342eacd8c44c89a073ad3fa5e706381d8511d214cb2a9a694572f82dfbdfae",
+      "sha512": "0X3X3VG/W+UmO9EiS88KlEQ8wppRe0bctvc5b6qu8tFBxRFfg/NBwriNeR7LMYa0AzNachpvtmkXHE6WyI5zJg==",
+      "size": 1535197
+    },
+    "microsoft.netcore.app.runtime.nativeaot.win-x64.10.0.13.nupkg": {
+      "sha256": "19e7101f30ce8ccba755755fa786a6fa4c1bbb53b711507088bfde534ea4881f",
+      "sha512": "05cbPxBACiyAbBQ5l/OaUfmGDo0lKM4FnODbX1AkrFMs1ZXruYdYb5v8qQmiBypvXpDJQNfE6lA2UXb1ZJHXwA==",
+      "size": 29464561
+    },
+    "microsoft.netcore.app.runtime.win-x64.10.0.13.nupkg": {
+      "sha256": "c66885d464697be75676b4d1fbca38b8806f3af01d65d27205b3f06add094444",
+      "sha512": "55suoRAIf6dVjOdPhHxIElDa2GBoqVZI70bG4zq+f2pHQbGV6yDvztsXdit4pxc3Ea79X0Kfo78Kncjt9NauIQ==",
+      "size": 39979592
+    },
+    "microsoft.win32.systemevents.10.0.5.nupkg": {
+      "sha256": "f8fe7c3b19785b5a171366b5dcc480f1dcd7e281a6ff8231f470d3e99fb21e52",
+      "sha512": "XVIdoMnHzpUuDIAI5YpbVY7DZ6aRtFyOs2PgOhV8+lii941o28H/9kkxwl1wtuEgM8udSwouF21KHPhrujs0mg==",
+      "size": 256286
+    },
+    "microsoft.windows.cswin32.0.3.269.nupkg": {
+      "sha256": "d817fed345bd257e91d2f691c7c62583a0f1b2402c95ef5619f52325eeabecc9",
+      "sha512": "+r47qqTWXOeVrpZmO/ST6vJH00uzt+t14lcMPQlMLmHM/lP69p/ZEALkxMvTbF038v88V3YmTeCwljKWmOci/Q==",
+      "size": 7473229
+    },
+    "microsoft.windows.sdk.net.ref.10.0.19041.57.nupkg": {
+      "sha256": "90b18f2cf7d7a23f5b0bfe2b86d8dda45881481f677ce36eccaf6e9ab50b6b4b",
+      "sha512": "TI9FqukRZSFfSZ6fLh0cjO0X0OIAn5vZKGU/iNzINt3IZeK7o9Y1Dmtp+xwEv696XO1cHMB7aUqTjql3/KY9xg==",
+      "size": 12719136
+    },
+    "microsoft.windows.sdk.win32docs.0.1.42-alpha.nupkg": {
+      "sha256": "e83bf398dceb1957d698d24daa8a23f986beedb0109727a0ee99b229a525230b",
+      "sha512": "/nmzaNfPY3CLP/iEsb2egDnX5Mn0YKF4Hm11PhB/6oH9ko9zR/s483vwP7nDabHDzZ4ZKzrcyFIMRvyeo7Ersg==",
+      "size": 19486529
+    },
+    "microsoft.windows.sdk.win32metadata.69.0.7-preview.nupkg": {
+      "sha256": "22e4fd551f92d67aeab01fe0ca0b8a04035b60514be31a7d0372d8349c816834",
+      "sha512": "DJJNbmpJ+ifyQwuYapdwdTHdDrPoErQLDPE08BPxG2t7CipljAhRcLAwzKXvDJppp0Zf4VzZYZDsbz+5WpQuAw==",
+      "size": 6460839
+    },
+    "microsoft.windows.wdk.win32metadata.0.13.25-experimental.nupkg": {
+      "sha256": "79079a449d8f621052bcaf13039e411d1c1b77aec4a89cf04d96518d0a619617",
+      "sha512": "a+ckO4IT8LbPX1UrlF2R9yKr7/uNFu/stDh6TupyA3A2v/R2CQbNahW1u1DCMn+ueM2Zf3OADc2etel3YgXQfw==",
+      "size": 405497
+    },
+    "microsoft.windowsdesktop.app.runtime.win-x64.10.0.13.nupkg": {
+      "sha256": "af044758d6bc23eca96b60c9ce13b38f211c3e736eef9458de3cadbbd3e20ff2",
+      "sha512": "g8vz2rWeSNYimFNYUqXUy7yVkKJOQycy9ksNt59122iv+y7Y5KrR/PwoSCQgXO3KBJbf4uEdK0LuCr8OaVwQcw==",
+      "size": 39195063
+    },
+    "runtime.win-x64.microsoft.dotnet.ilcompiler.10.0.13.nupkg": {
+      "sha256": "f17052c61a0959ca4416bbc510bb2ee7369770257ec93412ff97a1dcb446b7ad",
+      "sha512": "G5WG/JsgTaqozdSHLFij1Dwi4/OO87itbflthk57/Xxt4xvrnGwm11l3Y1jJJthdT0/pMWNPcdXxCCyw6Ly0Ig==",
+      "size": 11913860
+    },
+    "shimskiasharp.3.7.0.nupkg": {
+      "sha256": "78eaca1fc548e1825333f77761ff00fb724d8a821db036843a1394a84f582499",
+      "sha512": "bvh8CqiwkTxaWiallRGmqUfsGLiA3udbdWmC1tO9/2MIbWEwL5MBun0Hm6jZvYjidWQbRIL5t4JWKqVGFRlA6Q==",
+      "size": 450977
+    },
+    "skiasharp.2.88.9.nupkg": {
+      "sha256": "8d9ff89d55d826daf3f5205feac61cfecd05c52ed178860ce24324ae1652fb6e",
+      "sha512": "Oi/6XgX0XNuA5nNe6UfpHgj/FF/FDHiC511Etq4MLNczQg0VtqQnShhrOnnUY6EnPif/f9eaUdCTclHrtu92HQ==",
+      "size": 7150003
+    },
+    "skiasharp.nativeassets.macos.2.88.9.nupkg": {
+      "sha256": "aaf1ae0268d71a318a33338f06f3fd55645538809219beda3557a353494b7bf8",
+      "sha512": "dM+4ZXRvKRGTUpC/uSRpszHlBBXVq+2odZjr20BJxSr4Sl2u2kHrywu67Gp967Qtg83GyfYc6lXUPHIKeMPrzg==",
+      "size": 6830677
+    },
+    "skiasharp.nativeassets.win32.2.88.9.nupkg": {
+      "sha256": "90fe573391a0c0719f3497dee13db23b934866d885ef50dda74a5dd6f1b957fe",
+      "sha512": "0YvYGUBBx/+3kwLU8b5YTowCToixLLRmmnOMrlUdo9PjkkCHuwqkLTSpADz7NQN9c2N4lOZ9AiI9EAobQhXu7A==",
+      "size": 10918525
+    },
+    "spectre.console.0.54.0.nupkg": {
+      "sha256": "aa5650913e4acc00aa2756cb8013b296af6a3b42fb5c287f458f0bf0f9e4a5c5",
+      "sha512": "c5xBXTYt4tI7/S9u6qpi4TPefouGi+gkN1H8d0AUEK/laz/3U1vE/dEyYV7r5ck3zGz92QgKIqv8I32bzraWJA==",
+      "size": 1749693
+    },
+    "svg.custom.3.7.0.nupkg": {
+      "sha256": "e42198e15b8b8495c4d0ffc59572ad57e034cb55e3a6747ef04d01e391c57cb0",
+      "sha512": "teRLB90k/cVX3B7thrqPaG2Kv6254vLgXtwOkmPcM1bb44TVicVTKW/A7tePYvZlRbZrWSQ4+pZtEx6t5zdOQA==",
+      "size": 1224082
+    },
+    "svg.model.3.7.0.nupkg": {
+      "sha256": "011d22894f25de49bcce3955a524ccff8f39c08dce6b97028bc859925ac667b4",
+      "sha512": "4prDy+Mt8weuBo0riaGH6zRP56caxdm9x3FB9YQClxaVCBsZ+dwyOxR4AqyRkuRAy6TfZKCUy1q+Fk/XbYlqyw==",
+      "size": 525128
+    },
+    "svg.skia.3.7.0.nupkg": {
+      "sha256": "0ab34ff50051f1413a7ac9a491b6249d01a67d7b09fb5fb0a8d85da247724f48",
+      "sha512": "cDt/zcpHl0jLMrI9Ua7/UYiWoQsq26rvH6gTRuYrzj9VqV0/d1Xem5SVj4FvEl76vpAI4SjM00D2JjfO5FNwhg==",
+      "size": 277190
+    },
+    "system.commandline.2.0.5.nupkg": {
+      "sha256": "81abc11f59db5595b9d26884a4343a28a4437c7465173e992d8921d0b396ba0e",
+      "sha512": "f5Wn6OiLmZ3Cj2jR4U/jiSX2V9ZgcTdNCvzLrFNXRboD+w3Bc5lChHBsCFvcmoAW3jsUjHaJI/qBctIGv9Ob5A==",
+      "size": 551727
+    },
+    "system.diagnostics.eventlog.10.0.5.nupkg": {
+      "sha256": "4b099089fe57fd3e1c20f3cd9157fa42cbc0de804b6fce622573646f7193fac5",
+      "sha512": "DBsb89LeAmn4gXktYjZJI+W2TEZgikoYYhQf0JBlAXeWQJIUUo4Mjq5WctixXThSQgeaZ8QmYKOXFjJxu4nZ1A==",
+      "size": 550019
+    },
+    "system.drawing.common.10.0.5.nupkg": {
+      "sha256": "dfd7937f0dff14020824e3e60f082c33ab28449306bd4f7a317a3abea6e32499",
+      "sha512": "Df3vBJZKZMxaeAcdF8oefnAXWNz2rxFNOh3JHiZFaW1SQkJbNpwywUQb8ctL4+5GircnYp7kdRLwRJw59YOSdg==",
+      "size": 3743199
+    }
+  },
+  "runtime_version": "10.0.13",
+  "schema": 1,
+  "sdk_version": "10.0.402",
+  "upstream_commit": "fd7cb6f235fa54dd2c6e26386e65e967a2c8797a"
+}

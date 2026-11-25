@@ -1,0 +1,146 @@
+--- a/src/winapp-CLI/WinApp.Cli/Commands/UiSendKeysCommand.cs
++++ b/src/winapp-CLI/WinApp.Cli/Commands/UiSendKeysCommand.cs
+@@ -45,6 +45,11 @@
+         DefaultValueFactory = _ => "post-message"
+     };
+ 
++    public static Option<bool> NoFocusOption { get; } = new("--no-focus")
++    {
++        Description = "Post directly to a concrete HWND without focusing, activating, or restoring a window. Requires --via post-message."
++    };
++
+     public static Option<bool> VerbatimOption { get; } = new("--verbatim")
+     {
+         Description = "Type the entire keys argument as literal text — no named-key, combo, or vk= interpretation, " +
+@@ -76,6 +81,7 @@
+         Options.Add(SharedUiOptions.WindowOption);
+         Options.Add(TargetOption);
+         Options.Add(ViaOption);
++        Options.Add(NoFocusOption);
+         Options.Add(VerbatimOption);
+         Options.Add(AllowSystemKeysOption);
+         Options.Add(WinAppRootCommand.JsonOption);
+@@ -99,6 +105,7 @@
+             var window = parseResult.GetValue(SharedUiOptions.WindowOption);
+             var target = parseResult.GetValue(TargetOption);
+             var viaStr = parseResult.GetValue(ViaOption) ?? "post-message";
++            var noFocus = parseResult.GetValue(NoFocusOption);
+             var verbatim = parseResult.GetValue(VerbatimOption);
+             var allowSystemKeys = parseResult.GetValue(AllowSystemKeysOption);
+ 
+@@ -125,6 +132,12 @@
+                 logger.LogError("{Symbol} Invalid --via value '{Via}'. Use post-message or send-input.", UiSymbols.Error, viaStr);
+                 UiJsonError.Emit(json, UiJsonError.CodeInvalidArguments,
+                     $"Invalid --via value '{viaStr}'. Use post-message or send-input.");
++                return 1;
++            }
++
++            if (noFocus && transport != KeyTransport.PostMessage)
++            {
++                UiJsonError.Emit(json, UiJsonError.CodeInvalidArguments, "--no-focus requires --via post-message.");
+                 return 1;
+             }
+ 
+@@ -173,12 +186,25 @@
+                         return 1;
+                     }
+ 
+-                    await uiAutomation.FocusAsync(session, element, cancellationToken);
+-                    targetHwnd = element.WindowHandle ?? session.WindowHandle;
++                    if (noFocus)
++                    {
++                        long concrete = await uiAutomation.GetNativeWindowHandleAsync(session, element, cancellationToken);
++                        if (concrete == 0 || concrete == session.WindowHandle)
++                        {
++                            UiJsonError.Emit(json, "background_target_unavailable", "The selected control has no distinct HWND usable without changing focus.");
++                            return 1;
++                        }
++                        targetHwnd = concrete;
++                    }
++                    else
++                    {
++                        await uiAutomation.FocusAsync(session, element, cancellationToken);
++                        targetHwnd = element.WindowHandle ?? session.WindowHandle;
++                    }
+                 }
+ 
+                 // Bring the target window to the foreground so input is routed to it.
+-                if (targetHwnd != 0)
++                if (!noFocus && targetHwnd != 0)
+                 {
+                     Windows.Win32.PInvoke.SetForegroundWindow(
+                         new Windows.Win32.Foundation.HWND((nint)targetHwnd));
+@@ -193,7 +219,7 @@
+                 // reach the control the user sees focused. Falls back to the passed HWND when focus
+                 // can't be resolved. send-input is OS-wide and unaffected, so leave it alone.
+                 var effectiveHwnd = targetHwnd;
+-                if (transport == KeyTransport.PostMessage && targetHwnd != 0)
++                if (!noFocus && transport == KeyTransport.PostMessage && targetHwnd != 0)
+                 {
+                     var focused = systemQuery.GetFocusedWindow(targetHwnd);
+                     if (focused != 0 && focused != targetHwnd)
+@@ -348,6 +374,11 @@
+                    }
+                }
+ 
++               if (noFocus && !NoFocusTargetIsBound(effectiveHwnd, session.WindowHandle, session.ProcessId, systemQuery))
++               {
++                   UiJsonError.Emit(json, "background_target_unavailable", "The target HWND no longer belongs to the observed window and process.");
++                   return 1;
++               }
+                keyboardInput.Send(effectiveHwnd, actions, transport);
+ 
+                if (json)
+@@ -418,6 +449,18 @@
+         internal static bool ShouldWarnPostMessageMayNotDeliver(bool isPostMessage, bool targetLooksXaml)
+             => isPostMessage && targetLooksXaml;
+ 
++        private static bool NoFocusTargetIsBound(long target, long window, int processId, ISystemUiQuery query)
++        {
++            if (target == 0 || window == 0 || processId <= 0)
++            {
++                return false;
++            }
++            var root = query.GetRootWindow(window);
++            return root != 0 && query.GetRootWindow(target) == root &&
++                query.GetProcessIdForWindow(window) == (uint)processId &&
++                query.GetProcessIdForWindow(target) == (uint)processId;
++        }
++
+         private static bool TryParseTransport(string via, out KeyTransport transport)
+         {
+             switch (via.ToLowerInvariant().Replace("_", "-"))
+--- a/src/winapp-CLI/WinApp.Cli/Services/UiAutomationService.cs
++++ b/src/winapp-CLI/WinApp.Cli/Services/UiAutomationService.cs
+@@ -874,6 +874,20 @@
+         // supplies the live UIA COM mechanics.
+         ValueSetter.Apply(new ComValueSetStrategy(comElement, _logger), element, text);
+         return Task.CompletedTask;
++    }
++
++    public Task<long> GetNativeWindowHandleAsync(UiSessionInfo session, UiElement element, CancellationToken ct)
++    {
++        ct.ThrowIfCancellationRequested();
++        var comElement = ResolveComElement(session, element);
++        if (comElement is null)
++        {
++            return Task.FromResult(0L);
++        }
++        // CsWin32 returns a native HWND wrapper: preserve its pointer width and
++        // signed bit pattern; the command revalidates its root and PID in User32.
++        var hwnd = comElement.get_CurrentNativeWindowHandle();
++        return Task.FromResult(unchecked((long)(nint)hwnd));
+     }
+ 
+     public Task FocusAsync(UiSessionInfo session, UiElement element, CancellationToken ct)
+--- a/src/winapp-CLI/WinApp.Cli/Services/IUiAutomationService.cs
++++ b/src/winapp-CLI/WinApp.Cli/Services/IUiAutomationService.cs
+@@ -51,6 +51,8 @@
+     Task<RecordCaptureResult> RecordAsync(UiSessionInfo session, string? elementId, RecordOptions options, CancellationToken ct, Action? onRecordingStarted = null);
+     Task<string> InvokeAsync(UiSessionInfo session, UiElement element, CancellationToken ct);
+     Task SetValueAsync(UiSessionInfo session, UiElement element, string text, CancellationToken ct);
++    /// <summary>Read the control's native HWND without focus or activation; unsupported backends return zero.</summary>
++    Task<long> GetNativeWindowHandleAsync(UiSessionInfo session, UiElement element, CancellationToken ct) => Task.FromResult(0L);
+     Task FocusAsync(UiSessionInfo session, UiElement element, CancellationToken ct);
+     Task ScrollIntoViewAsync(UiSessionInfo session, UiElement element, CancellationToken ct);
+     Task ScrollContainerAsync(UiSessionInfo session, UiElement element, string? direction, string? to, CancellationToken ct);

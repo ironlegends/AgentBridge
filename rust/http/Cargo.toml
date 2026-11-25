@@ -1,0 +1,13 @@
+[package]
+name = "agent-bridge-http"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "Local IPv4 loopback MCP HTTP transport for agent-bridge"
+
+[dependencies]
+axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }
+http-body-util = "0.1"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1.38", features = ["net", "rt", "sync", "time"] }

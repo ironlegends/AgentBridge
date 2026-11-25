@@ -1,0 +1,34 @@
+[package]
+name = "agent-bridge"
+version = "2.0.0"
+edition = "2021"
+license = "Apache-2.0"
+publish = false
+
+[dependencies]
+getrandom = "0.2"
+agent-bridge-import = { path = "../import" }
+agent-bridge-oauth-server = { path = "../oauth-server" }
+axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }
+agent-bridge-web-launch = { path = "../web-launch" }
+agent-bridge-commands = { path = "../commands" }
+agent-bridge-extensions = { path = "../extensions" }
+serde = { version = "1", features = ["derive"] }
+agent-bridge-lifecycle = { path = "../lifecycle" }
+agent-bridge-core = { path = "../core" }
+agent-bridge-gateway = { path = "../gateway" }
+serde_json = "1"
+regex = "1.12"
+sha2 = "0.10"
+agent-bridge-missions = { path = "../missions" }
+agent-bridge-desktop = { path = "../desktop" }
+agent-bridge-http = { path = "../http" }
+tokio = { version = "1", features = ["rt-multi-thread", "signal", "net", "time", "sync", "macros"] }
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_Threading", "Win32_System_JobObjects", "Win32_System_Pipes", "Win32_System_IO", "Win32_Security_Authorization"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+x11rb = { version = "0.14", features = ["res", "composite"] }

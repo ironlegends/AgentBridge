@@ -1,0 +1,171 @@
+--- a/src/winapp-CLI/WinApp.Cli/NativeMethods.txt
++++ b/src/winapp-CLI/WinApp.Cli/NativeMethods.txt
+@@ -47,6 +47,7 @@
+ DBG_EXCEPTION_NOT_HANDLED
+ GetShortPathName
+ IUIAutomation
++IUIAutomation2
+ CUIAutomation8
+ IUIAutomationElement
+ IUIAutomationCondition
+--- a/src/winapp-CLI/WinApp.Cli/Commands/SharedUiOptions.cs
++++ b/src/winapp-CLI/WinApp.Cli/Commands/SharedUiOptions.cs
+@@ -21,6 +21,7 @@
+     public static Argument<string?> ValueArgument { get; }
+     public static Option<bool> CaptureScreenOption { get; }
+     public static Option<bool> FocusOption { get; }
++    public static Option<bool> NoFocusOption { get; }
+     public static Option<bool> InteractiveOption { get; }
+     public static Option<bool> HideDisabledOption { get; }
+     public static Option<bool> HideOffscreenOption { get; }
+@@ -85,6 +86,11 @@
+             Description = "Capture from screen DC via BitBlt (includes popups/overlays not owned by the target)."
+         };
+ 
++        NoFocusOption = new Option<bool>("--no-focus")
++        {
++            Description = "Disable UI Automation automatic focus before semantic actions."
++        };
++
+         FocusOption = new Option<bool>("--focus")
+         {
+             Description = "Bring the target window to the foreground before capture. Already implied by --capture-screen."
+--- a/src/winapp-CLI/WinApp.Cli/Commands/UiInvokeCommand.cs
++++ b/src/winapp-CLI/WinApp.Cli/Commands/UiInvokeCommand.cs
+@@ -24,6 +24,7 @@
+         Arguments.Add(SharedUiOptions.SelectorArgument);
+         Options.Add(SharedUiOptions.AppOption);
+         Options.Add(SharedUiOptions.WindowOption);
++        Options.Add(SharedUiOptions.NoFocusOption);
+ 
+         Options.Add(WinAppRootCommand.JsonOption);
+     }
+@@ -41,6 +42,7 @@
+             var selectorStr = parseResult.GetValue(SharedUiOptions.SelectorArgument);
+             var app = parseResult.GetValue(SharedUiOptions.AppOption);
+             var window = parseResult.GetValue(SharedUiOptions.WindowOption);
++            var noFocus = parseResult.GetValue(SharedUiOptions.NoFocusOption);
+ 
+             if (string.IsNullOrWhiteSpace(app) && window is null)
+             {
+@@ -56,6 +58,10 @@
+ 
+             try
+             {
++                if (noFocus)
++                {
++                    uiAutomation.DisableAutoFocus();
++                }
+                 var session = await sessionService.ResolveSessionAsync(app, window, cancellationToken);
+                 var selector = selectorService.Parse(selectorStr);
+                 var element = await uiAutomation.FindSingleElementAsync(session, selector, cancellationToken);
+--- a/src/winapp-CLI/WinApp.Cli/Commands/UiSetValueCommand.cs
++++ b/src/winapp-CLI/WinApp.Cli/Commands/UiSetValueCommand.cs
+@@ -27,6 +27,7 @@
+         Arguments.Add(SharedUiOptions.ValueArgument);
+         Options.Add(SharedUiOptions.AppOption);
+         Options.Add(SharedUiOptions.WindowOption);
++        Options.Add(SharedUiOptions.NoFocusOption);
+ 
+         Options.Add(WinAppRootCommand.JsonOption);
+     }
+@@ -44,6 +45,7 @@
+             var selectorStr = parseResult.GetValue(SharedUiOptions.SelectorArgument);
+             var app = parseResult.GetValue(SharedUiOptions.AppOption);
+             var window = parseResult.GetValue(SharedUiOptions.WindowOption);
++            var noFocus = parseResult.GetValue(SharedUiOptions.NoFocusOption);
+ 
+             if (string.IsNullOrWhiteSpace(app) && window is null)
+             {
+@@ -67,6 +69,10 @@
+ 
+             try
+             {
++                if (noFocus)
++                {
++                    uiAutomation.DisableAutoFocus();
++                }
+                 var session = await sessionService.ResolveSessionAsync(app, window, cancellationToken);
+                 var selector = selectorService.Parse(selectorStr);
+                 var element = await uiAutomation.FindSingleElementAsync(session, selector, cancellationToken);
+--- a/src/winapp-CLI/WinApp.Cli/Commands/UiScrollCommand.cs
++++ b/src/winapp-CLI/WinApp.Cli/Commands/UiScrollCommand.cs
+@@ -49,6 +49,7 @@
+         Arguments.Add(SharedUiOptions.SelectorArgument);
+         Options.Add(SharedUiOptions.AppOption);
+         Options.Add(SharedUiOptions.WindowOption);
++        Options.Add(SharedUiOptions.NoFocusOption);
+         Options.Add(WinAppRootCommand.JsonOption);
+         Options.Add(DirectionOption);
+         Options.Add(ToOption);
+@@ -73,6 +74,7 @@
+             var selectorStr = parseResult.GetValue(SharedUiOptions.SelectorArgument);
+             var app = parseResult.GetValue(SharedUiOptions.AppOption);
+             var window = parseResult.GetValue(SharedUiOptions.WindowOption);
++            var noFocus = parseResult.GetValue(SharedUiOptions.NoFocusOption);
+ 
+             if (string.IsNullOrWhiteSpace(app) && window is null)
+             {
+@@ -83,6 +85,11 @@
+             var direction = parseResult.GetValue(DirectionOption);
+             var to = parseResult.GetValue(ToOption);
+             var wheel = parseResult.GetValue(WheelOption);
++            if (noFocus && wheel is not null)
++            {
++                UiJsonError.Emit(json, UiJsonError.CodeInvalidArguments, "--no-focus only supports semantic scrolling.");
++                return 1;
++            }
+ 
+             if (string.IsNullOrWhiteSpace(selectorStr))
+             {
+@@ -109,6 +116,10 @@
+ 
+             try
+             {
++                if (noFocus)
++                {
++                    uiAutomation.DisableAutoFocus();
++                }
+                 var session = await sessionService.ResolveSessionAsync(app, window, cancellationToken);
+                 var selector = selectorService.Parse(selectorStr);
+                 var element = await uiAutomation.FindSingleElementAsync(session, selector, cancellationToken);
+--- a/src/winapp-CLI/WinApp.Cli/Services/UiAutomationService.cs
++++ b/src/winapp-CLI/WinApp.Cli/Services/UiAutomationService.cs
+@@ -24,7 +24,7 @@
+ internal sealed partial class UiAutomationService : IUiAutomationService
+ {
+     private readonly ILogger<UiAutomationService> _logger;
+-    private readonly IUIAutomation _automation;
++    private readonly IUIAutomation2 _automation;
+     private readonly ISelectorService _selectorService;
+ 
+     internal static Func<UiAutomationService, UiSessionInfo, IUIAutomationElement?> s_getRootElement = (service, session) => service.GetRootElementCore(session);
+@@ -62,7 +62,16 @@
+     {
+         _logger = logger;
+         _selectorService = selectorService;
+-        _automation = CUIAutomation8.CreateInstance<IUIAutomation>();
++        _automation = CUIAutomation8.CreateInstance<IUIAutomation2>();
++    }
++
++    public void DisableAutoFocus()
++    {
++        _automation.put_AutoSetFocus(false);
++        if (_automation.get_AutoSetFocus())
++        {
++            throw new InvalidOperationException("UI Automation auto-focus could not be disabled.");
++        }
+     }
+ 
+     public List<(nint Hwnd, int Pid, string Title)> FindWindowsByTitle(string titleQuery)
+--- a/src/winapp-CLI/WinApp.Cli/Services/IUiAutomationService.cs
++++ b/src/winapp-CLI/WinApp.Cli/Services/IUiAutomationService.cs
+@@ -12,6 +12,8 @@
+ /// </summary>
+ internal interface IUiAutomationService
+ {
++    void DisableAutoFocus() => throw new NotSupportedException("UI Automation auto-focus control is unavailable.");
++
+     /// <summary>
+     /// Find all top-level windows matching a partial title. Returns (HWND, PID, Title) tuples.
+     /// Uses Win32 enumeration to find ALL windows including inactive/background ones.

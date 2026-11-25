@@ -1,0 +1,42 @@
+[workspace]
+
+[package]
+name = "agent-bridge-desktop-app"
+version = "2.0.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "Native Tauri v2 desktop control panel for Agent Bridge"
+publish = false
+
+[lib]
+name = "agent_bridge_desktop_app_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2.7", features = [] }
+
+[dependencies]
+# custom-protocol selects Tauri's production context. Without it, the
+# generated context embeds the checkout directory (dev-mode config_parent).
+tauri = { version = "2.12", features = ["tray-icon", "image-png", "custom-protocol"] }
+tauri-plugin-single-instance = "2"
+tauri-plugin-dialog = "2.8"
+tauri-plugin-opener = "2.7"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+url = "2"
+sha2 = "0.10"
+zeroize = "1"
+tokio = { version = "1", features = ["time"] }
+agent-bridge-runtime = { package = "agent-bridge", path = "../../rust/cli" }
+agent-bridge-core = { path = "../../rust/core" }
+agent-bridge-missions = { path = "../../rust/missions" }
+agent-bridge-desktop = { path = "../../rust/desktop" }
+agent-bridge-extensions = { path = "../../rust/extensions" }
+agent-bridge-lifecycle = { path = "../../rust/lifecycle" }
+agent-bridge-oauth-server = { path = "../../rust/oauth-server" }
+[target.'cfg(windows)'.dependencies]
+windows = { version = "=0.62.2", features = ["Win32_Foundation", "Win32_System_Com", "Win32_System_Variant", "Win32_System_Ole", "Win32_System_TaskScheduler", "Win32_System_Threading", "Win32_Security", "Win32_Security_Authorization", "Win32_Security_Cryptography", "Win32_System_JobObjects", "Win32_System_Console", "Win32_Storage_FileSystem"] }
+
+[dev-dependencies]
+glob = "0.3"

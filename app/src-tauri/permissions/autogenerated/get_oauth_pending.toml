@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-get-oauth-pending"
+description = "Enables the get_oauth_pending command without any pre-configured scope."
+commands.allow = ["get_oauth_pending"]
+
+[[permission]]
+identifier = "deny-get-oauth-pending"
+description = "Denies the get_oauth_pending command without any pre-configured scope."
+commands.deny = ["get_oauth_pending"]

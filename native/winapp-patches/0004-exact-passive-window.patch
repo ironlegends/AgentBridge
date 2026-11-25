@@ -1,0 +1,191 @@
+--- a/src/winapp-CLI/WinApp.Cli/Commands/UiScreenshotCommand.cs
++++ b/src/winapp-CLI/WinApp.Cli/Commands/UiScreenshotCommand.cs
+@@ -17,6 +17,10 @@
+ internal class UiScreenshotCommand : Command, IShortDescription
+ {
+     public string ShortDescription => "Capture a screenshot of a window or element";
++    internal static readonly Option<bool> ExactPassiveOption = new("--exact-passive")
++    {
++        Description = "Capture only an explicit HWND, without window discovery, activation, restoration or screen capture."
++    };
+ 
+     public UiScreenshotCommand()
+         : base("screenshot", "Capture the target window or element as a PNG image. " +
+@@ -31,6 +35,7 @@
+         Options.Add(SharedUiOptions.OutputOption);
+         Options.Add(SharedUiOptions.CaptureScreenOption);
+         Options.Add(SharedUiOptions.FocusOption);
++        Options.Add(ExactPassiveOption);
+     }
+ 
+     public class Handler(
+@@ -56,11 +61,19 @@
+             var output = parseResult.GetValue(SharedUiOptions.OutputOption);
+             var captureScreen = parseResult.GetValue(SharedUiOptions.CaptureScreenOption);
+             var focus = parseResult.GetValue(SharedUiOptions.FocusOption);
++            var exactPassive = parseResult.GetValue(ExactPassiveOption);
++            if (exactPassive && (window is null or <= 0 || !string.IsNullOrWhiteSpace(app) ||
++                !string.IsNullOrEmpty(selector) || focus || captureScreen))
++            {
++                UiJsonError.Emit(json, UiJsonError.CodeInvalidArguments,
++                    "Exact passive capture requires only an explicit window and prohibits focus or screen capture.");
++                return 1;
++            }
+ 
+             try
+             {
+                 // Screenshot handles multi-window discovery itself (avoids duplicate warning from session resolution)
+-                if (selector is null)
++                if (selector is null && !exactPassive)
+                 {
+                     var allWindows = DiscoverAllWindows(app, window);
+                     if (allWindows is not null && allWindows.Count > 1)
+@@ -78,9 +91,16 @@
+ 
+                 // Single window capture (or element crop)
+                 var singleSession = await sessionService.ResolveSessionAsync(app, window, cancellationToken);
++                if (exactPassive && (!singleSession.IsExplicitWindow ||
++                    singleSession.WindowHandle != window!.Value ||
++                    singleSession.ProcessId <= 0 ||
++                    systemQuery.GetProcessIdForWindow(singleSession.WindowHandle) != (uint)singleSession.ProcessId))
++                {
++                    throw new InvalidOperationException("Passive window capture target changed.");
++                }
+ 
+                 // Even for single-window session, check for owned dialogs
+-                if (selector is null)
++                if (selector is null && !exactPassive)
+                 {
+                     var sessionHwnd = (nint)singleSession.WindowHandle;
+                     var ownedWindows = ownedWindowFinder.FindOwnedWindows([(sessionHwnd, singleSession.ProcessId, singleSession.WindowTitle ?? "")]);
+@@ -96,6 +116,10 @@
+                 }
+ 
+                 var (pixels, w, h) = await uiAutomation.ScreenshotAsync(singleSession, selector, captureScreen, focus, cancellationToken);
++                if (exactPassive && systemQuery.GetProcessIdForWindow(singleSession.WindowHandle) != (uint)singleSession.ProcessId)
++                {
++                    throw new InvalidOperationException("Passive window capture target changed.");
++                }
+                 var pngBytes = EncodePng(pixels, w, h);
+ 
+                 var filePath = output ?? "screenshot.png";
+--- a/src/winapp-CLI/WinApp.Cli/Services/UiAutomationService.Screenshot.cs
++++ b/src/winapp-CLI/WinApp.Cli/Services/UiAutomationService.Screenshot.cs
+@@ -34,30 +34,45 @@
+     {
+         _logger.LogDebug("Taking screenshot of process {Pid} (captureScreen={CaptureScreen}, focus={Focus})", session.ProcessId, captureScreen, focus);
+ 
+-        var root = GetRootElement(session);
+-        if (root is null)
+-        {
+-            throw new InvalidOperationException($"No UIA window found for {session.ProcessName} (PID {session.ProcessId}).");
+-        }
+-
+-        // Get the actual window title from UIA (not session cache, which may be stale)
+-        var rootName = SafeGetBstr(() => root.get_CurrentName());
+-        if (rootName is not null)
+-        {
+-            session.WindowTitle = rootName;
+-        }
+-
+-        var hwnd = root.get_CurrentNativeWindowHandle();
+-        if (hwnd.IsNull && session.WindowHandle != 0)
+-        {
+-            // UIA element may lack a native handle (e.g. Electron content pane),
+-            // but the session already has a validated HWND from -w flag or window enumeration.
++        // A whole-window passive capture of a qualified explicit HWND must
++        // not resolve a replacement UIA root or discover another window.
++        bool exactPassive = session.IsExplicitWindow && string.IsNullOrEmpty(elementId) && !focus && !captureScreen;
++        IUIAutomationElement? root = null;
++        Windows.Win32.Foundation.HWND hwnd;
++        var query = new SystemUiQuery();
++        if (exactPassive)
++        {
++            VerifyExactPassiveTarget(session, query);
+             hwnd = new Windows.Win32.Foundation.HWND((nint)session.WindowHandle);
+-            _logger.LogDebug("UIA element has no native handle; using session HWND {Hwnd}", session.WindowHandle);
+-        }
+-        if (hwnd.IsNull)
+-        {
+-            throw new InvalidOperationException($"No native window handle for {session.ProcessName}. Is the window visible?");
++        }
++        else
++        {
++            root = GetRootElement(session);
++            if (root is null)
++            {
++                throw new InvalidOperationException($"No UIA window found for {session.ProcessName} (PID {session.ProcessId}).");
++            }
++
++            // Get the actual window title from UIA (not session cache, which may be stale)
++            var rootName = SafeGetBstr(() => root.get_CurrentName());
++            if (rootName is not null)
++            {
++                session.WindowTitle = rootName;
++            }
++
++            hwnd = root.get_CurrentNativeWindowHandle();
++            if (hwnd.IsNull && session.WindowHandle != 0)
++            {
++                // UIA element may lack a native handle (e.g. Electron content pane),
++                // but the session already has a validated HWND from -w flag or window enumeration.
++                hwnd = new Windows.Win32.Foundation.HWND((nint)session.WindowHandle);
++                _logger.LogDebug("UIA element has no native handle; using session HWND {Hwnd}", session.WindowHandle);
++            }
++            if (hwnd.IsNull)
++            {
++                throw new InvalidOperationException($"No native window handle for {session.ProcessName}. Is the window visible?");
++            }
++
+         }
+ 
+         // Check if window is minimized
+@@ -72,7 +87,10 @@
+         }
+ 
+         // Get window dimensions
+-        Windows.Win32.PInvoke.GetWindowRect(hwnd, out var rect);
++        if (!Windows.Win32.PInvoke.GetWindowRect(hwnd, out var rect))
++        {
++            throw new InvalidOperationException("Passive window capture target changed.");
++        }
+         var width = rect.right - rect.left;
+         var height = rect.bottom - rect.top;
+ 
+@@ -125,10 +143,19 @@
+             pixelData = CaptureFromWindowWithBlankRetry(hwnd, width, height);
+         }
+ 
++        if (exactPassive)
++        {
++            VerifyExactPassiveTarget(session, query);
++            if (IsBlankCapture(pixelData))
++            {
++                throw new InvalidOperationException("Passive window capture is unavailable; focus was not changed.");
++            }
++        }
++
+         // If a selector was provided, crop to the element's bounding rectangle
+         if (!string.IsNullOrEmpty(elementId))
+         {
+-            var cropped = CropToElement(pixelData, width, height, elementId, session, root, cropOriginLeft, cropOriginTop);
++            var cropped = CropToElement(pixelData, width, height, elementId, session, root!, cropOriginLeft, cropOriginTop);
+             if (cropped is not null)
+             {
+                 return cropped.Value;
+@@ -138,6 +165,15 @@
+         return (pixelData, width, height);
+     }
+ 
++
++    internal static void VerifyExactPassiveTarget(UiSessionInfo session, ISystemUiQuery query)
++    {
++        if (!session.IsExplicitWindow || session.WindowHandle <= 0 || session.ProcessId <= 0 ||
++            query.GetProcessIdForWindow(session.WindowHandle) != (uint)session.ProcessId)
++        {
++            throw new InvalidOperationException("Passive window capture target changed.");
++        }
++    }
+ 
+     private static unsafe Windows.Win32.Foundation.RECT GetVisibleWindowRect(
+         Windows.Win32.Foundation.HWND hwnd,

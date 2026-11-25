@@ -1,0 +1,42 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Agent Bridge",
+  "version": "2.0.0",
+  "identifier": "io.github.ironlegends.agentbridge",
+  "build": {
+    "frontendDist": "../ui"
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [
+      {
+        "label": "main",
+        "title": "Agent Bridge",
+        "width": 356,
+        "height": 516,
+        "minWidth": 340,
+        "minHeight": 490,
+        "maxWidth": 420,
+        "maxHeight": 680,
+        "resizable": true,
+        "decorations": false,
+        "skipTaskbar": true,
+        "center": false,
+        "visible": false
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self' ipc: http://ipc.localhost"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.ico"
+    ]
+  }
+}

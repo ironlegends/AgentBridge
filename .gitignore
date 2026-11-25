@@ -1,0 +1,8 @@
+/target/
+*.pdb
+handoffs/
+rust/cli/src/browser_docs/output/
+app/src-tauri/target/
+app/src-tauri/gen/schemas/
+
+/scripts/rust/__pycache__/

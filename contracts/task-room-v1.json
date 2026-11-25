@@ -1,0 +1,169 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "properties": {
+    "action": {
+      "enum": [
+        "context_create",
+        "context_discover",
+        "context_reattach",
+        "create",
+        "list",
+        "get",
+        "checkpoint",
+        "block",
+        "resume",
+        "final_review",
+        "complete"
+      ],
+      "type": "string"
+    },
+    "completed_step_ids": {
+      "items": {
+        "type": "string"
+      },
+      "maxItems": 12,
+      "type": "array"
+    },
+    "completion_conditions": {
+      "items": {
+        "maxLength": 4096,
+        "type": "string"
+      },
+      "maxItems": 64,
+      "type": "array"
+    },
+    "confirm_label": {
+      "maxLength": 256,
+      "type": "string"
+    },
+    "context_handle": {
+      "maxLength": 256,
+      "type": "string"
+    },
+    "context_id": {
+      "maxLength": 64,
+      "type": "string"
+    },
+    "context_label": {
+      "maxLength": 256,
+      "type": "string"
+    },
+    "current_step_id": {
+      "type": "string"
+    },
+    "device": {
+      "maxLength": 256,
+      "type": "string"
+    },
+    "goal": {
+      "maxLength": 16384,
+      "type": "string"
+    },
+    "limit": {
+      "maximum": 200,
+      "minimum": 1,
+      "type": "integer"
+    },
+    "missing_checks": {
+      "items": {
+        "maxLength": 4096,
+        "type": "string"
+      },
+      "maxItems": 64,
+      "type": "array"
+    },
+    "open_risks": {
+      "items": {
+        "maxLength": 4096,
+        "type": "string"
+      },
+      "maxItems": 64,
+      "type": "array"
+    },
+    "project": {
+      "maxLength": 256,
+      "type": "string"
+    },
+    "review_status": {
+      "enum": [
+        "pass",
+        "failed"
+      ],
+      "type": "string"
+    },
+    "step_id": {
+      "type": "string"
+    },
+    "step_status": {
+      "enum": [
+        "pending",
+        "in_progress",
+        "completed"
+      ],
+      "type": "string"
+    },
+    "steps": {
+      "items": {
+        "properties": {
+          "id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "type": "string"
+          },
+          "phase": {
+            "enum": [
+              "check",
+              "execute",
+              "verify",
+              "closeout"
+            ],
+            "type": "string"
+          },
+          "title": {
+            "maxLength": 512,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "title"
+        ],
+        "type": "object"
+      },
+      "maxItems": 12,
+      "type": "array"
+    },
+    "summary": {
+      "maxLength": 8192,
+      "type": "string"
+    },
+    "task_id": {
+      "type": "string"
+    },
+    "task_status": {
+      "enum": [
+        "active",
+        "blocked",
+        "completed"
+      ],
+      "type": "string"
+    },
+    "title": {
+      "maxLength": 512,
+      "type": "string"
+    },
+    "verified_facts": {
+      "items": {
+        "maxLength": 4096,
+        "type": "string"
+      },
+      "maxItems": 64,
+      "type": "array"
+    }
+  },
+  "required": [
+    "action"
+  ],
+  "type": "object"
+}

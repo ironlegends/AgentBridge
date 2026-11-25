@@ -1,0 +1,892 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Agent Bridge - Operator Console</title>
+<style>
+  :root {
+    --bg: #0b1020;
+    --panel: #121a2e;
+    --panel-alt: #18233d;
+    --border: #253457;
+    --text: #e6edf7;
+    --muted: #93a4c3;
+    --accent: #4f8cff;
+    --accent-soft: rgba(79, 140, 255, 0.16);
+    --ok: #22c55e;
+    --ok-soft: rgba(34, 197, 94, 0.15);
+    --warn: #f59e0b;
+    --warn-soft: rgba(245, 158, 11, 0.16);
+    --danger: #ef4444;
+    --danger-soft: rgba(239, 68, 68, 0.16);
+    --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: var(--sans);
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.5;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+  }
+  header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    padding: 14px 24px;
+    background: var(--panel);
+    border-bottom: 1px solid var(--border);
+    flex-wrap: wrap;
+  }
+  .brand {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+  .brand-dot {
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    background: var(--ok);
+    box-shadow: 0 0 10px var(--ok);
+  }
+  .brand h1 {
+    margin: 0;
+    font-size: 1.05rem;
+    font-weight: 700;
+    letter-spacing: 0.01em;
+  }
+  .brand small {
+    color: var(--muted);
+    font-size: 0.78rem;
+    display: block;
+  }
+  .header-actions {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+  }
+  .pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 10px;
+    border-radius: 999px;
+    font-size: 0.78rem;
+    font-weight: 600;
+    border: 1px solid var(--border);
+    background: var(--panel-alt);
+    color: var(--muted);
+  }
+  .pill.ok { color: var(--ok); background: var(--ok-soft); border-color: rgba(34,197,94,0.35); }
+  .pill.warn { color: var(--warn); background: var(--warn-soft); border-color: rgba(245,158,11,0.35); }
+  .pill.danger { color: var(--danger); background: var(--danger-soft); border-color: rgba(239,68,68,0.35); }
+  .pill.accent { color: var(--accent); background: var(--accent-soft); border-color: rgba(79,140,255,0.4); }
+
+  nav {
+    display: flex;
+    gap: 6px;
+    padding: 10px 24px 0;
+    background: var(--panel);
+    border-bottom: 1px solid var(--border);
+    overflow-x: auto;
+  }
+  nav button {
+    background: transparent;
+    border: none;
+    color: var(--muted);
+    padding: 10px 16px;
+    font-size: 0.9rem;
+    font-weight: 600;
+    cursor: pointer;
+    border-bottom: 2px solid transparent;
+    transition: color 0.15s, border-color 0.15s;
+    white-space: nowrap;
+  }
+  nav button:hover { color: var(--text); }
+  nav button.active {
+    color: var(--accent);
+    border-bottom-color: var(--accent);
+  }
+
+  main {
+    flex: 1;
+    max-width: 1240px;
+    width: 100%;
+    margin: 0 auto;
+    padding: 24px;
+  }
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+    gap: 16px;
+    margin-bottom: 20px;
+  }
+  .card {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 18px;
+    margin-bottom: 16px;
+  }
+  .card h2 {
+    margin: 0 0 10px;
+    font-size: 1rem;
+    font-weight: 700;
+  }
+  .card h3 {
+    margin: 0 0 6px;
+    font-size: 0.9rem;
+    color: var(--muted);
+    font-weight: 600;
+  }
+  .stat-value {
+    font-size: 1.75rem;
+    font-weight: 700;
+    margin: 4px 0;
+  }
+  .muted { color: var(--muted); font-size: 0.86rem; }
+  code, pre {
+    font-family: var(--mono);
+    font-size: 0.82rem;
+  }
+  pre {
+    margin: 8px 0 0;
+    padding: 12px;
+    background: #080c18;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    overflow-x: auto;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+  .btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 7px 14px;
+    border-radius: 8px;
+    border: 1px solid var(--border);
+    background: var(--panel-alt);
+    color: var(--text);
+    font-size: 0.85rem;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  .btn:hover { border-color: var(--accent); }
+  .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+  .proposal-review summary { cursor: pointer; color: var(--accent); }
+  .proposal-review pre { max-height: 320px; overflow: auto; }
+  .oauth-link { color: var(--accent); overflow-wrap: anywhere; }
+  .btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .btn.ok { background: var(--ok-soft); border-color: rgba(34,197,94,0.45); color: var(--ok); }
+  .btn.danger { background: var(--danger-soft); border-color: rgba(239,68,68,0.45); color: var(--danger); }
+  .btn.sm { padding: 4px 10px; font-size: 0.78rem; }
+
+  input[type="text"], input[type="password"] {
+    width: 100%;
+    padding: 9px 12px;
+    border-radius: 8px;
+    border: 1px solid var(--border);
+    background: #080c18;
+    color: var(--text);
+    font-family: var(--mono);
+    font-size: 0.85rem;
+  }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.87rem;
+  }
+  th, td {
+    text-align: left;
+    padding: 10px 8px;
+    border-bottom: 1px solid var(--border);
+    vertical-align: top;
+  }
+  th { color: var(--muted); font-weight: 600; font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.04em; }
+  .row-actions { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  .cmd-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 12px;
+    padding: 10px 12px;
+    background: #080c18;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    margin-bottom: 8px;
+  }
+  .cmd-row code { overflow-x: auto; }
+  .banner {
+    padding: 12px 16px;
+    border-radius: 10px;
+    margin-bottom: 16px;
+    border: 1px solid var(--border);
+    background: var(--panel-alt);
+    font-size: 0.88rem;
+  }
+  .banner.error { border-color: rgba(239,68,68,0.5); background: var(--danger-soft); color: #fecaca; }
+  .banner.ok { border-color: rgba(34,197,94,0.5); background: var(--ok-soft); color: #bbf7d0; }
+  .profile-choices {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(145px, 1fr));
+    gap: 8px;
+    margin-top: 14px;
+  }
+  .profile-choices .btn { justify-content: center; min-height: 42px; }
+  .profile-choices .btn[aria-pressed="true"] {
+    color: var(--accent);
+    border-color: var(--accent);
+    background: var(--accent-soft);
+  }
+  .hidden { display: none !important; }
+  .token-gate {
+    max-width: 520px;
+    margin: 48px auto;
+  }
+  .split {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(360px, 1fr));
+    gap: 16px;
+  }
+</style>
+</head>
+<body>
+<header>
+  <div class="brand">
+    <div class="brand-dot" id="healthDot"></div>
+    <div>
+      <h1>Agent Bridge Operator Console</h1>
+      <small id="subTitle">Loopback-only local control plane</small>
+    </div>
+  </div>
+  <div class="header-actions">
+    <span class="pill accent" id="versionPill">v2</span>
+    <span class="pill ok" id="guardPill">Loopback + 256-bit Token</span>
+    <button class="btn sm" id="refreshBtn" type="button">Refresh</button>
+  </div>
+</header>
+
+<nav id="tabNav" class="hidden">
+  <button type="button" data-tab="overview" class="active">Overview</button>
+  <button type="button" data-tab="missions">Missions &amp; Task Rooms</button>
+  <button type="button" data-tab="oauth">OAuth 2.1 Approvals</button>
+  <button type="button" data-tab="extensions">Extensions &amp; Skills</button>
+  <button type="button" data-tab="diagnostics">Profiles &amp; Diagnostics</button>
+</nav>
+
+<main>
+  <div id="toast" class="banner hidden"></div>
+
+  <section id="tokenGate" class="card token-gate">
+    <h2>Operator Session Token Required</h2>
+    <p class="muted">
+      Paste the per-session token printed by <code>agent-bridge ui</code> in your local terminal.
+      The token is kept in page memory only and never sent outside loopback.
+    </p>
+    <div style="margin: 14px 0;">
+      <input id="tokenInput" type="password" placeholder="64-hex operator session token" autocomplete="off">
+    </div>
+    <button class="btn primary" id="tokenSubmit" type="button">Unlock Operator Console</button>
+  </section>
+
+  <section id="profileControl" class="card hidden" aria-live="polite"></section>
+  <section id="tab-overview" class="tab-panel hidden"></section>
+  <section id="tab-missions" class="tab-panel hidden"></section>
+  <section id="tab-oauth" class="tab-panel hidden"></section>
+  <section id="tab-extensions" class="tab-panel hidden"></section>
+  <section id="tab-diagnostics" class="tab-panel hidden"></section>
+</main>
+
+<script>
+(function () {
+  "use strict";
+  let sessionToken = "";
+  let activeTab = "overview";
+  let oauthPollTimer = null;
+  let oauthPollRequest = "";
+  let oauthPollDeadline = 0;
+  let profilePollTimer = null;
+  let profileRequestVersion = 0;
+  let profileBusy = false;
+  let profileSnapshot = null;
+
+  const $ = (id) => document.getElementById(id);
+
+  function escapeHtml(val) {
+    return String(val ?? "")
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;")
+      .replace(/'/g, "&#39;");
+  }
+
+  function showToast(msg, kind) {
+    const el = $("toast");
+    el.textContent = msg;
+    el.className = "banner " + (kind === "error" ? "error" : "ok");
+    el.classList.remove("hidden");
+    clearTimeout(el._t);
+    el._t = setTimeout(() => el.classList.add("hidden"), 6000);
+  }
+
+  async function api(path, method, payload) {
+    const opts = {
+      method: method || "GET",
+      headers: { "X-Agent-Bridge-Token": sessionToken },
+      cache: "no-store",
+    };
+    if (payload !== undefined) {
+      opts.headers["Content-Type"] = "application/json";
+      opts.body = JSON.stringify(payload);
+    }
+    const res = await fetch(path, opts);
+    const data = await res.json().catch(() => ({ error: "INVALID_RESPONSE" }));
+    if (!res.ok) {
+      throw new Error(data.message || data.error || ("HTTP " + res.status));
+    }
+    return data;
+  }
+
+  function copyText(text) {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(() => showToast("Copied to clipboard.", "ok"));
+    } else {
+      showToast("Copy manually: " + text, "ok");
+    }
+  }
+
+  function statusBadge(status) {
+    const s = String(status || "").toLowerCase();
+    const cls = (s === "active" || s === "approved" || s === "completed" || s === "pass" || s === "true")
+      ? "ok"
+      : (s === "pending" || s === "blocked")
+        ? "warn"
+        : (s === "refused" || s === "failed" || s === "unsupported" || s === "false")
+          ? "danger"
+          : "";
+    return '<span class="pill ' + cls + '">' + escapeHtml(status) + "</span>";
+  }
+
+  const PROFILE_CHOICES = [
+    ["read-only", "Read only"],
+    ["workspace-write", "Workspace write"],
+    ["full-control", "Full control"],
+    ["fully-unlocked", "Fully unlocked"],
+  ];
+
+  function profileLabel(profile) {
+    const choice = PROFILE_CHOICES.find(([value]) => value === profile);
+    return choice ? choice[1] : String(profile || "Unknown");
+  }
+
+  function renderProfile(snapshot, error) {
+    const panel = $("profileControl");
+    panel.classList.remove("hidden");
+    if (error) {
+      panel.innerHTML = '<h2>Live Workstation Profile</h2><div class="banner error">' +
+        escapeHtml(error) + '</div><p class="muted">Profile controls are unavailable until status can be confirmed.</p>';
+      return;
+    }
+    if (!snapshot || !snapshot.configured) {
+      panel.innerHTML = '<h2>Live Workstation Profile</h2><span class="pill">Standalone console</span>' +
+        '<p class="muted">' + escapeHtml(snapshot && snapshot.message ||
+          "This console is not attached to a live workstation.") + "</p>";
+      return;
+    }
+    const allowed = snapshot.available_profiles || [];
+    const buttons = PROFILE_CHOICES.map(([value, label]) => {
+      const available = allowed.includes(value);
+      return '<button type="button" class="btn" data-profile="' + value +
+        '" aria-pressed="' + (snapshot.active_profile === value ? "true" : "false") + '"' +
+        ((!available || profileBusy) ? " disabled" : "") +
+        (!available ? ' title="Above this workstation session\'s startup authorization"' : "") +
+        ">" + label + "</button>";
+    }).join("");
+    panel.innerHTML =
+      '<div class="row-actions" style="justify-content:space-between;">' +
+        '<h2 style="margin:0;">Live Workstation Profile</h2>' +
+        '<span class="pill accent">' + escapeHtml(profileLabel(snapshot.active_profile)) + "</span>" +
+      '</div><p class="muted">' +
+        (profileBusy ? "Applying the selected profile..." :
+          "Changes apply to the running workstation session. Startup limit: " + escapeHtml(profileLabel(snapshot.max_profile)) + ".") +
+      '</p><div class="profile-choices" role="group" aria-label="Workstation session profile">' + buttons + "</div>";
+    panel.querySelectorAll("[data-profile]").forEach((button) => {
+      button.addEventListener("click", () => changeProfile(button.getAttribute("data-profile")));
+    });
+  }
+
+  async function refreshProfile() {
+    clearTimeout(profilePollTimer);
+    if (!sessionToken || profileBusy) return;
+    const version = ++profileRequestVersion;
+    try {
+      const snapshot = await api("/api/profile");
+      if (version !== profileRequestVersion) return;
+      profileSnapshot = snapshot;
+      renderProfile(snapshot);
+    } catch (error) {
+      if (version === profileRequestVersion) renderProfile(null, error.message);
+    } finally {
+      if (version === profileRequestVersion && sessionToken && (!profileSnapshot || profileSnapshot.configured)) {
+        profilePollTimer = setTimeout(refreshProfile, 5000);
+      }
+    }
+  }
+
+  async function changeProfile(profile) {
+    if (profileBusy || !profileSnapshot || !profileSnapshot.configured) return;
+    if (!(profileSnapshot.available_profiles || []).includes(profile)) return;
+    profileBusy = true;
+    ++profileRequestVersion; // Ignore status reads issued before this change.
+    clearTimeout(profilePollTimer);
+    renderProfile(profileSnapshot);
+    try {
+      const snapshot = await api("/api/profile", "POST", { profile });
+      profileSnapshot = snapshot;
+      showToast("Active workstation profile: " + profileLabel(snapshot.active_profile) + ".", "ok");
+    } catch (error) {
+      showToast("Profile change failed: " + error.message, "error");
+    } finally {
+      profileBusy = false;
+      await refreshProfile();
+    }
+  }
+
+  async function loadOverview() {
+    const data = await api("/api/overview");
+    $("versionPill").textContent = "v" + data.version + " (" + data.os + "/" + data.arch + ")";
+    $("subTitle").textContent = "Listening on " + data.listen + " - loopback only";
+
+    const dbCount = data.database && data.database.counts && data.database.counts.missions
+      ? data.database.counts.missions.total : "-";
+    const trCount = data.database && data.database.counts ? data.database.counts.task_rooms : "-";
+    const oauthPending = data.oauth && data.oauth.configured && data.oauth.pending_count !== undefined
+      ? data.oauth.pending_count : "-";
+    const extPending = data.extensions && data.extensions.configured && data.extensions.pending_count !== undefined
+      ? data.extensions.pending_count : "-";
+    const skillCount = data.skills && data.skills.installed_count !== null && data.skills.installed_count !== undefined
+      ? data.skills.installed_count : "-";
+
+    const cmds = data.quickstart_commands || {};
+    let cmdHtml = "";
+    for (const [label, cmd] of Object.entries(cmds)) {
+      cmdHtml += '<div class="cmd-row"><div><div class="muted">' + escapeHtml(label) + "</div><code>" +
+        escapeHtml(cmd) + '</code></div><button class="btn sm" data-copy="' + escapeHtml(cmd) + '">Copy</button></div>';
+    }
+
+    $("tab-overview").innerHTML =
+      '<div class="grid">' +
+        '<div class="card"><h3>Durable Missions</h3><div class="stat-value">' + escapeHtml(dbCount) + '</div><div class="muted">' +
+          (data.database.configured ? escapeHtml(data.database.path || "") : "Pass --database to inspect") + "</div></div>" +
+        '<div class="card"><h3>Task Rooms</h3><div class="stat-value">' + escapeHtml(trCount) + '</div><div class="muted">Workspace-bound tasks</div></div>' +
+        '<div class="card"><h3>Pending OAuth 2.1</h3><div class="stat-value">' + escapeHtml(oauthPending) + '</div><div class="muted">' +
+          (data.oauth.configured ? escapeHtml(data.oauth.audience || "") : "Pass --oauth-* flags") + "</div></div>" +
+        '<div class="card"><h3>Pending Extensions</h3><div class="stat-value">' + escapeHtml(extPending) + '</div><div class="muted">Installed skills: ' + escapeHtml(skillCount) + "</div></div>" +
+      "</div>" +
+      '<div class="card"><h2>Quickstart CLI Commands</h2><p class="muted">Pre-filled from your current operator paths. Copy into your local terminal.</p>' + cmdHtml + "</div>";
+
+    $("tab-overview").querySelectorAll("[data-copy]").forEach((btn) => {
+      btn.addEventListener("click", () => copyText(btn.getAttribute("data-copy")));
+    });
+  }
+
+  async function loadMissions() {
+    const data = await api("/api/missions");
+    if (!data.configured) {
+      $("tab-missions").innerHTML = '<div class="card"><h2>Missions &amp; Task Rooms</h2><p class="muted">' + escapeHtml(data.message) + "</p></div>";
+      return;
+    }
+    if (data.needs_migration) {
+      $("tab-missions").innerHTML = '<div class="card"><h2>Migration Required</h2><p class="muted">Database schema v' +
+        escapeHtml(data.schema_version) + " has " + escapeHtml(data.pending_migrations) +
+        " pending migrations. Run <code>agent-bridge db migrate</code> first.</p></div>";
+      return;
+    }
+
+    const missionsRows = (data.missions || []).map((m) => {
+      const cps = (m.recent_checkpoints || []).map((cp) =>
+        "<div><code>r" + escapeHtml(cp.revision) + "</code> " + escapeHtml(cp.summary) + "</div>"
+      ).join("") || '<span class="muted">No checkpoints</span>';
+      return "<tr><td><code>" + escapeHtml(m.mission_id) + "</code></td><td>" + statusBadge(m.status) +
+        "</td><td>r" + escapeHtml(m.revision) + "</td><td>" + escapeHtml(m.goal) +
+        "</td><td>" + cps + "</td><td class=\"muted\">" + escapeHtml(m.updated_at) + "</td></tr>";
+    }).join("") || '<tr><td colspan="6" class="muted">No missions recorded yet.</td></tr>';
+
+    const trRows = (data.task_rooms || []).map((t) =>
+      "<tr><td><code>" + escapeHtml(t.task_id) + "</code></td><td>" + statusBadge(t.status) +
+      "</td><td><strong>" + escapeHtml(t.title) + '</strong><div class="muted">' + escapeHtml(t.summary || t.goal) + "</div>" +
+      (t.blocked_reason ? '<div class="pill danger" style="margin-top:4px;">Blocked: ' + escapeHtml(t.blocked_reason) + "</div>" : "") +
+      "</td><td>" + escapeHtml(t.steps_completed) + "/" + escapeHtml(t.steps_total) +
+      "</td><td>r" + escapeHtml(t.revision) + '</td><td class="muted">' + escapeHtml(t.updated_at) + "</td></tr>"
+    ).join("") || '<tr><td colspan="6" class="muted">No Task Rooms recorded yet.</td></tr>';
+
+    $("tab-missions").innerHTML =
+      '<div class="card"><h2>Durable Missions (' + escapeHtml((data.missions || []).length) + ')</h2>' +
+        '<p class="muted">Read-only SQLite v' + escapeHtml(data.schema_version) + " snapshot (" + escapeHtml(data.path) + "). Secret context handles are strictly excluded.</p>" +
+        "<table><thead><tr><th>ID</th><th>Status</th><th>Rev</th><th>Goal</th><th>Recent Checkpoints</th><th>Updated</th></tr></thead><tbody>" +
+        missionsRows + "</tbody></table></div>" +
+      '<div class="card"><h2>Task Rooms (' + escapeHtml(data.total_task_rooms || 0) + ")</h2>" +
+        "<table><thead><tr><th>Task ID</th><th>Status</th><th>Title / Summary</th><th>Steps</th><th>Rev</th><th>Updated</th></tr></thead><tbody>" +
+        trRows + "</tbody></table></div>";
+  }
+
+  async function loadOAuth() {
+    const data = await api("/api/oauth");
+    if (!data.configured) {
+      $("tab-oauth").innerHTML = '<div class="card"><h2>Inbound OAuth 2.1 Approvals</h2><p class="muted">' + escapeHtml(data.message) + "</p></div>";
+      return;
+    }
+
+    const rows = (data.pending || []).map((req) =>
+      '<div class="card" style="background:var(--panel-alt);">' +
+        '<div class="row-actions" style="justify-content:space-between;margin-bottom:8px;">' +
+          '<div><strong>' + escapeHtml(req.provider.toUpperCase()) + "</strong> <code>" + escapeHtml(req.client_id) + "</code></div>" +
+          statusBadge(req.audience) +
+        "</div>" +
+        '<div class="muted">Request ID: <code>' + escapeHtml(req.id) + "</code></div>" +
+        '<div class="muted">Resource: <code>' + escapeHtml(req.resource) + "</code> | Scope: <code>" + escapeHtml(req.scope) + "</code></div>" +
+        '<details><summary>Contract: ' + escapeHtml((req.capability || {}).kind || "legacy") +
+          '</summary><pre>' + escapeHtml(JSON.stringify(req.capability || {kind:"legacy"}, null, 2)) + "</pre></details>" +
+        '<div class="muted" style="margin-top:6px;">Requested Callback: <code>' + escapeHtml(req.redirect_uri) + "</code></div>" +
+        '<div style="margin-top:10px;"><label class="muted">Paste exact callback URI shown in ChatGPT/Gemini client UI to confirm:</label>' +
+          '<input type="text" data-cb-for="' + escapeHtml(req.id) + '" placeholder="' + escapeHtml(req.redirect_uri) + '" style="margin-top:4px;"></div>' +
+        '<div class="row-actions" style="margin-top:10px;">' +
+          '<button class="btn ok" data-approve-oauth="' + escapeHtml(req.id) + '">Approve This Exact Request</button>' +
+        "</div>" +
+      "</div>"
+    ).join("") || '<p class="muted">No pending OAuth 2.1 authorization requests.</p>';
+
+    $("tab-oauth").innerHTML =
+      '<div class="card">' +
+        '<div class="row-actions" style="justify-content:space-between;margin-bottom:10px;">' +
+          '<div><h2>Inbound OAuth 2.1 Control (' + escapeHtml(data.audience) + ')</h2><div class="muted">Origin: <code>' + escapeHtml(data.public_origin) + "</code></div></div>" +
+          '<button class="btn primary" id="enrollOauthBtn" type="button">Enable 10-Min Enrollment Window</button>' +
+        "</div>" +
+        rows +
+      "</div>";
+
+    const enrollBtn = $("enrollOauthBtn");
+    if (enrollBtn) {
+      enrollBtn.addEventListener("click", async () => {
+        try {
+          const res = await api("/api/oauth/enroll", "POST", { confirm: "APPROVE" });
+          showToast("OAuth enrollment enabled for 10 minutes (expires " + res.expires_epoch_ms + ").", "ok");
+        } catch (err) {
+          showToast(err.message, "error");
+        }
+      });
+    }
+
+    $("tab-oauth").querySelectorAll("[data-approve-oauth]").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        const id = btn.getAttribute("data-approve-oauth");
+        const input = $("tab-oauth").querySelector('[data-cb-for="' + id + '"]');
+        const redirect_uri = input ? input.value.trim() : "";
+        if (!redirect_uri) {
+          showToast("Paste the exact callback URI from the ChatGPT/Gemini UI first.", "error");
+          return;
+        }
+        try {
+          const reviewed = (data.pending || []).find((request) => request.id === id);
+          if (!reviewed) throw new Error("Request changed. Refresh before approving.");
+          await api("/api/oauth/approve", "POST", { request_id: id, redirect_uri, confirm: "APPROVE",
+            capability: reviewed.capability || {kind:"legacy"} });
+          showToast("Approved OAuth request " + id + ".", "ok");
+          await loadOAuth();
+        } catch (err) {
+          showToast(err.message, "error");
+        }
+      });
+    });
+  }
+
+  function oauthOperationActive(operation) {
+    return operation && (operation.status === "starting" || operation.status === "awaiting_authorization");
+  }
+
+  function renderOAuthOperation(operation) {
+    if (!operation) return "";
+    const active = oauthOperationActive(operation);
+    const result = operation.result || {};
+    const approved = operation.status === "completed" && result.decision === "approved";
+    const failed = operation.status === "failed" || (operation.status === "completed" && !approved);
+    let message = active ? "Preparing the authorization request." :
+      approved ? "OAuth authorization approved and recorded." :
+      (operation.error || ("Authorization was not approved: " + (result.reason || result.decision || "unknown result")));
+    let link = "";
+    if (active && operation.auth_url) {
+      // Metadata validation allows HTTPS and literal loopback HTTP only.
+      try {
+        const url = new URL(operation.auth_url);
+        const allowed = url.protocol === "https:" ||
+          (url.protocol === "http:" && (url.hostname === "127.0.0.1" || url.hostname === "[::1]"));
+        if (allowed && !url.username && !url.password) {
+          message = "Open the provider page to authorize this request. The callback window lasts " +
+            operation.callback_timeout_seconds + " seconds.";
+          link = '<p><a class="oauth-link" href="' + escapeHtml(url.href) +
+            '" target="_blank" rel="noopener noreferrer">Open authorization page</a></p>' +
+            '<p class="muted oauth-link">' + escapeHtml(url.href) + "</p>";
+        }
+      } catch (_) {}
+      if (!link) message = "The authorization address is invalid. Inspect the extension configuration.";
+    }
+    if (active && oauthPollRequest === operation.request_id && Date.now() >= oauthPollDeadline) {
+      message += " Automatic tracking has paused. Use Refresh to inspect the current operation.";
+    }
+    return '<div class="card"><h2>Outbound OAuth Authorization</h2>' +
+      '<div class="banner ' + (failed ? "error" : approved ? "ok" : "") + '">' +
+      escapeHtml(message) + '</div><div class="muted">Request: <code>' +
+      escapeHtml(operation.request_id) + "</code> " + statusBadge(operation.status) + "</div>" +
+      link + "</div>";
+  }
+
+  function scheduleOAuthPoll(operation) {
+    clearTimeout(oauthPollTimer);
+    oauthPollTimer = null;
+    if (!oauthOperationActive(operation)) return;
+    if (oauthPollRequest !== operation.request_id) {
+      oauthPollRequest = operation.request_id;
+      // The engine bounds metadata requests, its 120-second callback wait,
+      // callback reads and token exchange. Pausing UI polling never retries it.
+      oauthPollDeadline = Date.now() + 240000;
+    }
+    if (activeTab !== "extensions" || Date.now() >= oauthPollDeadline) return;
+    oauthPollTimer = setTimeout(() => {
+      if (activeTab === "extensions") {
+        loadExtensionsAndSkills().catch((err) => showToast(err.message, "error"));
+      }
+    }, 1000);
+  }
+
+  async function loadExtensionsAndSkills() {
+    const [ext, skills] = await Promise.all([
+      api("/api/extensions"),
+      api("/api/skills").catch((err) => ({ configured: false, message: "Skills unavailable: " + err.message })),
+    ]);
+    const operationActive = oauthOperationActive(ext.oauth_operation);
+
+    let extHtml = "";
+    if (!ext.configured) {
+      extHtml = '<div class="card"><h2>MCP Extensions</h2><p class="muted">' + escapeHtml(ext.message) + "</p></div>";
+    } else {
+      const serverRows = (ext.servers || []).map((s) => {
+        const oauthInfo = ext.outbound_oauth && ext.outbound_oauth[s.id];
+        const oauthBadge = oauthInfo
+          ? (oauthInfo.token_status && oauthInfo.token_status.token_stored ? statusBadge("token_stored") : statusBadge("oauth_configured"))
+          : '<span class="muted">None</span>';
+        return "<tr><td><code>" + escapeHtml(s.id) + "</code></td><td>" + statusBadge(s.enabled ? "active" : "disabled") +
+          "</td><td><code>" + escapeHtml(s.endpoint || "") + "</code></td><td>" + oauthBadge + "</td></tr>";
+      }).join("") || '<tr><td colspan="4" class="muted">No configured MCP extension servers.</td></tr>';
+
+      const reqRows = (ext.requests || []).map((r) => {
+        const isPending = r.decision === "pending";
+        const server = (ext.servers || []).find((candidate) => candidate.id === r.name);
+        const endpoint = (r.payload && r.payload.url) || (server && server.endpoint) || "Not configured";
+        const review =
+          '<details class="proposal-review"><summary>Review exact proposal</summary>' +
+            '<p class="muted">Request: <code>' + escapeHtml(r.request_id) + "</code></p>" +
+            '<p class="muted">Endpoint: <code>' + escapeHtml(endpoint) + "</code></p>" +
+            "<pre>" + escapeHtml(JSON.stringify(r.payload || {}, null, 2)) + "</pre>" +
+            '<p class="muted">Secret environment fields identify references only; values are never loaded into this view.</p>' +
+            (isPending ?
+              '<label class="muted"><input type="checkbox" data-review-ext="' + escapeHtml(r.request_id) +
+                '"' + (operationActive ? " disabled" : "") + '> I reviewed this exact endpoint and proposal.</label>' +
+              '<div class="row-actions" style="margin-top:10px;">' +
+                '<button class="btn ok sm" data-ext-decide="approve" data-req="' + escapeHtml(r.request_id) + '" disabled>Approve</button>' +
+                '<button class="btn danger sm" data-ext-decide="refuse" data-req="' + escapeHtml(r.request_id) + '"' +
+                  (operationActive ? " disabled" : "") + '>Refuse</button>' +
+              "</div>" :
+              '<p class="muted">' + escapeHtml(r.reason || "finalized") + "</p>") +
+          "</details>";
+        return "<tr><td><code>" + escapeHtml(String(r.request_id).slice(0, 12)) + "...</code></td><td>" +
+          escapeHtml(r.action) + "</td><td><code>" + escapeHtml(r.name) + "</code></td><td>" +
+          statusBadge(r.decision) + "</td><td>" + review + "</td></tr>";
+      }).join("") || '<tr><td colspan="5" class="muted">No extension proposals in journal.</td></tr>';
+
+      extHtml =
+        '<div class="card"><h2>MCP Extension Servers (' + escapeHtml((ext.servers || []).length) + ')</h2>' +
+          "<table><thead><tr><th>Server</th><th>State</th><th>Endpoint</th><th>Outbound OAuth</th></tr></thead><tbody>" +
+          serverRows + "</tbody></table></div>" +
+        '<div class="card"><h2>Extension Proposals (' + escapeHtml(ext.pending_count || 0) + " pending)</h2>" +
+          "<table><thead><tr><th>Request</th><th>Action</th><th>Server</th><th>Status</th><th>Operator Action</th></tr></thead><tbody>" +
+          reqRows + "</tbody></table></div>";
+    }
+
+    let skillHtml = "";
+    if (!skills.configured) {
+      skillHtml = '<div class="card"><h2>Documentary Skills</h2><p class="muted">' + escapeHtml(skills.message) + "</p></div>";
+    } else {
+      const sRows = (skills.skills || []).map((sk) => {
+        const name = sk.name || sk.id || "";
+        const activeVer = sk.active_version || sk.active_revision || "-";
+        return "<tr><td><code>" + escapeHtml(name) + "</code></td><td><code>" + escapeHtml(activeVer) + "</code></td>" +
+          '<td class="row-actions">' +
+            '<button class="btn sm" data-skill-act="rollback" data-skill="' + escapeHtml(name) + '">Rollback</button>' +
+          "</td></tr>";
+      }).join("") || '<tr><td colspan="3" class="muted">No documentary skills installed yet.</td></tr>';
+      skillHtml =
+        '<div class="card"><h2>Documentary Skills (' + escapeHtml((skills.skills || []).length) + ')</h2>' +
+          "<table><thead><tr><th>Skill</th><th>Active Revision</th><th>Actions</th></tr></thead><tbody>" +
+          sRows + "</tbody></table></div>";
+    }
+
+    $("tab-extensions").innerHTML = renderOAuthOperation(ext.oauth_operation) + extHtml + skillHtml;
+    scheduleOAuthPoll(ext.oauth_operation);
+
+    $("tab-extensions").querySelectorAll("[data-review-ext]").forEach((input) => {
+      input.addEventListener("change", () => {
+        const approve = input.closest("details").querySelector('[data-ext-decide="approve"]');
+        if (approve) approve.disabled = !input.checked || operationActive;
+      });
+    });
+
+    $("tab-extensions").querySelectorAll("[data-ext-decide]").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        const approve = btn.getAttribute("data-ext-decide") === "approve";
+        const request_id = btn.getAttribute("data-req");
+        const review = btn.closest("details").querySelector("[data-review-ext]");
+        if (approve && (!review || !review.checked)) {
+          showToast("Review the exact proposal before approving it.", "error");
+          return;
+        }
+        btn.disabled = true;
+        try {
+          const res = await api("/api/extensions/decide", "POST", {
+            request_id,
+            approve,
+            confirm: approve ? "APPROVE" : "REFUSE",
+          });
+          if (res.oauth_operation) {
+            showToast(oauthOperationActive(res.oauth_operation)
+              ? "Authorization started. Its provider link will appear above."
+              : "Authorization finished. Review its result above.", "ok");
+          } else {
+            showToast("Decision recorded (" + res.decision + ", effect: " + res.effect_now + ").",
+              res.decision === "approved" ? "ok" : "error");
+          }
+          await loadExtensionsAndSkills();
+        } catch (err) {
+          btn.disabled = false;
+          showToast(err.message, "error");
+        }
+      });
+    });
+
+    $("tab-extensions").querySelectorAll("[data-skill-act]").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        const action = btn.getAttribute("data-skill-act");
+        const name = btn.getAttribute("data-skill");
+        try {
+          await api("/api/skills/action", "POST", { action, name });
+          showToast("Skill " + name + ": " + action + " completed.", "ok");
+          await loadExtensionsAndSkills();
+        } catch (err) {
+          showToast(err.message, "error");
+        }
+      });
+    });
+  }
+
+  async function loadDiagnostics() {
+    const data = await api("/api/diagnostics");
+    const capRows = Object.entries(data.capabilities || {}).map(([k, v]) =>
+      "<tr><td><code>" + escapeHtml(k) + "</code></td><td>" +
+      (typeof v === "boolean" ? statusBadge(v ? "true" : "false") : "<code>" + escapeHtml(v) + "</code>") +
+      "</td></tr>"
+    ).join("");
+    const guardRows = Object.entries(data.security_guards || {}).map(([k, v]) =>
+      "<tr><td><code>" + escapeHtml(k) + "</code></td><td>" + statusBadge(v ? "active" : "inactive") + "</td></tr>"
+    ).join("");
+
+    const mcpProfiles = (data.browser_profiles && data.browser_profiles.mcp_persistent_profiles) || [];
+    const profileHtml = mcpProfiles.length
+      ? mcpProfiles.map((p) => '<span class="pill accent" style="margin-right:6px;">' + escapeHtml(p) + "</span>").join("")
+      : '<span class="muted">No persistent MCP Chrome profiles created yet.</span>';
+
+    const wsHtml = data.workspace_inspection
+      ? "<pre>" + escapeHtml(JSON.stringify(data.workspace_inspection, null, 2)) + "</pre>"
+      : '<p class="muted">Pass <code>--project &lt;dir&gt;</code> to inspect workspace access boundaries.</p>';
+
+    $("tab-diagnostics").innerHTML =
+      '<div class="split">' +
+        '<div class="card"><h2>Platform Capabilities (' + escapeHtml(data.os) + "/" + escapeHtml(data.arch) + ')</h2>' +
+          "<table><tbody>" + capRows + "</tbody></table></div>" +
+        '<div class="card"><h2>Operator UI Security Guards</h2>' +
+          "<table><tbody>" + guardRows + "</tbody></table></div>" +
+      "</div>" +
+      '<div class="card"><h2>Browser Profiles</h2><p class="muted">Isolated operator-owned Chrome profiles (never personal Chrome user data).</p>' + profileHtml + "</div>" +
+      '<div class="card"><h2>Workspace Access Inspection</h2>' + wsHtml + "</div>";
+  }
+
+  async function refreshActiveTab() {
+    if (!sessionToken) return;
+    try {
+      if (activeTab === "overview") await loadOverview();
+      else if (activeTab === "missions") await loadMissions();
+      else if (activeTab === "oauth") await loadOAuth();
+      else if (activeTab === "extensions") await loadExtensionsAndSkills();
+      else if (activeTab === "diagnostics") await loadDiagnostics();
+    } catch (err) {
+      showToast(err.message, "error");
+    }
+  }
+
+  function switchTab(tab) {
+    activeTab = tab;
+    if (tab !== "extensions") clearTimeout(oauthPollTimer);
+    document.querySelectorAll("#tabNav button").forEach((b) => {
+      b.classList.toggle("active", b.getAttribute("data-tab") === tab);
+    });
+    document.querySelectorAll(".tab-panel").forEach((p) => {
+      p.classList.toggle("hidden", p.id !== "tab-" + tab);
+    });
+    refreshActiveTab();
+  }
+
+  async function unlock(token) {
+    sessionToken = token.trim();
+    if (!sessionToken) return;
+    try {
+      await api("/api/overview");
+      $("tokenGate").classList.add("hidden");
+      $("tabNav").classList.remove("hidden");
+      switchTab("overview");
+      refreshProfile();
+    } catch (err) {
+      sessionToken = "";
+      showToast("Authentication failed: " + err.message, "error");
+    }
+  }
+
+  document.querySelectorAll("#tabNav button").forEach((b) => {
+    b.addEventListener("click", () => switchTab(b.getAttribute("data-tab")));
+  });
+  $("refreshBtn").addEventListener("click", () => {
+    refreshActiveTab();
+    refreshProfile();
+  });
+  $("tokenSubmit").addEventListener("click", () => unlock($("tokenInput").value));
+  $("tokenInput").addEventListener("keydown", (e) => {
+    if (e.key === "Enter") unlock($("tokenInput").value);
+  });
+
+  const params = new URLSearchParams(window.location.search);
+  const urlToken = params.get("token");
+  if (urlToken) {
+    try { window.history.replaceState({}, document.title, "/"); } catch (_) {}
+    unlock(urlToken);
+  }
+})();
+</script>
+</body>
+</html>

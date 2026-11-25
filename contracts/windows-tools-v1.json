@@ -1,0 +1,269 @@
+[
+  {
+    "name": "desktop_agent_desktop",
+    "title": "Manage Agent Desktop",
+    "description": "Inspect, start or stop a configured real Virtual Desktop lease; Desktop 1 is reserved and a fresh native safety HUD is required.",
+    "inputSchema": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "action": {
+          "type": "string",
+          "enum": [
+            "status",
+            "start",
+            "stop"
+          ]
+        },
+        "lease_id": {
+          "type": "string",
+          "format": "uuid",
+          "minLength": 36,
+          "maxLength": 36
+        },
+        "desktop_number": {
+          "type": "integer",
+          "minimum": 2,
+          "maximum": 128
+        },
+        "task_label": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "task_id": {
+          "type": "string",
+          "maxLength": 64
+        },
+        "context_handle": {
+          "type": "string",
+          "maxLength": 256
+        }
+      },
+      "required": [
+        "action"
+      ]
+    }
+  },
+  {
+    "name": "desktop_ui_windows",
+    "title": "List Desktop UI Windows",
+    "description": "List Windows app windows with opaque identities; requires Full Control or Fully Unlocked.",
+    "inputSchema": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "app": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "include_untitled": {
+          "type": "boolean",
+          "default": false
+        },
+        "agent_desktop_lease_id": {
+          "type": "string",
+          "format": "uuid",
+          "minLength": 36,
+          "maxLength": 36
+        }
+      },
+      "required": []
+    }
+  },
+  {
+    "name": "desktop_ui_snapshot",
+    "title": "Snapshot Desktop UI",
+    "description": "Capture a verified window with a fresh single-use observation and optional genuine UI Automation tree or PNG.",
+    "inputSchema": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "window_id": {
+          "type": "string",
+          "format": "uuid",
+          "minLength": 36,
+          "maxLength": 36
+        },
+        "app": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "include_tree": {
+          "type": "boolean",
+          "default": true
+        },
+        "include_screenshot": {
+          "type": "boolean",
+          "default": false
+        },
+        "interactive_only": {
+          "type": "boolean",
+          "default": true
+        },
+        "max_elements": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 200,
+          "default": 80
+        },
+        "agent_desktop_lease_id": {
+          "type": "string",
+          "format": "uuid",
+          "minLength": 36,
+          "maxLength": 36
+        }
+      },
+      "required": []
+    }
+  },
+  {
+    "name": "desktop_ui_action",
+    "title": "Act on Desktop UI",
+    "description": "Perform one serialized observed-window action. Background leases permit semantic/window-targeted actions; physical input needs normal foreground mode.",
+    "inputSchema": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "window_id": {
+          "type": "string",
+          "format": "uuid",
+          "minLength": 36,
+          "maxLength": 36
+        },
+        "computer_observation_id": {
+          "type": "string",
+          "format": "uuid",
+          "minLength": 36,
+          "maxLength": 36
+        },
+        "action": {
+          "type": "string",
+          "enum": [
+            "invoke",
+            "set_value",
+            "click",
+            "hover",
+            "scroll",
+            "send_keys",
+            "drag",
+            "wait"
+          ]
+        },
+        "selector": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        },
+        "value": {
+          "type": "string",
+          "maxLength": 65536
+        },
+        "keys": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "button": {
+          "type": "string",
+          "enum": [
+            "left",
+            "right"
+          ]
+        },
+        "double": {
+          "type": "boolean",
+          "default": false
+        },
+        "direction": {
+          "type": "string",
+          "enum": [
+            "up",
+            "down",
+            "left",
+            "right"
+          ]
+        },
+        "to": {
+          "type": "string",
+          "enum": [
+            "top",
+            "bottom"
+          ]
+        },
+        "wheel": {
+          "type": "integer",
+          "minimum": -100,
+          "maximum": 100
+        },
+        "transport": {
+          "type": "string",
+          "enum": [
+            "send-input"
+          ]
+        },
+        "verbatim": {
+          "type": "boolean",
+          "default": false
+        },
+        "allow_system_keys": {
+          "type": "boolean",
+          "default": false
+        },
+        "from": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        },
+        "drag_to": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        },
+        "hold_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 5000
+        },
+        "dwell_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 5000
+        },
+        "wait_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 10000
+        },
+        "settle_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 5000,
+          "default": 150
+        },
+        "observe_after": {
+          "type": "string",
+          "enum": [
+            "none",
+            "tree",
+            "screenshot",
+            "both"
+          ],
+          "default": "tree"
+        },
+        "agent_desktop_lease_id": {
+          "type": "string",
+          "format": "uuid",
+          "minLength": 36,
+          "maxLength": 36
+        }
+      },
+      "required": [
+        "window_id",
+        "computer_observation_id",
+        "action"
+      ]
+    }
+  }
+]

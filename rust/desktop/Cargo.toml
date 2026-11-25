@@ -1,0 +1,26 @@
+[package]
+name = "agent-bridge-desktop"
+version = "0.2.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "Capability-confined, bounded workspace file tools for Agent Bridge"
+
+[lib]
+name = "agent_bridge_desktop"
+path = "src/lib.rs"
+
+[dependencies]
+cap-std = "=4.0.3"
+cap-fs-ext = "=4.0.3"
+regex = "1.12"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+uuid = { version = "1", features = ["v4"] }
+# Official ZIP reader; minimal DEFLATE backend. STORE needs no feature.
+zip = { version = "=9.7.3", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "=0.61.2", features = ["Win32_Foundation", "Win32_Storage_FileSystem"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Agent Bridge - Interactive Project Fixture</title>
+<meta name="referrer" content="no-referrer">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'none'; form-action 'none'; img-src 'none'; object-src 'none'; frame-src 'none'">
+<style>body{font:16px system-ui;margin:2rem;max-width:44rem;} label{display:block;margin:.6rem 0;} #result{padding:1rem;background:#eee}</style>
+</head>
+<body>
+<h1>Agent Bridge Project Browser</h1>
+<p id="route">Route: overview</p>
+<a id="details" href="#details">Project details</a>
+<form id="local-form" autocomplete="off">
+<label>Alias <input id="alias" name="alias" type="text" autocomplete="off" placeholder="Alias" maxlength="120"></label>
+<label><input id="confirm" type="checkbox" name="confirmed"> Confirm local preview</label>
+<label>Topic <select id="topic" name="topic"><option value="overview">Overview</option><option value="automation">Automation</option></select></label>
+<button id="apply" type="submit">Apply locally</button>
+<label>Project witness <input id="upload-witness" type="file" name="witness_upload" aria-label="Witness upload" accept=".txt"></label>
+<p id="upload-result">Upload: awaiting local file</p>
+<button id="download-witness" type="button" aria-label="Download witness">Download witness</button>
+<p id="download-result">Download: awaiting local action</p>
+</form>
+<p id="result">Result: awaiting local input</p>
+<div id="drag-source" role="button" aria-label="Drag source" draggable="true" style="padding:10px;border:1px solid #888">Drag source</div>
+<div id="drag-target" role="button" aria-label="Drop target" style="padding:10px;border:1px solid #888;margin-top:8px">Drop target</div>
+<p id="drag-result">Drag: awaiting source</p>
+<script>
+"use strict";
+(function () {
+  const form = document.getElementById("local-form");
+  const output = document.getElementById("result");
+  const route = document.getElementById("route");
+  const onRoute = () => { route.textContent = location.hash === "#details" ? "Route: details" : "Route: overview"; };
+  window.addEventListener("hashchange", onRoute);
+  onRoute();
+  const dragSource = document.getElementById("drag-source");
+  const dropTarget = document.getElementById("drag-target");
+  const dragStatus = document.getElementById("drag-result");
+  dragSource.addEventListener("dragstart", event => {
+    event.dataTransfer.setData("text/plain", "bridge-project-drag");
+  });
+  dropTarget.addEventListener("dragover", event => event.preventDefault());
+  dropTarget.addEventListener("drop", event => {
+    event.preventDefault();
+    if (event.dataTransfer.getData("text/plain") === "bridge-project-drag") {
+      dragStatus.textContent = "Drag: completed locally";
+    }
+  });
+  const selectedFile = document.getElementById("upload-witness");
+  selectedFile.addEventListener("change", () => {
+    const witness = selectedFile.files && selectedFile.files[0];
+    document.getElementById("upload-result").textContent =
+      witness ? "Upload: " + witness.name + " (" + witness.size + " bytes)"
+              : "Upload: no file";
+  });
+  const downloadLink = document.createElement("a");
+  downloadLink.download = "agent-bridge-download.txt";
+  document.getElementById("download-witness").addEventListener("click", () => {
+    const bytes = "Agent Bridge local project download\nNo third-party upload\n";
+    const objectUrl = URL.createObjectURL(new Blob([bytes], { type: "text/plain" }));
+    downloadLink.href = objectUrl;
+    downloadLink.click();
+    document.getElementById("download-result").textContent = "Download: generated locally";
+    setTimeout(() => URL.revokeObjectURL(objectUrl), 30000);
+  });
+  form.addEventListener("submit", (event) => {
+    event.preventDefault();
+    const alias = document.getElementById("alias").value.slice(0, 120);
+    const chosen = document.getElementById("topic").value;
+    const confirmed = document.getElementById("confirm").checked;
+    output.textContent = "Result: alias=" + alias + "; topic=" + chosen + "; confirmed=" + confirmed;
+  });
+})();
+</script>
+</body>
+</html>

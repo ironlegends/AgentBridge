@@ -1,0 +1,12 @@
+[package]
+name = "agent-bridge-leases"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "SQLite resource lease coordinator and RPC handlers for agent-bridge"
+
+[dependencies]
+chrono.workspace = true
+rusqlite = "0.37"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"

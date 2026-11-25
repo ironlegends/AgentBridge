@@ -1,0 +1,5 @@
+notices/*.txt text eol=lf
+notices/*.json text eol=lf
+# Byte-pinned upstream inputs; do not normalize their original line endings.
+notices/WINAPP-DEPENDENCIES.json -text
+notices/WINAPP-THIRD-PARTY-NOTICES.txt -text

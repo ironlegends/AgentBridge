@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-start-or-restart-gateway"
+description = "Enables the start_or_restart_gateway command without any pre-configured scope."
+commands.allow = ["start_or_restart_gateway"]
+
+[[permission]]
+identifier = "deny-start-or-restart-gateway"
+description = "Denies the start_or_restart_gateway command without any pre-configured scope."
+commands.deny = ["start_or_restart_gateway"]

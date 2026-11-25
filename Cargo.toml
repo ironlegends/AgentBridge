@@ -1,0 +1,8 @@
+[workspace]
+resolver = "2"
+exclude = ["app/src-tauri"]
+members = ["rust/cli", "rust/core", "rust/gateway", "rust/http", "rust/desktop", "rust/missions", "rust/commands", "rust/lifecycle", "rust/oauth-compat", "rust/extensions", "rust/leases", "rust/web-launch", "rust/oauth-server", "rust/import"]
+
+[workspace.dependencies]
+# UTC timestamps need SystemTime, independent of the local time-zone database.
+chrono = { version = "0.4", default-features = false, features = ["now"] }

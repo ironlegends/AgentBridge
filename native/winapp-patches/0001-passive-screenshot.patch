@@ -1,0 +1,29 @@
+--- a/src/winapp-CLI/WinApp.Cli/Services/UiAutomationService.Screenshot.cs
++++ b/src/winapp-CLI/WinApp.Cli/Services/UiAutomationService.Screenshot.cs
+@@ -63,6 +63,10 @@
+         // Check if window is minimized
+         if (Windows.Win32.PInvoke.IsIconic(hwnd))
+         {
++            if (!focus && !captureScreen)
++            {
++                throw new InvalidOperationException("Passive window capture is unavailable while the window is minimized; it was not restored.");
++            }
+             Windows.Win32.PInvoke.ShowWindow(hwnd, Windows.Win32.UI.WindowsAndMessaging.SHOW_WINDOW_CMD.SW_RESTORE);
+             Thread.Sleep(300);
+         }
+@@ -154,10 +158,13 @@
+         var pixels = s_captureFromWindow(hwnd, width, height);
+         if (IsBlankCapture(pixels))
+         {
+-            _logger.LogDebug("PrintWindow returned blank frame; foregrounding and retrying");
+-            s_foregroundWindowForBlankRetry(hwnd);
++            _logger.LogDebug("PrintWindow returned blank frame; retrying without changing focus");
+             s_sleepForBlankRetry(200);
+             pixels = s_captureFromWindow(hwnd, width, height);
++            if (IsBlankCapture(pixels))
++            {
++                throw new InvalidOperationException("Passive window capture is unavailable; focus was not changed.");
++            }
+         }
+         return pixels;
+     }

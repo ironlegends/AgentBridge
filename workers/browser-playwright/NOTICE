@@ -1,0 +1,20 @@
+Agent Bridge owned Playwright browser
+Copyright 2026 Agent Bridge contributors.
+
+driver.mjs and the compatible browser contract adapt DeskMCP 0.9.17
+src/browser-playwright.ts and browser validation behavior at commit
+e614f938db7f592566384c87a86af2f4ec74cca7, https://github.com/edmen12/deskmcp.
+DeskMCP is licensed under Apache License 2.0; see notices/DeskMCP-LICENSE.
+Changes replace externally connected CDP with an exclusively owned Playwright
+context and add private IPC, isolated sessions, budgets and transfer callbacks. Protocol version 2 adds one-use action
+reservations, fixed observed-page targeting and independent execution receipts.
+
+Playwright is Copyright (c) Microsoft Corporation, licensed under Apache 2.0.
+The bundle preserves its LICENSE, NOTICE and ThirdPartyNotices.txt under
+node_modules/playwright-core. Node.js includes its full multi-component LICENSE
+in notices/Node-LICENSE. The dedicated Chromium distribution includes its
+complete chrome://credits notices in notices/Chromium-CREDITS.html.
+
+The build manifest records the release URLs, archive hashes, npm integrity and
+the SHA-256 and size of every shipped resource. No dependency is downloaded
+when the installed application starts.

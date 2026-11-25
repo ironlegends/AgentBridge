@@ -1,0 +1,14 @@
+{
+  "name": "@agent-bridge/browser-worker",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "license": "Apache-2.0",
+  "engines": { "node": ">=24 <25" },
+  "scripts": {
+    "test": "node --test --test-concurrency=1 tests/*.test.mjs",
+    "test:unit": "node --test tests/validation.test.mjs tests/protocol.test.mjs",
+    "test:browser": "node --test --test-concurrency=1 tests/session.test.mjs"
+  },
+  "dependencies": { "playwright-core": "1.63.0" }
+}

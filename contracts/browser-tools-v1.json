@@ -1,0 +1,400 @@
+[
+  {
+    "name": "desktop_browser_act",
+    "description": "Run a bounded sequence of validated browser actions using a fresh one-time browser_observation_id from desktop_browser_snapshot. The observation is consumed before the action and stale page state is rejected. Returns a fresh snapshot and observation afterward.",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "actions": {
+          "items": {
+            "properties": {
+              "checked": {
+                "type": "boolean"
+              },
+              "delay_ms": {
+                "maximum": 250,
+                "minimum": 0,
+                "type": "integer"
+              },
+              "delta_x": {
+                "maximum": 100000,
+                "minimum": -100000,
+                "type": "integer"
+              },
+              "delta_y": {
+                "maximum": 100000,
+                "minimum": -100000,
+                "type": "integer"
+              },
+              "direction": {
+                "enum": [
+                  "back",
+                  "forward",
+                  "reload"
+                ],
+                "type": "string"
+              },
+              "duration_ms": {
+                "maximum": 30000,
+                "minimum": 0,
+                "type": "integer"
+              },
+              "exact": {
+                "type": "boolean"
+              },
+              "files": {
+                "items": {
+                  "maxLength": 4096,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "maxItems": 10,
+                "minItems": 1,
+                "type": "array"
+              },
+              "key": {
+                "maxLength": 64,
+                "minLength": 1,
+                "type": "string"
+              },
+              "ref": {
+                "pattern": "^(?:f[1-9][0-9]{0,6})*e[1-9][0-9]{0,6}$",
+                "type": "string"
+              },
+              "selector": {
+                "maxLength": 4096,
+                "minLength": 1,
+                "type": "string"
+              },
+              "source_ref": {
+                "pattern": "^(?:f[1-9][0-9]{0,6})*e[1-9][0-9]{0,6}$",
+                "type": "string"
+              },
+              "source_selector": {
+                "maxLength": 4096,
+                "minLength": 1,
+                "type": "string"
+              },
+              "state": {
+                "enum": [
+                  "visible",
+                  "hidden",
+                  "attached",
+                  "detached"
+                ],
+                "type": "string"
+              },
+              "target_ref": {
+                "pattern": "^(?:f[1-9][0-9]{0,6})*e[1-9][0-9]{0,6}$",
+                "type": "string"
+              },
+              "target_selector": {
+                "maxLength": 4096,
+                "minLength": 1,
+                "type": "string"
+              },
+              "text": {
+                "maxLength": 65536,
+                "type": "string"
+              },
+              "timeout_ms": {
+                "maximum": 60000,
+                "minimum": 1000,
+                "type": "integer"
+              },
+              "type": {
+                "enum": [
+                  "goto",
+                  "click",
+                  "hover",
+                  "drag",
+                  "fill",
+                  "type_text",
+                  "set_checked",
+                  "press",
+                  "wait",
+                  "wait_selector",
+                  "wait_url",
+                  "wait_text",
+                  "select",
+                  "set_files",
+                  "download",
+                  "scroll",
+                  "navigation"
+                ],
+                "type": "string"
+              },
+              "url": {
+                "format": "uri",
+                "maxLength": 8192,
+                "type": "string"
+              },
+              "value": {
+                "maxLength": 65536,
+                "type": "string"
+              },
+              "wait_until": {
+                "enum": [
+                  "domcontentloaded",
+                  "load"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
+          },
+          "maxItems": 20,
+          "minItems": 1,
+          "type": "array"
+        },
+        "browser_observation_id": {
+          "format": "uuid",
+          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
+          "type": "string"
+        },
+        "full_page": {
+          "default": false,
+          "type": "boolean"
+        },
+        "include_console": {
+          "default": false,
+          "type": "boolean"
+        },
+        "include_network": {
+          "default": false,
+          "type": "boolean"
+        },
+        "max_console_messages": {
+          "default": 50,
+          "maximum": 200,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "max_interactive_elements": {
+          "default": 100,
+          "maximum": 500,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "max_network_events": {
+          "default": 100,
+          "maximum": 500,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "max_text_chars": {
+          "default": 8000,
+          "maximum": 50000,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "page_id": {
+          "maxLength": 512,
+          "minLength": 1,
+          "type": "string"
+        },
+        "screenshot": {
+          "default": true,
+          "type": "boolean"
+        },
+        "session_id": {
+          "format": "uuid",
+          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
+          "type": "string"
+        },
+        "timeout_ms": {
+          "maximum": 60000,
+          "minimum": 1000,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "session_id",
+        "browser_observation_id",
+        "actions"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "desktop_browser_session",
+    "description": "Start, list or close Agent Bridge-owned isolated Playwright Chromium sessions; create, select or close tabs; handle a pending JavaScript dialog; list or delete persistent owned profiles. Uses the packaged pinned Chromium runtime and never attaches to a personal browser or external CDP session.",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "accept": {
+          "type": "boolean"
+        },
+        "action": {
+          "enum": [
+            "start",
+            "list",
+            "close",
+            "new_page",
+            "select_page",
+            "close_page",
+            "handle_dialog",
+            "list_profiles",
+            "delete_profile"
+          ],
+          "type": "string"
+        },
+        "agent_desktop_lease_id": {
+          "format": "uuid",
+          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
+          "type": "string"
+        },
+        "headless": {
+          "default": true,
+          "type": "boolean"
+        },
+        "page_id": {
+          "maxLength": 512,
+          "minLength": 1,
+          "type": "string"
+        },
+        "profile_id": {
+          "maxLength": 64,
+          "minLength": 1,
+          "type": "string"
+        },
+        "prompt_text": {
+          "maxLength": 4096,
+          "type": "string"
+        },
+        "session_id": {
+          "format": "uuid",
+          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
+          "type": "string"
+        },
+        "timeout_ms": {
+          "maximum": 60000,
+          "minimum": 1000,
+          "type": "integer"
+        },
+        "url": {
+          "format": "uri",
+          "maxLength": 8192,
+          "type": "string"
+        },
+        "viewport": {
+          "properties": {
+            "height": {
+              "maximum": 4320,
+              "minimum": 240,
+              "type": "integer"
+            },
+            "width": {
+              "maximum": 7680,
+              "minimum": 320,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "width",
+            "height"
+          ],
+          "type": "object"
+        }
+      },
+      "required": [
+        "action"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "desktop_browser_snapshot",
+    "description": "Read a typed snapshot from a Agent Bridge-owned browser page. mode=full returns the bounded page snapshot; mode=find searches the sanitized Playwright AI accessibility tree and returns compact matching nodes with refs plus a fresh browser_observation_id.",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "properties": {
+        "find_case_sensitive": {
+          "default": false,
+          "type": "boolean"
+        },
+        "find_query": {
+          "maxLength": 1024,
+          "minLength": 1,
+          "type": "string"
+        },
+        "full_page": {
+          "default": false,
+          "type": "boolean"
+        },
+        "include_console": {
+          "default": false,
+          "type": "boolean"
+        },
+        "include_network": {
+          "default": false,
+          "type": "boolean"
+        },
+        "max_console_messages": {
+          "default": 50,
+          "maximum": 200,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "max_find_results": {
+          "default": 20,
+          "maximum": 50,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "max_interactive_elements": {
+          "default": 100,
+          "maximum": 500,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "max_network_events": {
+          "default": 100,
+          "maximum": 500,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "max_text_chars": {
+          "default": 8000,
+          "maximum": 50000,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "mode": {
+          "default": "full",
+          "enum": [
+            "full",
+            "find"
+          ],
+          "type": "string"
+        },
+        "page_id": {
+          "maxLength": 512,
+          "minLength": 1,
+          "type": "string"
+        },
+        "screenshot": {
+          "default": true,
+          "type": "boolean"
+        },
+        "session_id": {
+          "format": "uuid",
+          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
+          "type": "string"
+        },
+        "timeout_ms": {
+          "maximum": 60000,
+          "minimum": 1000,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "session_id"
+      ],
+      "type": "object"
+    }
+  }
+]

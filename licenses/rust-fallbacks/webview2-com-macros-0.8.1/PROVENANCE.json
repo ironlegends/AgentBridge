@@ -1,0 +1,17 @@
+{
+  "crate_sha256": "67a921c1b6914c367b2b823cd4cde6f96beec77d30a939c8199bb377cf9b9b54",
+  "license": "MIT",
+  "package": "webview2-com-macros@0.8.1",
+  "registry": "registry+https://github.com/rust-lang/crates.io-index",
+  "source_path": "crates/callback-macros",
+  "source_revision": "dffa41a8a46d3f5565eefbff2de57d38d399f158",
+  "upstream_notices": [
+    {
+      "file": "LICENSE",
+      "git_blob": "de9a7e660e173136b351982a34f715af424ff812",
+      "repository": "wravery/webview2-rs",
+      "revision": "dffa41a8a46d3f5565eefbff2de57d38d399f158",
+      "sha256": "0dcf41516e608bbcb6cdc5229feb7b86fe4a643b85e7df251133c93408fdac73"
+    }
+  ]
+}

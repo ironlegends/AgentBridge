@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-get-missions-snapshot"
+description = "Enables the get_missions_snapshot command without any pre-configured scope."
+commands.allow = ["get_missions_snapshot"]
+
+[[permission]]
+identifier = "deny-get-missions-snapshot"
+description = "Denies the get_missions_snapshot command without any pre-configured scope."
+commands.deny = ["get_missions_snapshot"]

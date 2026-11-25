@@ -1,0 +1,14 @@
+[package]
+name = "agent-bridge-web-launch"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+publish = false
+description = "Operator-approved Chrome-only launcher for Agent Bridge Web conversations"
+
+[lib]
+name = "agent_bridge_web_launch"
+path = "src/lib.rs"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

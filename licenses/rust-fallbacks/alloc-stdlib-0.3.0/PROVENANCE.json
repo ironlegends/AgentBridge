@@ -1,0 +1,17 @@
+{
+  "crate_sha256": "0b5c1865780388bfa186411ab5f247819487fc4864c6e9c3106611fa347586e1",
+  "license": "BSD-3-Clause",
+  "package": "alloc-stdlib@0.3.0",
+  "registry": "registry+https://github.com/rust-lang/crates.io-index",
+  "source_path": "alloc-stdlib",
+  "source_revision": "0a81fd6928ea3b33c8cd484aa4575d50ffb98012",
+  "upstream_notices": [
+    {
+      "file": "LICENSE",
+      "git_blob": "cd496ba72eb37e83a44958358d1f89a8a28cbc15",
+      "repository": "dropbox/rust-alloc-no-stdlib",
+      "revision": "0a81fd6928ea3b33c8cd484aa4575d50ffb98012",
+      "sha256": "c0c56f26d9c051cac4d200c34c84e7ae9aaa853e01a982a1df08b09931e518ae"
+    }
+  ]
+}

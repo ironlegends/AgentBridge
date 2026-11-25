@@ -1,0 +1,11 @@
+[package]
+name = "agent-bridge-commands"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "Local policy and single-use confirmation decision core for agent-bridge commands"
+
+[dependencies]
+getrandom = "0.2"
+serde = { version = "1.0", features = ["derive"] }
+sha2 = "0.10"
