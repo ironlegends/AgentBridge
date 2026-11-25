@@ -1,6 +1,6 @@
 # Architecture & Workspace Guide
 
-The root **14-crate Rust workspace** builds the `agent-bridge` CLI and its reusable workstation library with zero external script runtimes. The native Tauri application at `app/src-tauri` has an independent Cargo manifest and lockfile. In unified mode it embeds that library and calls native operator controls in process. Deliberate legacy configurations retain the attached operator API and standalone local gateway paths.
+The root **14-crate Rust workspace** builds the `agent-bridge` CLI and its reusable workstation library without a separate scripting runtime for its core. The qualified Windows portable browser provider includes a pinned Node.js/Playwright/Chromium worker bundle; the separate native Chrome CDP provider remains available. The native Tauri application at `app/src-tauri` has an independent Cargo manifest and lockfile. In unified mode it embeds that library and calls native operator controls in process. Deliberate legacy configurations retain the attached operator API and standalone local gateway paths.
 
 ---
 

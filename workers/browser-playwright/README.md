@@ -1,4 +1,6 @@
-# Owned Playwright browser
+# Bundled browser worker
+
+Agent Bridge uses this isolated browser worker for qualified Windows browser automation. The portable release includes the pinned Node.js, Playwright and Chromium dependencies; users do not need to install them separately. This document is for developers and release maintainers. For ordinary setup, see the [Quick Start Guide](../../docs/QUICKSTART.md).
 
 The Rust provider launches one Node worker directly, hidden and inside a Windows
 Job, per isolated browser session. The worker launches Playwright Chromium through

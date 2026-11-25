@@ -91,7 +91,9 @@ All paths are strictly workspace-relative (`..`, absolute paths, symlinks, repar
 
 ---
 
-## 6. Native Chrome Browser Automation (3 Tools)
+## 6. Browser Automation (3 Tools)
+
+The qualified Windows portable application can use the bundled, isolated Playwright/Chromium provider. Its pinned runtime and lifecycle are documented in [the browser worker README](../workers/browser-playwright/README.md). The following native Chrome CDP mode describes the separate CLI provider.
 
 Rust-only automation over private inherited CDP pipes (`--remote-debugging-pipe`), using Windows handles or Unix descriptors 3/4, with zero Node.js, zero Playwright, and zero exposed TCP debugging ports. The tool schemas are shared; Unix project file upload/download currently return `UNIX_PROJECT_BROWSER_TRANSFERS_UNAVAILABLE`. See [UNIX-PARITY.md](UNIX-PARITY.md) for qualified installations and native coverage.
 

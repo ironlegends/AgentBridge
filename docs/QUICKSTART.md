@@ -1,6 +1,8 @@
 # Quick Start Guide
 
-This guide walks you through building `agent-bridge`, launching the native Tauri v2 desktop application, initializing private state, and connecting **local MCP coding harnesses**, **ChatGPT Web**, and **Gemini Web**.
+Use ChatGPT Web or Gemini Web as a local agent with Agent Bridge. Your AI stays in its web chat and uses your provider's applicable subscription allowance; Agent Bridge runs authorized local tools without a separate model API key. Quotas are provider-controlled and may be shared with other products.
+
+**Windows users:** start with the [portable release](https://github.com/ironlegends/AgentBridge/releases) and [installation instructions](#install-the-windows-release-portable-zip). Developers can build the headless CLI or desktop app from source. Local MCP clients are also supported.
 
 ---
 
@@ -8,7 +10,7 @@ This guide walks you through building `agent-bridge`, launching the native Tauri
 
 - **Rust toolchain.** Rust and Cargo 1.99.1 were used for Windows x86-64 MSVC qualification. The minimum supported Rust version is undetermined. Use `--locked` for both Cargo workspaces.
 - **Native desktop app.** Windows build and test qualification uses the MSVC build tools and WebView2 Runtime. The platform WebViews are WKWebView on macOS and WebKitGTK on Linux. Current desktop build and test evidence covers Windows.
-- **Optional (Browser tools):** Google Chrome installed at the standard system path (no Node.js or Playwright needed)
+- **Optional browser tools:** the qualified Windows portable app ships a pinned browser bundle. The separate native Chrome CDP CLI mode uses a qualified Chrome installation; see [browser modes](#native-chrome-browser-mode-windows-macos-and-linux).
 
 Build the single standalone CLI executable:
 
@@ -150,6 +152,8 @@ Pinned commands are defined exclusively by the operator in `<settings>/commands.
 ---
 
 ## 5. Connecting ChatGPT Web and Gemini Web
+
+These connections use your existing web chat, not a separate model API. Where providers keep web and local-agent allowances separate (for example Gemini Web and Antigravity), the applicable web allowance is used. Agent Bridge neither grants additional quota nor changes provider limits.
 
 **For ChatGPT Web, use the official Secure MCP Tunnel connection.** Gemini Web continues to use the authenticated HTTPS relay. The `gemini workstation` command serves both clients; its name does not restrict it to Gemini.
 
