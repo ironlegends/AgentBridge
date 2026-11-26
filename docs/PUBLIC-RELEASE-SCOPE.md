@@ -24,11 +24,12 @@ Agent Bridge follows Semantic Versioning 2.0.0. The public API is the documented
 | Version | Use |
 | --- | --- |
 | `2.0.0` | First public stable release. Never rebuilt or retagged. |
-| `2.0.N` | Backward-compatible fixes only. |
-| `2.1.0-alpha.N` | New features under development. |
-| `2.1.0-beta.N` | Features complete, qualification in progress. |
-| `2.1.0-rc.N` | Qualified candidate, deployed on the operator workstation. |
-| `2.1.0` | Next stable release, published after validation. |
+| `2.1.0` | Current stable release. Never rebuilt or retagged. |
+| `2.1.N` | Backward-compatible fixes only. |
+| `2.2.0-alpha.N` | New features under development. |
+| `2.2.0-beta.N` | Features complete, qualification in progress. |
+| `2.2.0-rc.N` | Qualified candidate, deployed on the operator workstation. |
+| `2.2.0` | Next stable release, published after validation. |
 | `3.0.0` | Removals or changes that break the 2.x public API. |
 
 A 2.x minor release adds or deprecates; it does not remove. A deprecated option keeps working and prints a notice on stderr until the next major release. The browser Learn reader options are deprecated in 2.1.0 and reserved for removal in 3.0.0.

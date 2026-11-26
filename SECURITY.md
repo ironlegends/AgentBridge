@@ -2,13 +2,14 @@
 
 ## Supported Versions
 
-Security fixes are applied to the latest commit on `main` and the most recent tagged `v2.x` release.
+Security fixes are applied to the latest commit on `main` and to the latest stable release, currently 2.1.0, through `2.1.N` patch releases. Pre-release tags (`-alpha.N`, `-beta.N`, `-rc.N`) are not supported once a later release exists.
 
 | Version | Platform | Supported |
 | --- | --- | --- |
-| 2.0.x | Windows 10/11 x64 (portable desktop ZIP; headless CLI built from source, no prebuilt CLI binary) | Yes |
-| 2.1.0-rc.1 (`main`, source) | Windows 10/11 x64 | Yes, on the latest commit |
-| 2.0.x and current `main` | Linux, macOS | Experimental; reports are welcome, no release binaries |
+| Latest 2.1.N | Windows 10/11 x64 (portable desktop ZIP; headless CLI built from source, no prebuilt CLI binary) | Yes |
+| `main` (source) | Windows 10/11 x64 | Yes, on the latest commit |
+| 2.0.x | Windows 10/11 x64 | No; upgrade to 2.1.x |
+| 2.1.x and current `main` | Linux, macOS | Experimental; reports are welcome, no release binaries |
 | < 2.0 | Any | No |
 
 ## Security Model & Scope
