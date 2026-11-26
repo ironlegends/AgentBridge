@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "agent-bridge"
-version = "2.1.0-alpha.1"
+version = "2.1.0-beta.1"
 dependencies = [
  "agent-bridge-commands",
  "agent-bridge-core",

@@ -1,7 +1,7 @@
 # v2.0.0 Release
 
 This historical record describes the 2.0.0 release and its qualification
-results. The current development manifests are at `2.1.0-alpha.1`. The
+results. The current development manifests are at `2.1.0-beta.1`. The
 default Rust suites now have zero ignored tests. See the
 [contributor test guide](../CONTRIBUTING.md#build--test) for opt-in tests.
 
