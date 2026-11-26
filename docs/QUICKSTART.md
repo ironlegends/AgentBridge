@@ -482,6 +482,10 @@ Use a new OAuth state directory when widening the startup authority; retain the 
 
 ### Diagnose Gemini Web approvals and tool quota
 
+In the desktop app, open **Settings > Advanced settings > Diagnostics & Skills** to see the MCP request
+audit summary and the 20 most recent records, newest first. An embedded desktop
+workstation shows the audit without an operator listener.
+
 Read `mcp_request_audit` from `GET /api/diagnostics` on the workstation's
 authenticated local operator listener. Use the port from `--ui-port` and the
 token from the current private `ui_url` startup record. For example, in
@@ -498,12 +502,10 @@ try {
 }
 ```
 
-An embedded desktop workstation exposes the same data through its existing
-local `get_diagnostics` command as `mcpRequestAudit`. The snapshot is tied to
-the running workstation and covers its `/mcp` route in both unified and legacy
-OAuth modes. Audit diagnostics for standalone and managed local listeners,
-including `gemini serve` and `gemini project-read`, are deferred to issue #160.
-A standalone `agent-bridge ui` returns `null` for the audit field.
+The snapshot is tied to the running workstation and covers its `/mcp` route in
+both unified and legacy OAuth modes. Audit diagnostics for standalone and
+managed local listeners, including `gemini serve` and `gemini project-read`, are
+deferred to issue #160. A standalone `agent-bridge ui` has no request audit.
 
 1. Read a baseline snapshot. Note `boot_id`, the latest `sequence`, and the
    counters `evicted`, `evicted_verified`, and `evicted_unverified`. Ask Gemini

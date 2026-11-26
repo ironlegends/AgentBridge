@@ -985,6 +985,42 @@
     }
   }
 
+  function renderRequestAudit(audit) {
+    const empty = '<div class="item-meta">MCP request audit: No requests recorded</div>';
+    if (!audit || typeof audit !== "object") return empty;
+    const text = (value) => (typeof value === "string" && value ? value : "-");
+    const count = (value) => (Number.isFinite(value) ? String(value) : "-");
+    try {
+      const records = Array.isArray(audit.records)
+        ? audit.records.filter((record) => record && typeof record === "object")
+        : [];
+      const summary = '<div class="item-meta">MCP request audit | ' +
+        'Boot ID: <strong>' + escapeHtml(text(audit.boot_id).slice(0, 8)) + '</strong> | ' +
+        'Records retained: <strong>' + escapeHtml(records.length) + '</strong> | ' +
+        'In flight: <strong>' + escapeHtml(count(audit.in_flight)) + '</strong> | ' +
+        'Evicted verified: <strong>' + escapeHtml(count(audit.evicted_verified)) + '</strong> | ' +
+        'Evicted unverified: <strong>' + escapeHtml(count(audit.evicted_unverified)) + '</strong></div>';
+      if (!records.length) return summary + '<div class="item-meta">No requests recorded</div>';
+
+      // Snapshots list records in ascending completion sequence.
+      return summary + records.slice(-20).reverse().map((record) => {
+        const date = new Date(Number(record.timestamp_unix_ms));
+        const time = Number.isFinite(date.getTime()) ? date.toISOString() : "-";
+        const provider = typeof record.provider === "string" && record.provider ? record.provider : "Unverified";
+        return '<div class="item-meta">' + escapeHtml(time) +
+          ' | ' + escapeHtml(text(record.method)) +
+          ' | Tool: ' + escapeHtml(text(record.tool_name)) +
+          ' | Outcome: ' + escapeHtml(text(record.outcome)) +
+          ' | HTTP: ' + escapeHtml(count(record.http_status)) +
+          ' | Error: ' + escapeHtml(Number.isFinite(record.error_code) ? String(record.error_code) : text(record.error_code)) +
+          ' | Duration: ' + escapeHtml(count(record.duration_ms)) + ' ms' +
+          ' | Client hash: ' + escapeHtml(text(record.client_id_sha256).slice(0, 8)) +
+          ' | Provider: ' + escapeHtml(provider) + '</div>';
+      }).join("");
+    } catch (_) {
+      return '<div class="item-meta">MCP request audit: unreadable snapshot</div>';
+    }
+  }
   async function loadSettingsDiagnostics() {
     const box = $("skillsAndDiagBox");
     const read = ++diagnosticsRead;
@@ -1017,6 +1053,7 @@
           '</code><button class="mini-btn sm" data-skill-rb="' + escapeHtml(sk.name || sk.id) + '" type="button">Rollback</button></div>'
         ).join("");
       }
+      html += renderRequestAudit(diag.mcpRequestAudit);
       if (box.innerHTML === html) return;
       box.innerHTML = html;
       renderControls();

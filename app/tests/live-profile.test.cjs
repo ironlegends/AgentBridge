@@ -1211,11 +1211,76 @@ test("Settings diagnostics refresh while open and stop polling after leaving", a
   await ui.el("settingsNavBtn").fire("click");
   await ui.settle(ui.pending("get_diagnostics"), { oauthKeystore: "Protected", mcpBrowserProfiles: [] });
   await ui.settle(ui.pending("get_skills_overview"), { skills: [] });
+  const box = ui.el("skillsAndDiagBox");
+  assert.match(box.innerHTML, /No requests recorded/);
+
+  const audit = {
+    boot_id: "abcdef0123456789abcdef0123456789",
+    in_flight: 2,
+    evicted_verified: 3,
+    evicted_unverified: 4,
+    records: [],
+  };
   const refresh = ui.runTimer(3000);
-  await ui.settle(ui.pending("get_diagnostics"), { oauthKeystore: "Protected", mcpBrowserProfiles: [{}] });
-  await ui.settle(ui.pending("get_skills_overview"), { skills: [{ name: "fixture-skill" }] });
+  await ui.settle(ui.pending("get_diagnostics"), { oauthKeystore: "Protected", mcpRequestAudit: audit });
+  await ui.settle(ui.pending("get_skills_overview"), { skills: [] });
   await refresh;
-  assert.match(ui.el("skillsAndDiagBox").innerHTML, /fixture-skill/);
+  assert.match(box.innerHTML, /Records retained: <strong>0<\/strong>/);
+  assert.match(box.innerHTML, /No requests recorded/);
+
+  const records = Array.from({ length: 21 }, (_, index) => ({
+    timestamp_unix_ms: 1735689600000,
+    sequence: index + 1,
+    method: "tools/call",
+    tool_name: `fixture-tool-${String(index + 1).padStart(2, "0")}`,
+    outcome: "success",
+    http_status: 200,
+    error_code: null,
+    duration_ms: 0,
+    client_id_sha256: "1234abcd".repeat(8),
+    provider: "gemini",
+  }));
+  Object.assign(records.at(-2), {
+    outcome: "http_refusal", http_status: 429, error_code: "request_limit",
+    client_id_sha256: null, provider: null,
+  });
+  Object.assign(records.at(-1), {
+    tool_name: "fixture-tool-21<&>",
+    outcome: "jsonrpc_error",
+    error_code: -32602,
+  });
+  const nextRefresh = ui.runTimer(3000);
+  await ui.settle(ui.pending("get_diagnostics"), {
+    oauthKeystore: "Protected", mcpBrowserProfiles: [{}], mcpRequestAudit: { ...audit, records },
+  });
+  await ui.settle(ui.pending("get_skills_overview"), { skills: [{ name: "fixture-skill" }] });
+  await nextRefresh;
+  assert.match(box.innerHTML, /fixture-skill/);
+  assert.match(box.innerHTML, /Boot ID: <strong>abcdef01<\/strong>/);
+  assert.match(box.innerHTML, /Records retained: <strong>21<\/strong>/);
+  assert.match(box.innerHTML, /In flight: <strong>2<\/strong>/);
+  assert.match(box.innerHTML, /Evicted verified: <strong>3<\/strong>/);
+  assert.match(box.innerHTML, /Evicted unverified: <strong>4<\/strong>/);
+  assert.deepEqual([...box.innerHTML.matchAll(/fixture-tool-(\d+)/g)].map((match) => Number(match[1])),
+    Array.from({ length: 20 }, (_, index) => 21 - index));
+  assert.match(box.innerHTML, /2025-01-01T00:00:00\.000Z \| tools\/call \| Tool: fixture-tool-21&lt;&amp;&gt; \| Outcome: jsonrpc_error \| HTTP: 200 \| Error: -32602 \| Duration: 0 ms \| Client hash: 1234abcd \| Provider: gemini/);
+  assert.match(box.innerHTML, /fixture-tool-20 \| Outcome: http_refusal \| HTTP: 429 \| Error: request_limit \| Duration: 0 ms \| Client hash: - \| Provider: Unverified/);
+  assert.doesNotMatch(box.innerHTML, /No requests recorded|fixture-tool-21<|1234abcd1234abcd/);
+
+  const malformedRefresh = ui.runTimer(3000);
+  await ui.settle(ui.pending("get_diagnostics"), {
+    oauthKeystore: "Protected",
+    mcpBrowserProfiles: [{}],
+    mcpRequestAudit: {
+      boot_id: 7,
+      records: [null, { timestamp_unix_ms: 9e20, method: "ping", client_id_sha256: 5, duration_ms: "x" }],
+    },
+  });
+  await ui.settle(ui.pending("get_skills_overview"), { skills: [{ name: "fixture-skill" }] });
+  await malformedRefresh;
+  assert.match(box.innerHTML, /fixture-skill/);
+  assert.match(box.innerHTML, /Boot ID: <strong>-<\/strong> \| Records retained: <strong>1<\/strong>/);
+  assert.match(box.innerHTML, /- \| ping \| Tool: - \| Outcome: - \| HTTP: - \| Error: - \| Duration: - ms \| Client hash: - \| Provider: Unverified/);
   await ui.select("[data-back]")[0].fire("click");
   assert.equal(ui.timer(3000), undefined);
 });
