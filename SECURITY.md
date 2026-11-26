@@ -7,7 +7,7 @@ Security fixes are applied to the latest commit on `main` and the most recent ta
 | Version | Platform | Supported |
 | --- | --- | --- |
 | 2.0.x | Windows 10/11 x64 (portable desktop ZIP; headless CLI built from source, no prebuilt CLI binary) | Yes |
-| 2.1.0-beta.1 (`main`, source) | Windows 10/11 x64 | Yes, on the latest commit |
+| 2.1.0-rc.1 (`main`, source) | Windows 10/11 x64 | Yes, on the latest commit |
 | 2.0.x and current `main` | Linux, macOS | Experimental; reports are welcome, no release binaries |
 | < 2.0 | Any | No |
 
