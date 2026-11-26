@@ -99,7 +99,7 @@ fn drain(connection:&XConnection)->Vec<Event> {
     while let Some(event)=connection.poll_for_event().unwrap(){events.push(event);}
     events
 }
-fn options()->SnapshotOptions {SnapshotOptions {tree:true,screenshot:true,interactive:false,maximum:80}}
+fn options()->SnapshotOptions {SnapshotOptions {tree:true,screenshot:true,maximum:80}}
 
 #[test]
 fn isolated_x11_capture_actions_and_replacement_stay_on_the_approved_window() {
@@ -180,7 +180,7 @@ struct Foreign { child:Child }
 impl Foreign {
     fn start(display:&str,parent:Window)->Self {
         let child=Command::new(std::env::current_exe().unwrap())
-            .args(["--exact","window_inspection::portable::native::tests::x11_foreign_child_fixture","--ignored","--nocapture"])
+            .args(["--exact","window_inspection::portable::native::tests::x11_foreign_child_fixture","--nocapture"])
             .env("AGENT_BRIDGE_TEST_X11_DISPLAY",display).env("AGENT_BRIDGE_TEST_X11_PARENT",parent.to_string())
             .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::inherit()).spawn().unwrap();
         let mut fixture=Self{child};let output=fixture.child.stdout.take().unwrap();
@@ -196,10 +196,11 @@ impl Foreign {
 }
 impl Drop for Foreign {fn drop(&mut self){let _=self.child.kill();let _=self.child.wait();}}
 
+/// Child fixture for the isolated X11 regression; an ordinary run returns.
 #[test]
-#[ignore="child fixture invoked only by the isolated X11 regression"]
 fn x11_foreign_child_fixture() {
-    let number=std::env::var("AGENT_BRIDGE_TEST_X11_DISPLAY").unwrap().parse::<u16>().unwrap();
+    let Ok(number)=std::env::var("AGENT_BRIDGE_TEST_X11_DISPLAY") else {return};
+    let number=number.parse::<u16>().unwrap();
     let parent=std::env::var("AGENT_BRIDGE_TEST_X11_PARENT").unwrap().parse::<u32>().unwrap();
     let connection=test_connection(number);let child=connection.generate_id().unwrap();
     create(&connection,parent,child,"FOREIGN SECRET",0x0000ff,false);

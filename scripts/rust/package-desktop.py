@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import importlib.util
+import itertools
 import json
 import os
 import re
@@ -91,54 +92,28 @@ def write_archive(stage: Path, destination: Path, records: list[dict]) -> str:
     return digest
 
 
-def short_path(path: Path) -> Path | None:
-    # 8.3 names (for example C:/Users/LONGUS~1 in TEMP) are another spelling
-    # of the same directory. Only Windows can report them.
-    if os.name != "nt":
-        return None
-    import ctypes
-    size = ctypes.windll.kernel32.GetShortPathNameW(str(path), None, 0)
-    if size == 0:
-        return None
-    buffer = ctypes.create_unicode_buffer(size)
-    if ctypes.windll.kernel32.GetShortPathNameW(str(path), buffer, size) == 0:
-        return None
-    return Path(buffer.value)
+def frontend_files(repo: Path, env: dict[str, str]) -> list[Path]:
+    # Tauri compresses these files into the executable, out of reach of the
+    # byte scan of the staged files, so their sources are scanned instead.
+    # tauri-build merges TAURI_CONFIG and platform configuration files, which
+    # could embed another frontend; only the base configuration is admitted.
+    if any(key.upper() == "TAURI_CONFIG" for key in env):
+        raise ValueError("TAURI_CONFIG is not admitted for release packaging")
+    others = [path.name for path in (repo / "app/src-tauri").iterdir()
+              if path.name.lower().startswith("tauri") and path.name != "tauri.conf.json"]
+    if others:
+        raise ValueError("only app/src-tauri/tauri.conf.json is admitted as Tauri configuration")
+    config = json.loads((repo / "app/src-tauri/tauri.conf.json").read_text(encoding="utf-8"))
+    frontend = (repo / "app/src-tauri" / config["build"]["frontendDist"]).resolve()
+    if not frontend.is_dir() or not frontend.is_relative_to(repo.resolve()):
+        raise ValueError("Tauri frontendDist must be a directory of the checkout")
+    return sorted(path for path in frontend.rglob("*") if path.is_file())
 
 
-def path_spellings(path: Path) -> set[str]:
-    spellings = {str(path), path.as_posix(), str(path).replace("\\", "\\\\")}
-    if path.drive[1:] == ":":
-        spellings.add("/" + path.drive[0] + path.as_posix()[2:])
-    return spellings
-
-
-def private_path_needles(roots: list[Path]) -> set[bytes]:
-    # Scanned bytes are lowered with ASCII rules only, so each needle is
-    # lowered the same way, in its original, lower and upper Unicode case.
-    needles = set()
-    for root in roots:
-        forms = {root.absolute(), root.resolve()}
-        forms.update(filter(None, [short_path(form) for form in list(forms)]))
-        for form in forms:
-            for spelling in path_spellings(form):
-                text = spelling.rstrip("\\/")
-                if len(text) < 4:
-                    raise ValueError("private build root is too short to scan reliably")
-                for variant in {text, text.lower(), text.upper()}:
-                    for encoding in ("utf-8", "utf-16-le"):
-                        needles.add(variant.encode(encoding).lower())
-    return needles
-
-
-def assert_no_private_paths(stage: Path, records: list[dict], roots: list[Path]) -> None:
-    # A remap that becomes relative, or a linker PDB record, can silently embed
-    # the private checkout or profile directory. Refuse before any archive exists.
-    needles = private_path_needles(roots)
-    for record in records:
-        data = (stage / resources.relative_path(record["path"])).read_bytes().lower()
-        if any(needle in data for needle in needles):
-            raise ValueError("private build path found in staged file: " + record["path"])
+def assert_no_private_paths(stage: Path, records: list[dict], roots: list[Path], embedded: list[Path] = ()) -> None:
+    staged = ((record["path"], (stage / resources.relative_path(record["path"])).read_bytes()) for record in records)
+    sources = (("embedded " + path.name, path.read_bytes()) for path in embedded)
+    COMMON.assert_no_private_content(itertools.chain(staged, sources), roots)
 
 
 def write_json(path: Path, value: dict) -> None:
@@ -185,6 +160,7 @@ def main(argv: list[str]) -> int:
     if workspace != manifest.parent.resolve():
         raise ValueError("selected application workspace is unexpected")
     compiler, sysroot = COMMON.rustc_identity(rustc, env)
+    frontend = frontend_files(repo, env)
     name = f"agent-bridge-{version}-windows-x64-{source['commit'][:12]}"
     folder, archive_path = output / name, output / (name + ".zip")
     config_path = output / (name + ".tauri-resources.json")
@@ -253,8 +229,9 @@ def main(argv: list[str]) -> int:
         write_json(stage / "release-manifest.json", release)
         records = stage_records(stage)
         assert_no_private_paths(stage, records, [Path.home(), repo, args.build_dir.absolute(), output,
-                                                 Path(env.get("CARGO_HOME", Path.home() / ".cargo")),
-                                                 args.browser_bundle, args.native_bundle])
+                                                 Path(env.get("CARGO_HOME", Path.home() / ".cargo")), sysroot,
+                                                 args.browser_bundle, args.native_bundle],
+                                frontend)
         if git_identity(repo) != source:
             raise ValueError("source identity changed before publication")
         digest = write_archive(stage, archive_path, records)

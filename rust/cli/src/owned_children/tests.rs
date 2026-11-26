@@ -237,3 +237,105 @@ fn birth_metadata_failure_never_discards_a_successfully_launched_child() {
     assert_eq!(exit.code, Some(1));
     assert!(!child.owns_process(pid).unwrap());
 }
+
+#[test]
+fn exact_environment_block_contains_only_supplied_entries() {
+    assert!(std::env::var_os("CARGO_MANIFEST_DIR").is_some(), "Cargo must supply an inherited variable");
+    let decode = |block: Vec<u16>| String::from_utf16(&block).unwrap();
+    let supplied = BTreeMap::from([
+        (OsString::from("Zeta"), OsString::from("last €")),
+        (OsString::from("alpha"), OsString::from("")),
+        (OsString::from("AGENT_BRIDGE_OWNED_TEST_MARKER"), OsString::from("1")),
+    ]);
+    // Case-insensitive ordinal order, nothing inherited, double-NUL ended.
+    assert_eq!(decode(platform::exact_environment_block(&supplied).unwrap()),
+        "AGENT_BRIDGE_OWNED_TEST_MARKER=1\0alpha=\0Zeta=last €\0\0");
+    assert_eq!(platform::exact_environment_block(&BTreeMap::new()).unwrap(), vec![0, 0]);
+    for (name, value) in [("", "x"), ("BAD=KEY", "x"), ("BAD\0KEY", "x"), ("OK", "bad\0value")] {
+        let invalid = BTreeMap::from([(OsString::from(name), OsString::from(value))]);
+        assert_eq!(platform::exact_environment_block(&invalid).unwrap_err().kind(), io::ErrorKind::InvalidInput);
+    }
+    let ambiguous = BTreeMap::from([
+        (OsString::from("CASE_COLLISION"), OsString::from("one")),
+        (OsString::from("case_collision"), OsString::from("two")),
+    ]);
+    assert_eq!(platform::exact_environment_block(&ambiguous).unwrap_err().kind(), io::ErrorKind::InvalidInput);
+    // The overlay block keeps inheriting this process environment.
+    let overlay = BTreeMap::from([(OsString::from("AGENT_BRIDGE_OWNED_TEST_MARKER"), Some(OsString::from("1")))]);
+    let inherited = decode(platform::environment_block(&overlay).unwrap().unwrap()).to_ascii_uppercase();
+    assert!(inherited.starts_with("CARGO_MANIFEST_DIR=") || inherited.contains("\0CARGO_MANIFEST_DIR="));
+}
+
+#[test]
+fn stdio_launcher_child_has_no_console_owned_job_and_exact_env() {
+    use crate::extensions::stdio_child::{spawn_contained, ContainedLauncher};
+    use agent_bridge_extensions::stdio::{StdioChild, StdioLaunch, StdioLauncher};
+    assert!(std::env::var_os("CARGO_MANIFEST_DIR").is_some(), "Cargo must supply an inherited variable");
+    let literal = r#"two words "quoted""#;
+    let executable = fixture_program();
+    let arguments = fixture_args(FIXTURE, &["--literal", literal]);
+    let cwd = std::env::temp_dir();
+    let mut environment = BTreeMap::from([
+        (OsString::from("AGENT_BRIDGE_OWNED_TEST_MARKER"), OsString::from("stdio exact €")),
+    ]);
+    if let Some(root) = std::env::var_os("SystemRoot") {
+        environment.insert("SystemRoot".into(), root);
+    }
+    let launch = StdioLaunch { executable: &executable, arguments: &arguments, cwd: &cwd, environment: &environment };
+
+    let mut child = spawn_contained(&launch).expect("stdio launch must reach the owned Job");
+    read_until(&mut child, "fixture-ready");
+    send(&mut child, json!({"action":"probe"}));
+    let observed = probe(&read_until(&mut child, "probe:"));
+    assert_eq!(observed["pid"], child.root_pid());
+    assert!(child.owns_process(child.root_pid()).unwrap(), "root must be a live Job member");
+    assert_eq!(observed["console"], false);
+    assert_eq!(observed["argv"].as_array().unwrap().last().unwrap(), literal);
+    assert_eq!(observed["marker"], "stdio exact €");
+    assert_eq!(observed["cargo_manifest_dir"], Value::Null, "environment must not be inherited");
+    // Drive the remaining lifecycle through the extension seam only.
+    let seam: &mut dyn StdioChild = &mut child;
+    let mut buf = [0u8; 64];
+    let mut stderr = Vec::new();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !String::from_utf8_lossy(&stderr).contains("owned-child-stderr") {
+        match seam.read_stderr(&mut buf) {
+            Ok(count) => stderr.extend_from_slice(&buf[..count]),
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
+            Err(error) => panic!("stderr failed: {error}"),
+        }
+        assert!(Instant::now() < deadline, "stderr witness missing");
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert_eq!(seam.read_stdout(&mut buf).unwrap_err().kind(), io::ErrorKind::WouldBlock);
+    assert!(!seam.finish().unwrap(), "a live child is not finished");
+    seam.terminate().unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !seam.finish().unwrap() {
+        assert!(Instant::now() < deadline, "terminated Job did not empty");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(seam.write_stdin(b"x").is_err(), "terminate closes stdin");
+    assert!(!child.owns_process(child.root_pid()).unwrap());
+
+    // The boxed production launcher yields the same contained child.
+    let mut boxed = ContainedLauncher.launch(&launch).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut out = Vec::new();
+    while !String::from_utf8_lossy(&out).contains("fixture-ready") {
+        match boxed.read_stdout(&mut buf) {
+            Ok(count) => out.extend_from_slice(&buf[..count]),
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
+            Err(error) => panic!("stdout failed: {error}"),
+        }
+        assert!(Instant::now() < deadline, "boxed child did not start");
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    boxed.close_stdin();
+    // Stdin EOF ends the fixture loop; finish then proves the Job emptied.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !boxed.finish().unwrap() {
+        assert!(Instant::now() < deadline, "boxed child did not exit after stdin EOF");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}

@@ -11,6 +11,7 @@ impl Backend for Fake {
         Ok(NativeWindow { identity:self.identity.lock().unwrap().clone(), x:1, y:2,
             width:300, height:200, enabled:true })
     }
+    #[cfg(any(target_os="linux",target_os="macos"))]
     fn confirm(&mut self, _: &DedicatedWindow) -> io::Result<()> { Ok(()) }
     fn capabilities(&self) -> Capabilities {
         Capabilities { backend:"fixture", tree:"fixture_controls",

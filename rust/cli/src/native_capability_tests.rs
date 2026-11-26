@@ -31,6 +31,7 @@ impl Fixture {
             oauth_state: Some(root.clone()), oauth_origin: Some(ORIGIN.into()),
             oauth_audience: Some(Audience::Workstation), project: None, open_browser: false,
             capability_selection: Some(json!({"identity":marker,"total_tools":46,"filesystem":{"kind":"workspace"}})),
+            request_audit: None,
         }, ProfileControl::new(DesktopProfile::FullyUnlocked), None);
         Self { operator, root, id, marker }
     }

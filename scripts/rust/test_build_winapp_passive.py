@@ -122,6 +122,26 @@ def synthesize_upstream_files() -> dict[str, str]:
     return files
 
 
+class WinAppProvenanceInputTests(unittest.TestCase):
+    def test_committed_provenance_matches_the_tracked_build_inputs(self):
+        # Each pinned input of the committed WinApp build must have the same
+        # bytes in every checkout and in the source archive.
+        provenance = json.loads((REPO_ROOT / "native/agent-bridge-native/notices/WINAPP-BUILD-PROVENANCE.json")
+                                .read_text(encoding="utf-8"))
+        tests = PATCHES_DIR / "tests"
+        sources = {"Program.cs": "PassiveCaptureContract.cs"}
+        inputs = {"build_script": (provenance["build_script"], SCRIPT)}
+        inputs.update({"patches/" + name: (record, PATCHES_DIR / name) for name, record in provenance["patches"].items()})
+        inputs.update({"contract_sources/" + name: (record, tests / sources.get(name, name))
+                       for name, record in provenance["contract_sources"].items()})
+        self.assertGreaterEqual(len(inputs), 7)
+        for label, (record, path) in inputs.items():
+            data = path.read_bytes()
+            with self.subTest(label):
+                self.assertEqual({"sha256": sha256_bytes(data), "size": len(data)},
+                                 {"sha256": record["sha256"], "size": record["size"]})
+
+
 class WinAppExactPassiveBuildTests(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory(prefix="ab-winapp-build-test-")

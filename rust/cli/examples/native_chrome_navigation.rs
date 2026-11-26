@@ -1,5 +1,4 @@
 //! Single bounded, operator-selected preparation walkthrough. Never deploy.
-#![allow(dead_code, unused_imports)]
 #![recursion_limit = "256"]
 
 #[cfg(not(windows))]
@@ -8,12 +7,8 @@ fn main() {
 }
 
 #[cfg(windows)]
-#[path = "../src/browser_docs.rs"]
-mod browser_docs;
-
-#[cfg(windows)]
 mod win_demo {
-    use crate::browser_docs::interactive::{
+    use agent_bridge::walkthroughs::{
         approve_local_with_transfers, LocalInteractiveSelection,
         LocalTransferSelection, NativeProvider,
     };

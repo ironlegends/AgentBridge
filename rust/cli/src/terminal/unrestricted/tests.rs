@@ -1,9 +1,8 @@
 //! Real owned-child regression tests. No operator settings, network or service.
 use super::*;
 use agent_bridge_gateway::ToolHandler;
-use std::io::Write;
 #[cfg(not(windows))]
-use std::io::BufRead;
+use std::io::{BufRead, Write};
 use crate::test_process_fixture::{program as fixture_program, args as fixture_args};
 
 struct Harness {
@@ -67,12 +66,13 @@ impl Harness {
     }
 }
 
-// A literal ignored fixture runs only as a child selected by the exact test
-// name. It is never an alternative production subcommand or public tool.
+// A fixture runs only as a child selected by the exact test name; an
+// ordinary run returns at once. It is never an alternative production
+// subcommand or public tool.
 #[cfg(not(windows))]
 #[test]
-#[ignore]
 fn child_fixture() {
+    if !crate::test_process_fixture::selected("terminal::unrestricted::tests::child_fixture") { return; }
     let mut descendants = Vec::new();
     println!("fixture-ready");
     std::io::stdout().flush().unwrap();
@@ -93,7 +93,7 @@ fn child_fixture() {
                 use std::os::windows::process::CommandExt;
                 command.creation_flags(0x08000000);
             }
-            let mut child = command.args(["--ignored", "--exact", "terminal::unrestricted::tests::heartbeat_fixture", "--nocapture"])
+            let mut child = command.args(["--exact", "terminal::unrestricted::tests::heartbeat_fixture", "--nocapture"])
                 .stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::null()).spawn().unwrap();
             writeln!(child.stdin.take().unwrap(), "{path}").unwrap();
@@ -109,8 +109,8 @@ fn child_fixture() {
 
 #[cfg(not(windows))]
 #[test]
-#[ignore]
 fn heartbeat_fixture() {
+    if !crate::test_process_fixture::selected("terminal::unrestricted::tests::heartbeat_fixture") { return; }
     let mut path = String::new();
     std::io::stdin().read_line(&mut path).unwrap();
     let mut output = std::fs::OpenOptions::new().create_new(true).write(true).open(path.trim()).unwrap();
@@ -123,8 +123,8 @@ fn heartbeat_fixture() {
 
 #[cfg(not(windows))]
 #[test]
-#[ignore]
 fn argv_fixture() {
+    if !crate::test_process_fixture::selected("terminal::unrestricted::tests::argv_fixture") { return; }
     println!("argv:{}", serde_json::to_string(&std::env::args().collect::<Vec<_>>()).unwrap());
 }
 
@@ -788,8 +788,9 @@ mod unified_windows {
     fn unified_gateway_hidden_console_stdio_and_complete_capture() {
         verify_hidden_console_fixture(&Unified::new(DesktopProfile::FullyUnlocked));
     }
+    /// Requires explicit operator permission to display a real console window.
+    #[cfg(feature = "qualification")]
     #[test]
-    #[ignore = "requires explicit operator permission to display a real console window"]
     fn unified_gateway_visible_opt_in_has_console_stdio_and_no_false_capture() {
         let h = Unified::new(DesktopProfile::FullyUnlocked);
         verify_hidden_console_fixture(&h);
@@ -866,8 +867,9 @@ mod unified_windows {
         }
     }
 
+    /// Requires the packaged native helper and an isolated synthetic Virtual Desktop.
+    #[cfg(feature = "qualification")]
     #[test]
-    #[ignore = "requires the packaged native helper and an isolated synthetic Virtual Desktop"]
     fn unified_gateway_places_owned_gui_on_lease_and_stops_it_on_revocation() {
         use crate::agent_desktop::{self, AgentDesktopConfig, AgentDesktopHandle, DesktopBinding};
         use sha2::{Digest, Sha256};

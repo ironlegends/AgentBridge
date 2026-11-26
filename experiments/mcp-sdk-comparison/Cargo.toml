@@ -1,0 +1,26 @@
+[package]
+name = "agent-bridge-mcp-sdk-comparison"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# Standalone experiment; never add rmcp to the production workspace lockfile.
+[workspace]
+
+[dependencies]
+agent-bridge-gateway = { path = "../../rust/gateway", features = ["modern-preview"] }
+serde_json = "1"
+rmcp = { version = "=3.11.0", default-features = false, features = ["server", "macros", "schemars", "transport-io"] }
+tokio = { version = "1", features = ["rt", "macros"] }
+
+[profile.release]
+debug = false
+lto = false
+
+[[bin]]
+name = "custom-preview"
+path = "src/custom.rs"
+
+[[bin]]
+name = "rmcp-preview"
+path = "src/sdk.rs"

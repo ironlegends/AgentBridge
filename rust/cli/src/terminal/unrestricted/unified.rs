@@ -1,9 +1,13 @@
 //! Launch settings and lease authority for the unified direct terminal.
 use super::{invalid, string, ProcessResult};
-use crate::agent_desktop::{AgentDesktopHandle, DesktopLease};
+use crate::agent_desktop::AgentDesktopHandle;
+#[cfg(windows)]
+use crate::agent_desktop::DesktopLease;
+#[cfg(windows)]
 use crate::owned_children::OwnedChild;
 use serde_json::{Map, Value};
 use std::path::{Path, PathBuf};
+#[cfg(windows)]
 use std::time::Duration;
 
 #[derive(Clone)]
@@ -27,6 +31,7 @@ pub(super) struct Presentation {
 pub(super) struct TemporaryDirectory(PathBuf);
 
 impl TemporaryDirectory {
+    #[cfg(windows)]
     pub(super) fn path(&self) -> &Path { &self.0 }
 
     pub(super) fn cleanup(&self) -> std::io::Result<()> {
@@ -44,11 +49,13 @@ impl Drop for TemporaryDirectory {
 #[derive(Clone)]
 pub(super) struct LeaseBinding {
     desktops: AgentDesktopHandle,
+    #[cfg(windows)]
     lease: DesktopLease,
     pub(super) id: String,
 }
 
 impl LeaseBinding {
+    #[cfg(windows)]
     pub(super) fn place(&self, child: &OwnedChild, timeout: Duration) -> ProcessResult<()> {
         self.desktops.place_owned_tree(&self.lease, child, timeout)
             .map_err(|error| error.to_string())
@@ -121,8 +128,13 @@ impl Configuration {
             return Err("PROCESS_VISIBLE_AGENT_DESKTOP_UNSUPPORTED: the system console host cannot be verified as a member of the owned Job".into());
         }
         let lease = lease_id.map(|id| {
-            let lease = self.desktops.verify_lease(id).map_err(|error| error.to_string())?;
-            Ok::<_, String>(LeaseBinding { desktops: self.desktops.clone(), lease, id: id.to_owned() })
+            let _lease = self.desktops.verify_lease(id).map_err(|error| error.to_string())?;
+            Ok::<_, String>(LeaseBinding {
+                desktops: self.desktops.clone(),
+                #[cfg(windows)]
+                lease: _lease,
+                id: id.to_owned(),
+            })
         }).transpose()?;
         #[cfg(windows)]
         let cwd_warning = if cwd_requested {

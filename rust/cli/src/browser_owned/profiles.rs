@@ -1,10 +1,17 @@
-use super::resources::{check_physical, relative};
+#[cfg(windows)]
+use super::resources::check_physical;
+use super::resources::relative;
 use crate::runtime::RuntimeError;
+#[cfg(windows)]
 use serde_json::{json, Value};
+#[cfg(windows)]
 use std::fs::{self, File, OpenOptions};
+#[cfg(windows)]
 use std::path::{Path, PathBuf};
 
+#[cfg(windows)]
 pub(super) struct Profiles { pub root: PathBuf, _lock: File }
+#[cfg(windows)]
 pub(super) struct SessionPaths { pub session: PathBuf, pub profile: PathBuf, pub persistent: bool }
 
 pub(super) fn opaque_id() -> Result<String, RuntimeError> {
@@ -20,11 +27,13 @@ pub(super) fn profile_id(id: &str) -> Result<(), RuntimeError> {
     }
     Ok(())
 }
+#[cfg(windows)]
 pub(super) fn physical_directory(path: &Path) -> Result<PathBuf, RuntimeError> {
     check_physical(path)?;
     if !fs::metadata(path)?.is_dir() { return Err("BROWSER_PRIVATE_DIRECTORY_REQUIRED".into()); }
     Ok(path.canonicalize()?)
 }
+#[cfg(windows)]
 pub(super) fn remove_physical_tree(path: &Path) -> Result<(), RuntimeError> {
     if !path.try_exists()? { return Ok(()); }
     check_physical(path)?;
@@ -40,6 +49,7 @@ pub(super) fn remove_physical_tree(path: &Path) -> Result<(), RuntimeError> {
 }
 // Only final cleanup after verified Job drain may wait for transient Windows
 // sharing locks. Ordinary reap remains nonblocking for healthy sessions.
+#[cfg(windows)]
 pub(super) fn retire_after_verified_drain(
     mut attempt: impl FnMut() -> Result<(), RuntimeError>,
     mut observe: impl FnMut(&RuntimeError),
@@ -62,6 +72,7 @@ pub(super) fn retire_after_verified_drain(
         }
     }
 }
+#[cfg(windows)]
 impl Profiles {
     pub(super) fn open(root: &Path) -> Result<Self, RuntimeError> {
         if !root.is_absolute() { return Err("BROWSER_STATE_ROOT_NOT_ABSOLUTE".into()); }

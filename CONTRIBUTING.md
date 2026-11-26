@@ -20,6 +20,12 @@ Run the full workspace regression suite across all 14 crates:
 cargo test --locked --workspace
 ```
 
+The default Rust suites have zero ignored tests. Keep tests that require
+external fixtures behind explicit Cargo features:
+
+- `cargo test --locked -p agent-bridge --features qualification` enables Windows release qualification tests.
+- `cargo test --locked -p agent-bridge-lifecycle --features low-il-specimen` enables the Windows diagnostics that require an approved Low-IL specimen.
+
 Run the independent native desktop application tests (separate Cargo workspace) and its frontend state tests:
 
 ```sh
@@ -35,6 +41,10 @@ python3 -m unittest discover -p "test_*.py"
 ```
 
 Some script tests are skipped on Windows when they need Unix symlinks or platform tools.
+
+From the repository root, run `python3 scripts/rust/repository_hygiene.py --repo .`.
+The check requires matching product versions in the CLI and desktop Cargo
+manifests and no `version` field in `app/src-tauri/tauri.conf.json`.
 
 Build the standalone release binary:
 

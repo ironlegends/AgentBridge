@@ -1,0 +1,91 @@
+{
+  "protocol_version": "2026-07-28",
+  "transport": "stdio",
+  "rounds": 3,
+  "calls_per_round": 300,
+  "warmup_calls": 20,
+  "results": {
+    "custom": {
+      "binary_bytes": 365056,
+      "runs": [
+        {
+          "startup_ms": 48.3506,
+          "median_rtt_ms": 0.0176,
+          "p95_rtt_ms": 0.056,
+          "idle_working_set_bytes": 4689920,
+          "final_working_set_bytes": 4698112,
+          "peak_working_set_bytes": 4698112,
+          "confirmed_calls": 320
+        },
+        {
+          "startup_ms": 13.3712,
+          "median_rtt_ms": 0.0253,
+          "p95_rtt_ms": 0.0289,
+          "idle_working_set_bytes": 4182016,
+          "final_working_set_bytes": 4190208,
+          "peak_working_set_bytes": 4190208,
+          "confirmed_calls": 320
+        },
+        {
+          "startup_ms": 26.0216,
+          "median_rtt_ms": 0.0428,
+          "p95_rtt_ms": 0.0739,
+          "idle_working_set_bytes": 4177920,
+          "final_working_set_bytes": 4186112,
+          "peak_working_set_bytes": 4186112,
+          "confirmed_calls": 320
+        }
+      ],
+      "median_of_runs": {
+        "startup_ms": 26.0216,
+        "median_rtt_ms": 0.0253,
+        "p95_rtt_ms": 0.056,
+        "idle_working_set_bytes": 4182016,
+        "final_working_set_bytes": 4190208,
+        "peak_working_set_bytes": 4190208,
+        "confirmed_calls": 320
+      }
+    },
+    "rmcp": {
+      "binary_bytes": 2997248,
+      "runs": [
+        {
+          "startup_ms": 79.2439,
+          "median_rtt_ms": 0.1173,
+          "p95_rtt_ms": 0.1503,
+          "idle_working_set_bytes": 6021120,
+          "final_working_set_bytes": 6053888,
+          "peak_working_set_bytes": 6053888,
+          "confirmed_calls": 320
+        },
+        {
+          "startup_ms": 16.9999,
+          "median_rtt_ms": 0.0421,
+          "p95_rtt_ms": 0.0822,
+          "idle_working_set_bytes": 5525504,
+          "final_working_set_bytes": 5554176,
+          "peak_working_set_bytes": 5554176,
+          "confirmed_calls": 320
+        },
+        {
+          "startup_ms": 16.9707,
+          "median_rtt_ms": 0.1166,
+          "p95_rtt_ms": 0.1402,
+          "idle_working_set_bytes": 5525504,
+          "final_working_set_bytes": 5570560,
+          "peak_working_set_bytes": 5570560,
+          "confirmed_calls": 320
+        }
+      ],
+      "median_of_runs": {
+        "startup_ms": 16.9999,
+        "median_rtt_ms": 0.1166,
+        "p95_rtt_ms": 0.1402,
+        "idle_working_set_bytes": 5525504,
+        "final_working_set_bytes": 5570560,
+        "peak_working_set_bytes": 5570560,
+        "confirmed_calls": 320
+      }
+    }
+  }
+}

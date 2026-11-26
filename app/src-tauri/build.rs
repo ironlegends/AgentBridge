@@ -7,6 +7,13 @@ const COMMANDS: &[&str] = &[
 ];
 
 fn main() {
+    // Release packaging scans the frontend named by tauri.conf.json. A merged
+    // TAURI_CONFIG, also one set through Cargo's [env], could embed another.
+    println!("cargo:rerun-if-env-changed=TAURI_CONFIG");
+    println!("cargo:rerun-if-env-changed=AGENT_BRIDGE_RELEASE_CHANNEL");
+    if std::env::var_os("AGENT_BRIDGE_RELEASE_CHANNEL").is_some() && std::env::var_os("TAURI_CONFIG").is_some() {
+        panic!("TAURI_CONFIG is not admitted for release packaging");
+    }
     tauri_build::try_build(tauri_build::Attributes::new()
         .app_manifest(tauri_build::AppManifest::new().commands(COMMANDS)))
         .expect("desktop command permission manifest");

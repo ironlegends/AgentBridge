@@ -43,6 +43,7 @@
 //! A successful spawn is NOT evidence that Chrome honored all flags or opened
 //! the URL. The user retains normal responsibility for sign-in and interaction.
 
+#[cfg(any(windows, target_os = "macos"))]
 use std::env;
 use std::error::Error;
 use std::fmt;

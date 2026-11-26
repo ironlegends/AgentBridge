@@ -51,6 +51,7 @@ pub(crate) mod browser_owned;
 mod browser_docs;
 mod extensions;
 mod gemini;
+mod request_audit;
 mod lifecycle;
 pub(crate) mod owned_children;
 pub(crate) mod provider_owner;
@@ -60,6 +61,16 @@ mod terminal;
 mod ui;
 mod window_inspection;
 
+/// Local entry points for the separately compiled browser walkthroughs.
+#[doc(hidden)]
+pub mod walkthroughs {
+    #[cfg(windows)]
+    pub use crate::browser_docs::interactive::{
+        approve_local_with_transfers, LocalInteractiveSelection, LocalTransferSelection, NativeProvider,
+    };
+    pub use crate::browser_docs::learn::preparation_once;
+}
+
 use agent_bridge_web_launch::{ChromeLauncher, LocalCliProfiles, LaunchRequest, OperatorApproval, Provider};
 use agent_bridge_core::{inspect_existing, CoreDatabase};
 use runtime::RuntimeError;
@@ -67,7 +78,14 @@ use std::ffi::OsString;
 use std::path::Path;
 use std::io::{self, BufRead, IsTerminal, Read, Write};
 
-const USAGE: &str = "agent-bridge start [--state-dir <directory>] [--database <path>] [--port <number>]\nagent-bridge stop [--state-dir <directory>]\nagent-bridge web open <private-directory> <chatgpt|gemini> <mission-id> <subtask-id> <ChatGPT-project-URL|Gemini-notebook-URL>\nagent-bridge import <database-path> <task-room.json> [--historical-source-provider <provider>]\nagent-bridge settings init <private-directory>\nagent-bridge oauth enroll <private-oauth-state> <https-origin> <missions|workstation>\nagent-bridge oauth requests <private-oauth-state> <https-origin> <missions|workstation>\nagent-bridge oauth approve <private-oauth-state> <https-origin> <missions|workstation> <request-id> <exact-callback-from-client-interface>\nagent-bridge workspace inspect <absolute-project-directory> [--git-revision <database> <private-settings-directory>]\nagent-bridge gemini serve <database> <private-state> <https-origin> <loopback-port>\nagent-bridge gemini project-read <db-boundary> <workstation-oauth-state> <https-workstation-origin> <loopback-port> --read-project <absolute-project> --missions-state <missions-oauth-state> --missions-origin <https-missions-origin> --settings-dir <private-settings-directory> --lifecycle-dir <private-lifecycle-directory>\nagent-bridge gemini workstation <db-boundary> <NEW-private-workstation-oauth-state> <DISTINCT-https-workstation-origin> <loopback-port> --project <absolute-project> --profile <read-only|workspace-write|full-control|fully-unlocked> --missions-state <missions-oauth-state> --missions-origin <https-missions-origin> --settings-dir <private-settings-directory> --lifecycle-dir <private-lifecycle-directory> [--enable-task-rooms] [--enable-settings-tools] [--enable-processes] [--unified-v1] [--ui-port <port> [--ui-open]] [--local-window-read <dedicated-desktop|macos|x11:N> <absolute-executable> <class-or-bundle-id> <exact-title>] [--local-doc-page <relative-html-or-markdown> ... | --local-learn-url <exact-Microsoft-Learn-HTTPS-URL> | --local-chrome-page <project-relative-html> ... [--local-chrome-origin https://learn.microsoft.com]]\nagent-bridge extensions describe <private-directory> <server> <tool>\nagent-bridge extensions refresh-check <private-directory> microsoft_learn\nagent-bridge extensions requests <private-directory>\nagent-bridge extensions request <private-directory> <request-id>\nagent-bridge extensions approve <private-directory> <request-id>\nagent-bridge extensions refuse <private-directory> <request-id>\nagent-bridge extensions compact <private-directory>\nagent-bridge extensions forget-absent <private-directory> <server-name>\nagent-bridge db <inspect|init|migrate> <database-path>\nagent-bridge stdio <database-path> [--workspace <directory> | --write-workspace <directory>] [--settings <private-directory>]\nagent-bridge stdio <database-path> --workspace <project> --local-doc-page <relative-html-or-markdown> [--local-doc-page <relative-html-or-markdown>]...\nagent-bridge stdio <database-path> --workspace <project> --local-window-read <dedicated-desktop|macos|x11:N> <absolute-executable> <class-or-bundle-id> <exact-title>\nagent-bridge stdio <database-path> --workspace <project> --local-learn-url <exact-Microsoft-Learn-HTTPS-URL>\nagent-bridge stdio <database-path> --workspace <project> --local-chrome-page <project-relative-html> [--local-chrome-page <project-relative-html>...] [--local-chrome-origin https://learn.microsoft.com]\nagent-bridge serve <database-path> --port <number>\nagent-bridge ui [--port <number>] [--database <path>] [--settings-dir <dir>] [--oauth-state <dir> --oauth-origin <https-origin> --oauth-audience <missions|workstation>] [--project <dir>] [--open]";
+/// The browser Learn reader options stay in 2.x for compatibility with
+/// 2.0.0 and are removed in 3.0.0. The warning goes to stderr, never to
+/// the MCP stdout stream.
+pub(crate) fn warn_deprecated(option: &str) {
+    eprintln!("agent-bridge: {option} is deprecated since 2.1.0 and will be removed in 3.0.0");
+}
+
+const USAGE: &str = "agent-bridge start [--state-dir <directory>] [--database <path>] [--port <number>]\nagent-bridge stop [--state-dir <directory>]\nagent-bridge web open <private-directory> <chatgpt|gemini> <mission-id> <subtask-id> <ChatGPT-project-URL|Gemini-notebook-URL>\nagent-bridge import <database-path> <task-room.json> [--historical-source-provider <provider>]\nagent-bridge settings init <private-directory>\nagent-bridge oauth enroll <private-oauth-state> <https-origin> <missions|workstation>\nagent-bridge oauth requests <private-oauth-state> <https-origin> <missions|workstation>\nagent-bridge oauth approve <private-oauth-state> <https-origin> <missions|workstation> <request-id> <exact-callback-from-client-interface>\nagent-bridge workspace inspect <absolute-project-directory> [--git-revision <database> <private-settings-directory>]\nagent-bridge gemini serve <database> <private-state> <https-origin> <loopback-port>\nagent-bridge gemini project-read <db-boundary> <workstation-oauth-state> <https-workstation-origin> <loopback-port> --read-project <absolute-project> --missions-state <missions-oauth-state> --missions-origin <https-missions-origin> --settings-dir <private-settings-directory> --lifecycle-dir <private-lifecycle-directory>\nagent-bridge gemini workstation <db-boundary> <NEW-private-workstation-oauth-state> <DISTINCT-https-workstation-origin> <loopback-port> --project <absolute-project> --profile <read-only|workspace-write|full-control|fully-unlocked> --missions-state <missions-oauth-state> --missions-origin <https-missions-origin> --settings-dir <private-settings-directory> --lifecycle-dir <private-lifecycle-directory> [--enable-task-rooms] [--enable-settings-tools] [--enable-processes] [--unified-v1] [--ui-port <port> [--ui-open]] [--local-window-read <dedicated-desktop|macos|x11:N> <absolute-executable> <class-or-bundle-id> <exact-title>] [--local-doc-page <relative-html-or-markdown> ... | --local-learn-url <exact-Microsoft-Learn-HTTPS-URL> | --local-chrome-page <project-relative-html> ... [--local-chrome-origin https://learn.microsoft.com]]\nagent-bridge extensions describe <private-directory> <server> <tool>\nagent-bridge extensions refresh-check <private-directory> <mcp_docs|microsoft_learn|stdio-server>\nagent-bridge extensions requests <private-directory>\nagent-bridge extensions request <private-directory> <request-id>\nagent-bridge extensions approve <private-directory> <request-id> [<request-id>...]\nagent-bridge extensions refuse <private-directory> <request-id>\nagent-bridge extensions compact <private-directory>\nagent-bridge extensions forget-absent <private-directory> <server-name>\nagent-bridge extensions import <private-directory> <mcp-json-path> [--inherit-path <stdio-server>]...\nagent-bridge db <inspect|init|migrate> <database-path>\nagent-bridge stdio <database-path> [--workspace <directory> | --write-workspace <directory>] [--settings <private-directory>]\nagent-bridge stdio <database-path> --workspace <project> --local-doc-page <relative-html-or-markdown> [--local-doc-page <relative-html-or-markdown>]...\nagent-bridge stdio <database-path> --workspace <project> --local-window-read <dedicated-desktop|macos|x11:N> <absolute-executable> <class-or-bundle-id> <exact-title>\nagent-bridge stdio <database-path> --workspace <project> --local-learn-url <exact-Microsoft-Learn-HTTPS-URL>\nagent-bridge stdio <database-path> --workspace <project> --local-chrome-page <project-relative-html> [--local-chrome-page <project-relative-html>...] [--local-chrome-origin https://learn.microsoft.com]\nagent-bridge serve <database-path> --port <number>\nagent-bridge ui [--port <number>] [--database <path>] [--settings-dir <dir>] [--oauth-state <dir> --oauth-origin <https-origin> --oauth-audience <missions|workstation>] [--project <dir>] [--open]";
 
 // This workflow runs ONLY as an explicitly selected LOCAL CLI command.
 // OAuth HTTP/MCP handlers cannot invoke this function. A visible interactive
@@ -285,8 +303,23 @@ pub fn run_cli(args: &[OsString]) -> Result<(), RuntimeError> {
         [cmd, action, dir] if cmd == "extensions" && matches!(action.to_str(), Some("requests" | "compact")) => {
             extensions::local(Path::new(dir), action.to_str().ok_or(USAGE)?, None)
         }
+        [cmd, action, dir, path, options @ ..] if cmd == "extensions" && action == "import" && !options.is_empty() => {
+            let mut inherit_path = std::collections::BTreeSet::new();
+            let mut iter = options.iter();
+            while let Some(flag) = iter.next() {
+                match (flag.to_str(), iter.next().and_then(|name| name.to_str())) {
+                    (Some("--inherit-path"), Some(name)) => { inherit_path.insert(name.to_owned()); }
+                    _ => return Err(USAGE.into()),
+                }
+            }
+            extensions::import(Path::new(dir), Path::new(path), &inherit_path)
+        }
+        [cmd, action, dir, ids @ ..] if cmd == "extensions" && action == "approve" && ids.len() > 1 => {
+            let ids = ids.iter().map(|id| id.to_str().ok_or(USAGE)).collect::<Result<Vec<_>, _>>()?;
+            extensions::approve_batch(Path::new(dir), &ids)
+        }
         [cmd, action, dir, id] if cmd == "extensions"
-            && matches!(action.to_str(), Some("request" | "approve" | "refuse" | "forget-absent")) =>
+            && matches!(action.to_str(), Some("request" | "approve" | "refuse" | "forget-absent" | "import")) =>
         {
             extensions::local(Path::new(dir), action.to_str().ok_or(USAGE)?, Some(id.to_str().ok_or(USAGE)?))
         }
@@ -320,6 +353,7 @@ pub fn run_cli(args: &[OsString]) -> Result<(), RuntimeError> {
                     }
                     Some("--local-learn-url") if local_learn_url.is_none()
                         && local_doc_pages.is_empty() && local_chrome_pages.is_empty() => {
+                        warn_deprecated("--local-learn-url");
                         local_learn_url = Some(iter.next().and_then(|v|v.to_str())
                             .ok_or(USAGE)?.to_owned());
                     }
@@ -329,6 +363,7 @@ pub fn run_cli(args: &[OsString]) -> Result<(), RuntimeError> {
                             .ok_or(USAGE)?.to_owned());
                     }
                     Some("--local-chrome-origin") if local_chrome_origins.len()<4 => {
+                        warn_deprecated("--local-chrome-origin");
                         local_chrome_origins.push(iter.next().and_then(|v|v.to_str())
                             .ok_or(USAGE)?.to_owned());
                     }

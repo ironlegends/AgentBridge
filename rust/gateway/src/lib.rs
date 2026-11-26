@@ -17,8 +17,11 @@
 //! This crate performs stateless MCP JSON-RPC routing (`initialize`, `ping`,
 //! notifications without responses, `tools/list`, `tools/call`) without
 //! binding sockets, spawning commands, or accessing sessions or secrets.
+//! Requests with MCP 2026-07-28 per-request metadata, and `server/discover`,
+//! are served by [`modern`] instead of the legacy `initialize` era.
 
 pub mod stdio;
+pub mod modern;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Number, Value};
@@ -32,10 +35,17 @@ pub const JSONRPC_VERSION: &str = "2.0";
 /// Default MCP protocol versions supported by this router, ordered from newest
 /// (preferred) to oldest.
 pub const DEFAULT_SUPPORTED_PROTOCOL_VERSIONS: &[&str] = &[
+    "2025-11-25",
     "2025-06-18",
     "2025-03-26",
     "2024-11-05",
 ];
+
+/// A client-supplied protocol version as it may be echoed in an error: only
+/// a short string, so arbitrary client data is never reflected.
+pub(crate) fn echoed_version(requested: &str) -> Value {
+    if requested.len() <= 32 { Value::from(requested) } else { Value::Null }
+}
 
 /// Standard JSON-RPC 2.0 error codes.
 pub mod error_codes {
@@ -165,6 +175,11 @@ pub struct GatewayConfig {
     pub supported_protocol_versions: Vec<String>,
     /// Optional server usage instructions returned during `initialize`.
     pub instructions: Option<String>,
+    /// Freshness hint, in milliseconds, for `server/discover` and
+    /// `tools/list`. The default `0` means "re-fetch every time". A positive
+    /// value is safe only when the published catalog cannot change for the
+    /// lifetime of this router; results stay `cacheScope: private`.
+    pub catalog_ttl_ms: u64,
     /// When `false` (default, standard MCP behavior), an unknown client version
     /// negotiates down to the server's preferred version. When `true`, an
     /// unsupported version returns a `-32602` Invalid Params protocol error.
@@ -180,6 +195,7 @@ impl GatewayConfig {
                 .map(|v| (*v).to_string())
                 .collect(),
             instructions: None,
+            catalog_ttl_ms: 0,
             strict_version_negotiation: false,
         }
     }
@@ -199,6 +215,12 @@ impl GatewayConfig {
 
     pub fn with_instructions(mut self, instructions: impl Into<String>) -> Self {
         self.instructions = Some(instructions.into());
+        self
+    }
+
+    /// Sets the `ttlMs` freshness hint for discovery and catalog listings.
+    pub fn with_catalog_ttl_ms(mut self, ttl_ms: u64) -> Self {
+        self.catalog_ttl_ms = ttl_ms;
         self
     }
 
@@ -455,6 +477,10 @@ pub struct McpGateway<H: ToolHandler> {
     supported_versions: Vec<String>,
     catalog: Vec<ToolDefinition>,
     published_names: HashSet<String>,
+    /// The 2026-07-28 listing, built once: the catalog and its handlers are
+    /// fixed for the lifetime of this router, so each router (one per
+    /// authorization view) holds its own listing.
+    modern_catalog: modern::Catalog,
     handler: H,
 }
 
@@ -493,11 +519,13 @@ impl<H: ToolHandler> McpGateway<H> {
             }
         }
 
+        let modern_catalog = modern::Catalog::new(&filtered_catalog);
         Self {
             config,
             supported_versions,
             catalog: filtered_catalog,
             published_names,
+            modern_catalog,
             handler,
         }
     }
@@ -522,13 +550,18 @@ impl<H: ToolHandler> McpGateway<H> {
         &self.supported_versions
     }
 
-    /// Routes a raw JSON-RPC text frame.
+    /// Routes a raw JSON-RPC text frame to the protocol era it selects.
     ///
-    /// Returns `None` for valid JSON-RPC notifications (no response must be
-    /// sent) and `Some(json)` for requests or protocol errors.
+    /// A frame with modern markers is served by [`McpGateway::handle_modern`]
+    /// and must not contain duplicate object keys; any other frame keeps the
+    /// legacy routing of [`McpGateway::handle_value`]. Returns `None` for valid
+    /// JSON-RPC notifications (no response must be sent) and `Some(json)` for
+    /// requests or protocol errors.
     pub fn handle_str(&self, raw_json: &str) -> Option<String> {
-        let response = match serde_json::from_str::<Value>(raw_json) {
-            Ok(value) => self.handle_value(value)?,
+        let response = match modern::classify(raw_json) {
+            Ok((value, true)) => self.handle_modern(value)?,
+            Ok((value, false)) => self.handle_value(value)?,
+            Err(_) if serde_json::from_str::<Value>(raw_json).is_ok() => modern::ambiguous_json(),
             Err(err) => JsonRpcResponse::error(
                 JsonRpcId::Null,
                 JsonRpcError::parse_error(format!("invalid JSON payload: {err}")),
@@ -659,9 +692,9 @@ impl<H: ToolHandler> McpGateway<H> {
             return JsonRpcResponse::error(
                 id,
                 JsonRpcError::invalid_params_with_data(
-                    format!("unsupported MCP protocolVersion: {requested_version}"),
+                    "unsupported MCP protocolVersion",
                     json!({
-                        "requestedProtocolVersion": requested_version,
+                        "requestedProtocolVersion": echoed_version(requested_version),
                         "supportedProtocolVersions": self.supported_versions,
                     }),
                 ),
@@ -700,15 +733,12 @@ impl<H: ToolHandler> McpGateway<H> {
         match params {
             None | Some(Value::Null) => {}
             Some(Value::Object(map)) => {
-                if let Some(cursor) = map.get("cursor") {
-                    if !cursor.is_null() && !cursor.is_string() {
-                        return JsonRpcResponse::error(
-                            id,
-                            JsonRpcError::invalid_params(
-                                "tools/list params.cursor must be a string",
-                            ),
-                        );
-                    }
+                // The list is never paginated, so no cursor was issued.
+                if map.get("cursor").is_some_and(|cursor| !cursor.is_null()) {
+                    return JsonRpcResponse::error(
+                        id,
+                        JsonRpcError::invalid_params("tools/list params.cursor was not issued"),
+                    );
                 }
             }
             Some(_) => {

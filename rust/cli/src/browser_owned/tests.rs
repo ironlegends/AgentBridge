@@ -135,7 +135,6 @@ fn gateway(config: BrowserConfig, profile:Arc<ProfileControl>, callbacks:Browser
 }
 
 #[test]
-#[ignore = "requires the explicitly pinned offline Windows browser bundle; run with --ignored"]
 fn real_mcp_all_browser_actions_sessions_images_transfers_and_profile_revoke() {
     let root=PrivateTestRoot::new(); let fixture=Fixture::start();
     let profile=Arc::new(ProfileControl::new(DesktopProfile::FullyUnlocked));
@@ -213,7 +212,6 @@ fn real_mcp_all_browser_actions_sessions_images_transfers_and_profile_revoke() {
 }
 
 #[test]
-#[ignore = "requires the explicitly pinned offline Windows browser bundle; run with --ignored"]
 fn worker_deadline_wrong_correlation_and_eof_revoke_and_drain_the_entire_job() {
     let root=PrivateTestRoot::new(); let config=configuration(&root.0);
     let resource=resources::Resources::verify(&config.bundle_root,&config.manifest_sha256).unwrap();
@@ -247,7 +245,6 @@ process.stdin.once('data',()=>{{
 }
 
 #[test]
-#[ignore = "requires the explicitly pinned offline Windows browser bundle; run with --ignored"]
 fn immutable_bundle_qualification_rejects_changed_pins_and_holds_resources_against_write() {
     let root=PrivateTestRoot::new(); let config=configuration(&root.0);
     let mut changed=config.clone(); changed.manifest_sha256="0".repeat(64);
@@ -260,7 +257,6 @@ fn immutable_bundle_qualification_rejects_changed_pins_and_holds_resources_again
 }
 
 #[test]
-#[ignore = "requires the explicitly pinned offline Windows browser bundle; run with --ignored"]
 fn failure_receipt_initial_navigation_reports_closed_session_and_verified_job_cleanup() {
     let root=PrivateTestRoot::new(); let fixture=Fixture::start();
     let profile=Arc::new(ProfileControl::new(DesktopProfile::FullControl));
@@ -278,7 +274,6 @@ fn failure_receipt_initial_navigation_reports_closed_session_and_verified_job_cl
 }
 
 #[test]
-#[ignore = "requires the explicitly pinned offline Windows browser bundle; run with --ignored"]
 fn failure_receipt_publication_preserves_completed_download_without_replaying_effects() {
     let root=PrivateTestRoot::new(); let fixture=Fixture::start();
     let profile=Arc::new(ProfileControl::new(DesktopProfile::FullControl));
@@ -313,7 +308,6 @@ fn failure_receipt_publication_preserves_completed_download_without_replaying_ef
 }
 
 #[test]
-#[ignore = "requires the explicitly pinned offline Windows browser bundle; run with --ignored"]
 fn review_observation_is_reserved_before_any_staging_and_abandoned_staging_is_removed() {
     let root=PrivateTestRoot::new(); let fixture=Fixture::start();
     let mut callbacks=transfers(&root.0);
@@ -342,7 +336,6 @@ fn review_observation_is_reserved_before_any_staging_and_abandoned_staging_is_re
 }
 
 #[test]
-#[ignore = "requires the explicitly pinned offline Windows browser bundle; run with --ignored"]
 fn review_completed_download_is_published_when_after_action_image_fails() {
     let root=PrivateTestRoot::new(); let fixture=Fixture::start();
     let (gateway,mut owner)=gateway(configuration(&root.0),Arc::new(ProfileControl::new(DesktopProfile::FullControl)),transfers(&root.0));
@@ -360,7 +353,6 @@ fn review_completed_download_is_published_when_after_action_image_fails() {
 }
 
 #[test]
-#[ignore = "requires the explicitly pinned offline Windows browser bundle; run with --ignored"]
 fn review_new_page_failure_preserves_created_tab_and_list_always_returns_inventory() {
     let root=PrivateTestRoot::new(); let fixture=Fixture::start();
     let (gateway,mut owner)=gateway(configuration(&root.0),Arc::new(ProfileControl::new(DesktopProfile::FullControl)),transfers(&root.0));
@@ -380,7 +372,6 @@ fn review_new_page_failure_preserves_created_tab_and_list_always_returns_invento
 
 
 #[test]
-#[ignore = "requires the explicitly pinned offline Windows browser bundle; run with --ignored"]
 fn review_mcp_budget_failure_preserves_the_already_committed_artifact_identity() {
     let root=PrivateTestRoot::new(); let fixture=Fixture::start();
     let mut callbacks=transfers(&root.0); let publish=Arc::clone(&callbacks.publish_download);

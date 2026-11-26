@@ -169,6 +169,7 @@ impl QualifiedManifest {
         crate::browser_owned::BrowserConfig {
             bundle_root:self.selection.browser.bundle_root.clone(),
             manifest_sha256:self.selection.browser.manifest_sha256.clone(),
+            #[cfg(windows)]
             state_root:self.selection.browser.state_root.clone(),
         }
     }

@@ -794,6 +794,7 @@ fn oauth_http_client() -> Result<Client> {
         .redirect(reqwest::redirect::Policy::none())
         .retry(reqwest::retry::never())
         .no_proxy()
+        .tls_backend_preconfigured(transport::https_tls()?)
         .connect_timeout(Duration::from_secs(5))
         .timeout(Duration::from_secs(15))
         .build()

@@ -20,9 +20,13 @@ struct Manifest { schema_version: u32, protocol_version: u32, worker: String,
     node: Node, playwright: Playwright, browser: Browser, files: Vec<Entry> }
 
 pub(super) struct Resources {
+    #[cfg(windows)]
     pub root: PathBuf,
+    #[cfg(windows)]
     pub node: PathBuf,
+    #[cfg(windows)]
     pub worker: PathBuf,
+    #[cfg(windows)]
     pub chromium: PathBuf,
     _pins: Vec<File>,
 }
@@ -65,22 +69,19 @@ pub(super) fn check_physical(path: &Path) -> Result<(), RuntimeError> {
     Ok(())
 }
 
+#[cfg(windows)]
 pub(super) fn node_path(path: &Path) -> Result<PathBuf, RuntimeError> {
     let canonical = path.canonicalize()?;
-    #[cfg(windows)] {
-        // Node's main-module resolver rejects a verbatim drive-path argument.
-        // Remove that presentation prefix only when it resolves to the same
-        // already-qualified physical path; never normalize an authority alias.
-        let text = canonical.to_str().ok_or("BROWSER_NODE_PATH_ENCODING")?;
-        let ordinary = if let Some(rest) = text.strip_prefix("\\\\?\\UNC\\") { PathBuf::from(format!("\\\\{rest}")) }
-            else if let Some(rest) = text.strip_prefix("\\\\?\\") { PathBuf::from(rest) }
-            else { canonical.clone() };
-        check_physical(&ordinary)?;
-        if ordinary.canonicalize()? != canonical { return Err("BROWSER_NODE_PATH_IDENTITY_CHANGED".into()); }
-        Ok(ordinary)
-    }
-    #[cfg(not(windows))]
-    Ok(canonical)
+    // Node's main-module resolver rejects a verbatim drive-path argument.
+    // Remove that presentation prefix only when it resolves to the same
+    // already-qualified physical path; never normalize an authority alias.
+    let text = canonical.to_str().ok_or("BROWSER_NODE_PATH_ENCODING")?;
+    let ordinary = if let Some(rest) = text.strip_prefix("\\\\?\\UNC\\") { PathBuf::from(format!("\\\\{rest}")) }
+        else if let Some(rest) = text.strip_prefix("\\\\?\\") { PathBuf::from(rest) }
+        else { canonical.clone() };
+    check_physical(&ordinary)?;
+    if ordinary.canonicalize()? != canonical { return Err("BROWSER_NODE_PATH_IDENTITY_CHANGED".into()); }
+    Ok(ordinary)
 }
 
 pub(super) fn pin(path: &Path, directory: bool) -> Result<File, RuntimeError> {
@@ -183,8 +184,17 @@ impl Resources {
         }
         if seen.len() != expected.len() { return Err("BROWSER_RESOURCE_MISSING".into()); }
         pins.push(manifest_file);
-        Ok(Self { node:root.join(node_relative), worker:root.join(worker_relative),
-            chromium:root.join(chrome_relative), root, _pins:pins })
+        Ok(Self {
+            #[cfg(windows)]
+            node:root.join(node_relative),
+            #[cfg(windows)]
+            worker:root.join(worker_relative),
+            #[cfg(windows)]
+            chromium:root.join(chrome_relative),
+            #[cfg(windows)]
+            root,
+            _pins:pins,
+        })
     }
 }
 

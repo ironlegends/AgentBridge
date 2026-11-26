@@ -57,5 +57,5 @@ pub(crate) fn attach(config: WindowsToolsConfig, profile: ProfileControl, deskto
     provider::attach(config, profile, desktops, catalog, handlers)
 }
 
-#[cfg(all(test, windows))]
+#[cfg(all(test, windows, feature = "qualification"))]
 mod tests;

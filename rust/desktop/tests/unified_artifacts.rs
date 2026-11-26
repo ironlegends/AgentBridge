@@ -134,7 +134,7 @@ fn process_crash_does_not_leave_artifact_bytes_or_an_exclusive_owner() {
     let f = Fixture::new();
     large_file(&f.workspace.join("crash.bin"), 6 * 1024 * 1024 + 1);
     let mut command = Command::new(std::env::current_exe().unwrap());
-    command.args(["--ignored", "--exact", "artifact_crash_fixture", "--nocapture"])
+    command.args(["--exact", "artifact_crash_fixture", "--nocapture"])
         .env("AGENT_BRIDGE_ARTIFACT_TEST_ROOT", &f.root)
         .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
     #[cfg(windows)] { use std::os::windows::process::CommandExt; command.creation_flags(0x08000000); }
@@ -159,11 +159,12 @@ fn process_crash_does_not_leave_artifact_bytes_or_an_exclusive_owner() {
     assert_eq!(names, vec![std::ffi::OsString::from("owner.lock")]);
 }
 
+/// Child of the crash test above; it returns at once in an ordinary run.
 #[test]
-#[ignore = "subprocess fixture for crash cleanup"]
 fn artifact_crash_fixture() {
     use agent_bridge_desktop::unified::UnifiedFileConfig;
-    let root = std::path::PathBuf::from(std::env::var_os("AGENT_BRIDGE_ARTIFACT_TEST_ROOT").unwrap());
+    let Some(root) = std::env::var_os("AGENT_BRIDGE_ARTIFACT_TEST_ROOT") else { return };
+    let root = std::path::PathBuf::from(root);
     let files = UnifiedFiles::open(UnifiedFileConfig { workspace:root.join("workspace"),
         scope:FileScope::Workspace, protected_roots:vec![root.join("private")], private_root:root.join("private") }).unwrap();
     assert!(!result(&files, DesktopProfile::FullyUnlocked, "desktop_artifact_manage",

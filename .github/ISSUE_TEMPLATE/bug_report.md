@@ -9,7 +9,7 @@ labels: bug
 
 - **OS:** (e.g., Windows 11, macOS 15, Ubuntu 24.04)
 - **Version:** (`agent-bridge --version`)
-- **Mode:** (`stdio` / `start` / `gemini serve` / `gemini workstation`)
+- **Mode:** (`agent-bridge-desktop-app` unified or attached / `stdio` / `start` / `serve` / `gemini serve` / `gemini project-read` / `gemini workstation` / `ui`)
 - **Client:** (e.g., ChatGPT Web, Gemini Web, Claude Code, Codex CLI, Cursor)
 
 ## Description

@@ -3,7 +3,7 @@ use agent_bridge_extensions::oauth::{ClientAuthMethod, OAuthServerConfig};
 use agent_bridge_extensions::oauth::{run_oauth_flow, OAuthTokenStore};
 use agent_bridge_extensions::{
     config_sha256, fetch_https_bytes, validate_proposed_endpoint, valid_server_name, Registry,
-    ServerControl,
+    ServerControl, ToolScope,
 };
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
@@ -15,10 +15,10 @@ fn canonical_descriptor_hash(v: &Value) -> String {
     hex::encode(Sha256::digest(c.to_string().as_bytes()))
 }
 
-fn sample_ms_learn_registry() -> Vec<u8> {
+fn sample_mcp_docs_registry() -> Vec<u8> {
     let descriptor = json!({
-        "name": "microsoft_docs_search",
-        "description": "Search Microsoft Learn public docs",
+        "name": "search_model_context_protocol",
+        "description": "Search the public MCP documentation",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -30,10 +30,10 @@ fn sample_ms_learn_registry() -> Vec<u8> {
     serde_json::to_vec(&json!({
         "version": 1,
         "servers": {
-            "microsoft_learn": {
-                "endpoint": "https://learn.microsoft.com/api/mcp",
+            "mcp_docs": {
+                "endpoint": "https://modelcontextprotocol.io/mcp",
                 "tools": {
-                    "microsoft_docs_search": {
+                    "search_model_context_protocol": {
                         "descriptor_sha256": hash,
                         "descriptor": descriptor,
                         "parameters": {
@@ -49,25 +49,25 @@ fn sample_ms_learn_registry() -> Vec<u8> {
 
 #[test]
 fn registry_parse_allowlist_and_tamper_regressions() {
-    let raw = sample_ms_learn_registry();
-    let reg = Registry::parse(&raw).expect("valid microsoft_learn registry");
-    assert!(reg.has_server("microsoft_learn"));
-    assert_eq!(reg.list(), vec!["microsoft_learn:microsoft_docs_search"]);
+    let raw = sample_mcp_docs_registry();
+    let reg = Registry::parse(&raw).expect("valid mcp_docs registry");
+    assert!(reg.has_server("mcp_docs"));
+    assert_eq!(reg.list(), vec!["mcp_docs:search_model_context_protocol"]);
     assert_eq!(config_sha256(&raw).len(), 64);
 
     let searched = reg.search_cached("docs", None, 10).expect("search_cached");
     assert!(!searched["tools"].as_array().unwrap().is_empty());
     let inspected = reg
-        .inspect_cached("microsoft_learn:microsoft_docs_search")
+        .inspect_cached("mcp_docs:search_model_context_protocol")
         .expect("inspect_cached");
-    assert_eq!(inspected["name"], "microsoft_learn:microsoft_docs_search");
+    assert_eq!(inspected["name"], "mcp_docs:search_model_context_protocol");
 
-    // Regression: public Microsoft Learn forbids bearer credentials
+    // Regression: public MCP documentation forbids bearer credentials
     let with_bearer = serde_json::to_vec(&json!({
         "version": 1,
         "servers": {
-            "microsoft_learn": {
-                "endpoint": "https://learn.microsoft.com/api/mcp",
+            "mcp_docs": {
+                "endpoint": "https://modelcontextprotocol.io/mcp",
                 "bearer_env": "AGENT_BRIDGE_EXTENSION_TOKEN",
                 "tools": {}
             }
@@ -76,14 +76,14 @@ fn registry_parse_allowlist_and_tamper_regressions() {
     .unwrap();
     assert!(Registry::parse(&with_bearer).is_err());
 
-    // Regression: unallowlisted tool (e.g. microsoft_docs_fetch) rejected at parse time
+    // Regression: unallowlisted tool (e.g. get_model_context_protocol_page) rejected at parse time
     let unallowlisted = serde_json::to_vec(&json!({
         "version": 1,
         "servers": {
-            "microsoft_learn": {
-                "endpoint": "https://learn.microsoft.com/api/mcp",
+            "mcp_docs": {
+                "endpoint": "https://modelcontextprotocol.io/mcp",
                 "tools": {
-                    "microsoft_docs_fetch": {
+                    "get_model_context_protocol_page": {
                         "descriptor_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
                         "parameters": { "url": { "type": "search_terms" } }
                     }
@@ -98,12 +98,12 @@ fn registry_parse_allowlist_and_tamper_regressions() {
     let tampered = serde_json::to_vec(&json!({
         "version": 1,
         "servers": {
-            "microsoft_learn": {
-                "endpoint": "https://learn.microsoft.com/api/mcp",
+            "mcp_docs": {
+                "endpoint": "https://modelcontextprotocol.io/mcp",
                 "tools": {
-                    "microsoft_docs_search": {
+                    "search_model_context_protocol": {
                         "descriptor_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
-                        "descriptor": { "name": "microsoft_docs_search", "inputSchema": { "type": "object", "properties": {} } },
+                        "descriptor": { "name": "search_model_context_protocol", "inputSchema": { "type": "object", "properties": {} } },
                         "parameters": { "query": { "type": "search_terms" } }
                     }
                 }
@@ -112,14 +112,44 @@ fn registry_parse_allowlist_and_tamper_regressions() {
     }))
     .unwrap();
     assert!(Registry::parse(&tampered).is_err());
+
+    // Microsoft Learn: the same public, tokenless, one-query search adapter.
+    let learn_descriptor = json!({"name": "microsoft_docs_search",
+        "inputSchema": {"type": "object", "properties": {"query": {"type": "string"}}}});
+    let learn = |tool: &str, descriptor: Value, bearer: bool| {
+        let mut server = json!({"endpoint": "https://learn.microsoft.com/api/mcp", "tools": {tool: {
+            "descriptor_sha256": canonical_descriptor_hash(&descriptor), "descriptor": descriptor,
+            "parameters": {"query": {"type": "search_terms"}}}}});
+        if bearer { server["bearer_env"] = json!("AGENT_BRIDGE_EXTENSION_TOKEN"); }
+        serde_json::to_vec(&json!({"version": 1, "servers": {"microsoft_learn": server}})).unwrap()
+    };
+    let reg = Registry::parse(&learn("microsoft_docs_search", learn_descriptor.clone(), false))
+        .expect("valid microsoft_learn registry");
+    assert_eq!(reg.list(), vec!["microsoft_learn:microsoft_docs_search"]);
+    assert!(Registry::parse(&learn("microsoft_docs_search", learn_descriptor, true)).is_err());
+    let fetch = json!({"name": "microsoft_docs_fetch",
+        "inputSchema": {"type": "object", "properties": {"query": {"type": "string"}}}});
+    assert!(Registry::parse(&learn("microsoft_docs_fetch", fetch, false)).is_err());
+    let mut widened: Value = serde_json::from_slice(&learn("microsoft_docs_search",
+        json!({"name": "microsoft_docs_search"}), false)).unwrap();
+    widened["servers"]["microsoft_learn"]["tools"]["microsoft_docs_search"]["parameters"]["language"] =
+        json!({"type": "search_terms"});
+    assert!(Registry::parse(&serde_json::to_vec(&widened).unwrap()).is_err(),
+        "Learn search must keep exactly one bounded query");
+    let mut tampered: Value = serde_json::from_slice(&learn("microsoft_docs_search",
+        json!({"name": "microsoft_docs_search"}), false)).unwrap();
+    tampered["servers"]["microsoft_learn"]["tools"]["microsoft_docs_search"]["descriptor_sha256"] = json!("0".repeat(64));
+    assert!(Registry::parse(&serde_json::to_vec(&tampered).unwrap()).is_err());
+    assert!(agent_bridge_extensions::public_docs_server("microsoft_learn"));
+    assert!(!agent_bridge_extensions::public_docs_server("other_server"));
 }
 
 #[test]
 fn auth_status_truthful_outbound_oauth_gap_and_controls_regressions() {
-    let raw = sample_ms_learn_registry();
+    let raw = sample_mcp_docs_registry();
     let reg = Registry::parse(&raw).expect("parse");
     let fp = reg
-        .server_sha256("microsoft_learn")
+        .server_sha256("mcp_docs")
         .unwrap()
         .expect("server sha256");
 
@@ -127,7 +157,7 @@ fn auth_status_truthful_outbound_oauth_gap_and_controls_regressions() {
 
     // 1. No local decision -> truthful local-only status, outbound_oauth=not_implemented, remote=unknown
     let s_none = reg
-        .auth_status("microsoft_learn", None)
+        .auth_status("mcp_docs", None)
         .unwrap()
         .expect("status");
     assert_eq!(s_none["local_control"], "no_local_decision");
@@ -141,7 +171,7 @@ fn auth_status_truthful_outbound_oauth_gap_and_controls_regressions() {
         config_sha256: "f".repeat(64),
     };
     let s_changed = reg
-        .auth_status("microsoft_learn", Some(&stale_ctrl))
+        .auth_status("mcp_docs", Some(&stale_ctrl))
         .unwrap()
         .unwrap();
     assert_eq!(s_changed["local_control"], "configuration_changed");
@@ -154,21 +184,21 @@ fn auth_status_truthful_outbound_oauth_gap_and_controls_regressions() {
         config_sha256: fp.clone(),
     };
     let mut map = BTreeMap::new();
-    map.insert("microsoft_learn".to_owned(), dis_ctrl.clone());
+    map.insert("mcp_docs".to_owned(), dis_ctrl.clone());
     let disabled_reg = Registry::parse(&raw)
         .unwrap()
         .with_controls(&map)
         .unwrap();
     let s_dis = disabled_reg
-        .auth_status("microsoft_learn", Some(&dis_ctrl))
+        .auth_status("mcp_docs", Some(&dis_ctrl))
         .unwrap()
         .unwrap();
     assert_eq!(s_dis["local_control"], "disabled");
     assert!(disabled_reg
-        .inspect_cached("microsoft_learn:microsoft_docs_search")
+        .inspect_cached("mcp_docs:search_model_context_protocol")
         .is_err());
     assert!(disabled_reg
-        .call("microsoft_learn:microsoft_docs_search", &Map::new())
+        .call("mcp_docs:search_model_context_protocol", &Map::new(), ToolScope::DataOperations)
         .is_err());
 
     // 4. Enabled server with exact fingerprint
@@ -177,13 +207,13 @@ fn auth_status_truthful_outbound_oauth_gap_and_controls_regressions() {
         config_sha256: fp,
     };
     let mut en_map = BTreeMap::new();
-    en_map.insert("microsoft_learn".to_owned(), en_ctrl.clone());
+    en_map.insert("mcp_docs".to_owned(), en_ctrl.clone());
     let enabled_reg = Registry::parse(&raw)
         .unwrap()
         .with_controls(&en_map)
         .unwrap();
     let s_en = enabled_reg
-        .auth_status("microsoft_learn", Some(&en_ctrl))
+        .auth_status("mcp_docs", Some(&en_ctrl))
         .unwrap()
         .unwrap();
     assert_eq!(s_en["local_control"], "enabled");
@@ -193,7 +223,7 @@ fn auth_status_truthful_outbound_oauth_gap_and_controls_regressions() {
 
 #[test]
 fn endpoint_validation_and_refresh_scope_gap_regressions() {
-    assert!(valid_server_name("microsoft_learn"));
+    assert!(valid_server_name("mcp_docs"));
     assert!(!valid_server_name("../bad"));
     assert!(!valid_server_name(""));
 
@@ -201,14 +231,14 @@ fn endpoint_validation_and_refresh_scope_gap_regressions() {
     let remote_http = format!("{}://example.com/mcp", "http");
     let loopback_http = format!("{}://{}:8080/mcp", "http", "127.0.0.1");
     assert!(validate_proposed_endpoint(&remote_http).is_err());
-    assert!(validate_proposed_endpoint("https://learn.microsoft.com/api/mcp").is_ok());
+    assert!(validate_proposed_endpoint("https://modelcontextprotocol.io/mcp").is_ok());
     assert!(validate_proposed_endpoint(&loopback_http).is_ok());
 
-    // Gap: remote refresh is strictly limited to microsoft_learn
-    let reg = Registry::parse(&sample_ms_learn_registry()).unwrap();
+    // Gap: remote refresh is strictly limited to mcp_docs
+    let reg = Registry::parse(&sample_mcp_docs_registry()).unwrap();
     let err = reg
-        .refresh_microsoft_learn("other_server")
-        .expect_err("non-microsoft_learn refresh must be refused");
+        .refresh_public_docs("other_server")
+        .expect_err("non-mcp_docs refresh must be refused");
     assert!(
         err.to_string().contains("not supported"),
         "unexpected error: {err}"
@@ -416,9 +446,9 @@ fn outbound_oauth_pkce_s256_dpapi_store_and_disconnect_regressions() {
     assert_eq!(cached["already_authorized"], true);
 
     // 5. Verify Registry::auth_status_with_oauth reports truthful combined status
-    let reg = Registry::parse(&sample_ms_learn_registry()).unwrap();
+    let reg = Registry::parse(&sample_mcp_docs_registry()).unwrap();
     let combined = reg
-        .auth_status_with_oauth("microsoft_learn", None, Some(&cfg), Some(&status))
+        .auth_status_with_oauth("mcp_docs", None, Some(&cfg), Some(&status))
         .unwrap()
         .unwrap();
     assert_eq!(combined["oauth_configured"], true);
@@ -476,13 +506,59 @@ fn outbound_oauth_pkce_s256_and_config_validation_cross_platform() {
     assert!(good.validate().is_ok());
 
     // 4. Platform-accurate storage protection label reported in auth_status_with_oauth
-    let reg = Registry::parse(&sample_ms_learn_registry()).unwrap();
+    let reg = Registry::parse(&sample_mcp_docs_registry()).unwrap();
     let st = reg
-        .auth_status_with_oauth("microsoft_learn", None, Some(&good), None)
+        .auth_status_with_oauth("mcp_docs", None, Some(&good), None)
         .unwrap()
         .unwrap();
     assert_eq!(st["oauth_configured"], true);
     assert_eq!(st["storage_protection"], storage_protection_label());
     assert_eq!(st["token_stored"], false);
     assert_eq!(st["remote_oauth_state"], "unknown");
+}
+
+/// The stdio schema change must not alter any HTTP server fingerprint: the
+/// literals below were computed before `endpoint` became optional. A
+/// changed value would silently revoke every sealed local enable.
+#[test]
+fn http_server_fingerprint_and_overview_unchanged() {
+    let raw = serde_json::to_vec(&json!({
+        "version": 1,
+        "servers": {
+            "example": {
+                "endpoint": "https://example.com/mcp",
+                "bearer_env": "AGENT_BRIDGE_EXTENSION_EXAMPLE_TOKEN",
+                "header_env": {"X-Api-Key": "AGENT_BRIDGE_EXTENSION_EXAMPLE_KEY"},
+                "tools": {}
+            },
+            "plain": {"endpoint": "https://example.org/mcp", "tools": {}}
+        }
+    }))
+    .unwrap();
+    let docs = Registry::parse(&sample_mcp_docs_registry()).unwrap();
+    let reg = Registry::parse(&raw).unwrap();
+    let observed = [
+        docs.server_sha256("mcp_docs").unwrap().unwrap(),
+        reg.server_sha256("example").unwrap().unwrap(),
+        reg.server_sha256("plain").unwrap().unwrap(),
+    ];
+    assert_eq!(observed, [
+        "9687340862751690b926097f773b34c0b671915f63feb180e4f062db8dca7c87",
+        "da89ad287edea2bd3a93c426ef39b499f0bac6c34eb62b562702fac1baa4b11c",
+        "3e1d8c34e063242e0ff100c1dce57b99ed8cb5bdd90479e29568f888471e4491",
+    ]);
+    assert_eq!(reg.server_endpoint("example"), Some("https://example.com/mcp"));
+    assert!(!reg.header_authorization_configured("example"));
+    assert_eq!(reg.servers(None).unwrap(), json!({"action": "list", "count": 2, "servers": [
+        {"id": "example", "enabled": true, "tools": []},
+        {"id": "plain", "enabled": true, "tools": []}]}));
+    assert_eq!(docs.servers(Some("mcp_docs")).unwrap(), json!({"action": "inspect", "server":
+        {"id": "mcp_docs", "enabled": true, "tools": ["search_model_context_protocol"]}}));
+    // An exact control keeps an HTTP server enabled; a stale one disables it.
+    let controls = BTreeMap::from([("plain".to_owned(), ServerControl { enabled: true, config_sha256: observed[2].clone() }),
+        ("example".to_owned(), ServerControl { enabled: true, config_sha256: "0".repeat(64) })]);
+    let controlled = Registry::parse(&raw).unwrap().with_controls(&controls).unwrap();
+    assert_eq!(controlled.servers(None).unwrap()["servers"], json!([
+        {"id": "example", "enabled": false, "tools": []},
+        {"id": "plain", "enabled": true, "tools": []}]));
 }

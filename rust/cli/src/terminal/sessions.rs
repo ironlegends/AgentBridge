@@ -1,6 +1,6 @@
 //! Operator-approved, instance-owned diagnostic process sessions.
 //! No shell, arbitrary argv, elevation, public PID, or shared process discovery.
-//! All launches consume the same exact pinned-command policy as terminal::run.
+//! All launches consume the same exact pinned-command policy as terminal::run_with_snapshot.
 
 #[cfg(windows)]
 use super::{operator_confirmation, private_files};
@@ -39,7 +39,13 @@ const MAX_METADATA_REQUESTS: usize = 32;
 const MAX_METADATA_INPUT: usize = 8 * 1024;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum Diagnostic { GitVersion, RustVersion, WorkspaceFileInfo, ProjectProgram }
+enum Diagnostic {
+    GitVersion,
+    RustVersion,
+    WorkspaceFileInfo,
+    #[cfg(windows)]
+    ProjectProgram,
+}
 impl Diagnostic {
     fn parse(raw: &str) -> ProcessResult<Self> {
         match raw {
@@ -54,6 +60,7 @@ impl Diagnostic {
             Self::GitVersion => "git-version",
             Self::RustVersion => "rust-version",
             Self::WorkspaceFileInfo => "workspace-file-info",
+            #[cfg(windows)]
             Self::ProjectProgram => "project-program",
         }
     }
@@ -70,6 +77,7 @@ impl Diagnostic {
         Ok(match self {
             Self::GitVersion => "git",
             Self::RustVersion => "rustc",
+            #[cfg(windows)]
             Self::ProjectProgram => "project-program",
             Self::WorkspaceFileInfo => unreachable!("metadata host was selected above"),
         }.to_owned())
@@ -793,13 +801,6 @@ impl Drop for SessionSupervisor {
     }
 }
 
-fn fixed_start(
-    settings: &Path, root: &Path, database: &Path, diagnostic: Diagnostic,
-    workspace: Option<&agent_bridge_desktop::DesktopFiles>,
-) -> ProcessResult<(String, Session)> {
-    fixed_start_with_snapshot(settings,root,database,diagnostic,workspace,None)
-}
-
 fn fixed_start_with_snapshot(
     settings:&Path,root:&Path,database:&Path,diagnostic:Diagnostic,
     workspace:Option<&agent_bridge_desktop::DesktopFiles>,commands:Option<&super::CommandCatalogueSnapshot>,
@@ -952,13 +953,6 @@ fn fixed_start_with_snapshot(
 /// One pinned restricted project .exe. Exact locally configured predefined
 /// commands are admitted without impersonating a human; all other commands
 /// require their own native local confirmation and receive NO stdin grant.
-#[cfg(windows)]
-fn project_start(settings:&Path,root:&Path,database:&Path,
-    a:&Map<String,Value>,deadline:Duration)->ProcessResult<(String,LiveProject,bool)>
-{
-    project_start_with_snapshot(settings,root,database,a,deadline,None)
-}
-
 #[cfg(windows)]
 fn project_start_with_snapshot(settings:&Path,root:&Path,database:&Path,
     a:&Map<String,Value>,deadline:Duration,commands:Option<&super::CommandCatalogueSnapshot>)
@@ -1139,14 +1133,6 @@ fn bool_field(a: &Map<String, Value>, field: &str, default: bool) -> ProcessResu
         Some(Value::Bool(v)) => Ok(*v),
         _ => Err("PROCESS_INVALID_ARGUMENT: boolean required"),
     }
-}
-
-fn start(
-    registry: &Arc<Mutex<Registry>>, settings: &Path, root: &Path, database: &Path,
-    workspace: Option<&agent_bridge_desktop::DesktopFiles>,
-    a: &Map<String, Value>,
-) -> ProcessResult<Value> {
-    start_with_snapshot(registry,settings,root,database,workspace,a,None)
 }
 
 fn start_with_snapshot(

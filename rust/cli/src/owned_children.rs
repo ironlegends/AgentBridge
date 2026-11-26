@@ -19,11 +19,31 @@ mod platform;
 pub(crate) use platform::quote_argument;
 
 pub(crate) struct ChildSpec {
+    #[cfg(windows)]
     pub executable: PathBuf,
+    #[cfg(windows)]
     pub arguments: Vec<OsString>,
+    #[cfg(windows)]
     pub cwd: PathBuf,
     /// Case-insensitive Windows names; None removes a variable in this child.
+    #[cfg(windows)]
     pub env_overrides: BTreeMap<OsString, Option<OsString>>,
+}
+
+impl ChildSpec {
+    pub(crate) fn new(
+        executable: PathBuf, arguments: Vec<OsString>, cwd: PathBuf,
+        env_overrides: BTreeMap<OsString, Option<OsString>>,
+    ) -> Self {
+        #[cfg(windows)]
+        { Self { executable, arguments, cwd, env_overrides } }
+        #[cfg(not(windows))]
+        {
+            // The platform stub refuses every spawn without using launch settings.
+            let _ = (executable, arguments, cwd, env_overrides);
+            Self {}
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -57,8 +77,19 @@ impl OwnedChild {
         Ok(Self { process })
     }
 
+    /// Provider launch with an exact environment: nothing is inherited from
+    /// this process. Same Job, handle list, pipes and no-console owner.
+    #[cfg(windows)]
+    pub(crate) fn spawn_with_environment(
+        executable: &Path, arguments: &[OsString], cwd: &Path,
+        environment: &BTreeMap<OsString, OsString>,
+    ) -> io::Result<Self> {
+        Ok(Self { process: platform::Process::spawn_with_environment(executable, arguments, cwd, environment)? })
+    }
+
     pub(crate) fn root_pid(&self) -> u32 { self.process.root_pid() }
     /// A live membership check, not an enduring capability for a caller PID.
+    #[cfg(windows)]
     pub(crate) fn owns_process(&self, pid: u32) -> io::Result<bool> {
         self.process.owns_process(pid)
     }
@@ -92,7 +123,6 @@ mod platform {
     impl Process {
         pub(super) fn spawn(_: &ChildSpec) -> io::Result<Self> { unsupported() }
         pub(super) fn root_pid(&self) -> u32 { 0 }
-        pub(super) fn owns_process(&self, _: u32) -> io::Result<bool> { unsupported() }
         pub(super) fn read_stdout(&mut self, _: &mut [u8]) -> io::Result<usize> { unsupported() }
         pub(super) fn read_stderr(&mut self, _: &mut [u8]) -> io::Result<usize> { unsupported() }
         pub(super) fn write_stdin(&mut self, _: &[u8]) -> io::Result<usize> { unsupported() }

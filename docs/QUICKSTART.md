@@ -36,6 +36,11 @@ cargo test --locked --manifest-path app/src-tauri/Cargo.toml
 cargo build --locked --manifest-path app/src-tauri/Cargo.toml
 ```
 
+An ordinary `cargo test` has no ignored tests. Tests that need resources outside the repository are compiled only behind a Cargo feature and fail if a resource is missing:
+
+- `cargo test --locked -p agent-bridge --features qualification`: Windows-only release qualification tests with the pinned browser and native bundles (`AGENT_BRIDGE_BROWSER_BUNDLE`, `AGENT_BRIDGE_NATIVE_TEST_BUNDLE` and their manifest digests), the reviewed `search_model_context_protocol` descriptor file (`AGENT_BRIDGE_EXTENSION_TEST_DESCRIPTOR`), the WPF fixture and dedicated Virtual Desktops. It shows windows and sends synthetic input on the current session.
+- `cargo test --locked -p agent-bridge-lifecycle --features low-il-specimen`: the approved local Low-IL specimen (`AB_LOW_IL_SPECIMEN`). Low-IL execution is unsupported; these tests stay for diagnosis only.
+
 Run `app/src-tauri/target/debug/agent-bridge-desktop-app` from the repository or extracted source root (append `.exe` on Windows). If you set `--target-dir` or `CARGO_TARGET_DIR`, use the `debug/` directory below that target instead. A `--release` build uses `release/`.
 
 ### Install the Windows release (portable ZIP)
@@ -366,6 +371,7 @@ agent-bridge stdio /path/to/private/database/missions.sqlite \
   --local-chrome-page path/to/page.html
 ```
 
+- `--local-learn-url` and the optional `--local-chrome-origin https://learn.microsoft.com` for Chrome page mode are deprecated in 2.x and reserved for removal in 3.0.0.
 - Ephemeral private profiles are created and cleaned up automatically when `profile_id` is omitted.
 - When `--settings` is provided, agents can also manage isolated persistent profiles under `<settings>/mcp-browser-profiles` via `profile_id`, `list_profiles`, and `delete_profile`.
 
@@ -416,13 +422,21 @@ Replace every criterion with the exact identity of the window you selected. Linu
 Remote/Web agents calling `desktop_mcp_manage` with mutating actions (`add`, `remove`, `enable`, `disable`, `set_oauth`, `auth_start`, `auth_status`, `auth_disconnect`, `refresh`) **only queue a typed proposal** in `<settings>/.extensions-admin.json`. Review and decide locally:
 
 ```sh
+agent-bridge extensions import   /path/to/private/settings <mcp-json-path> [--inherit-path <stdio-server>]...
 agent-bridge extensions requests /path/to/private/settings
 agent-bridge extensions request  /path/to/private/settings <request-id>
 agent-bridge extensions approve  /path/to/private/settings <request-id>
+agent-bridge extensions approve  /path/to/private/settings <request-id> <request-id>...
 agent-bridge extensions refuse   /path/to/private/settings <request-id>
+agent-bridge extensions refresh-check /path/to/private/settings <mcp_docs|microsoft_learn|stdio-server>
+agent-bridge extensions describe /path/to/private/settings <server> <tool>
+agent-bridge extensions compact  /path/to/private/settings
+agent-bridge extensions forget-absent /path/to/private/settings <server-name>
 ```
 
-When `auth_start` is approved locally, Agent Bridge runs a standard **OAuth 2.1 PKCE S256** flow over a temporary `127.0.0.1` callback listener and encrypts the resulting token record via **Windows DPAPI** in `<settings>/.extensions-oauth-tokens.json`.
+Several ids approve the pending `add` and `add_stdio` proposals of one `extensions import` together (its `approve_together` list): one terminal confirmation, one journal change.
+
+When `auth_start` is approved locally, Agent Bridge runs a standard **OAuth 2.1 PKCE S256** flow over a temporary `127.0.0.1` callback listener and protects the token using **Windows DPAPI**, **macOS Keychain**, or **Linux Secret Service**. Authorization fails closed if the required OS secret storage is unavailable.
 
 ---
 
@@ -436,7 +450,7 @@ Imported missions stay `blocked` with `actor_context_handle="legacy-import"` and
 
 ---
 
-## 8. Local Operator Console (`agent-bridge ui`)
+## 9. Local Operator Console (`agent-bridge ui`)
 
 Agent Bridge includes an embedded, zero-dependency local web console compiled directly into the Rust binary (no Node.js, no Electron, no external CDNs). It binds exclusively to `127.0.0.1` and enforces a per-session 256-bit token plus strict `Host`, `Origin`, `Sec-Fetch-Site`, and `Content-Security-Policy` headers.
 
@@ -465,3 +479,79 @@ All flags are optional. Run `agent-bridge ui --open` for a quick diagnostics & q
 Add `--ui-port 18890` to the Workstation command to enable the operator listener for either panel. Add `--ui-open` to open the browser console automatically. Both attached surfaces show the same live profile and stay connected while modes change. Start at the maximum authority you intend to allow; a button cannot exceed it. Direct shells require `--profile fully-unlocked --enable-processes` at startup. A successful downgrade below fully-unlocked stops its owned direct processes before the new mode is reported.
 
 Use a new OAuth state directory when widening the startup authority; retain the old one for rollback and re-enroll the exact client against the new state. Mode changes made inside the startup ceiling do not require re-pairing. The complete command, mode matrix and shell examples are in [WORKSTATION-MODES.md](WORKSTATION-MODES.md).
+
+### Diagnose Gemini Web approvals and tool quota
+
+Read `mcp_request_audit` from `GET /api/diagnostics` on the workstation's
+authenticated local operator listener. Use the port from `--ui-port` and the
+token from the current private `ui_url` startup record. For example, in
+PowerShell 7 with `--ui-port 18890`:
+
+```powershell
+$operatorToken = Read-Host 'Local operator token' -MaskInput
+try {
+    $headers = @{ 'X-Agent-Bridge-Token' = $operatorToken }
+    $audit = (Invoke-RestMethod 'http://127.0.0.1:18890/api/diagnostics' -Headers $headers).mcp_request_audit
+    $audit | ConvertTo-Json -Depth 6
+} finally {
+    Remove-Variable operatorToken, headers -ErrorAction SilentlyContinue
+}
+```
+
+An embedded desktop workstation exposes the same data through its existing
+local `get_diagnostics` command as `mcpRequestAudit`. The snapshot is tied to
+the running workstation and covers its `/mcp` route in both unified and legacy
+OAuth modes. Audit diagnostics for standalone and managed local listeners,
+including `gemini serve` and `gemini project-read`, are deferred to issue #160.
+A standalone `agent-bridge ui` returns `null` for the audit field.
+
+1. Read a baseline snapshot. Note `boot_id`, the latest `sequence`, and the
+   counters `evicted`, `evicted_verified`, and `evicted_unverified`. Ask Gemini
+   once to call only `agent_bridge_status` with `{}`. This tool reads status
+   without changing workstation or mission state.
+2. If Gemini displays an **Allow once** card, note the time and approve only
+   if you intend that call. The card belongs to the client. After approval,
+   look for a new `tools/call` record for `agent_bridge_status`.
+3. If Gemini reports **0 remaining**, stop the attempt and read diagnostics
+   again. With the same `boot_id`, no intervening eviction, and `in_flight`
+   at zero, an unchanged sequence in an isolated probe means no MCP request
+   reached Agent Bridge. The client message identifies the quota. A missing
+   record alone can also mean an approval is waiting or the transport failed.
+   Check new rows even when `provider` is null or `method` is `other`, since
+   early refusals can precede authentication or body inspection. A nonzero
+   `in_flight` count means the snapshot still has unfinished requests.
+4. A matching record proves the request reached Agent Bridge. `http_refusal`
+   with `429` and `request_limit` identifies the server's own rate limit.
+   `jsonrpc_error` reports a protocol or dispatch error. `tool_error` reports
+   `result.isError: true`, which can arrive with HTTP `200`. `success` with
+   HTTP `200` on `agent_bridge_status` confirms the status call completed.
+   `request_interrupted` with HTTP `500` records a worker failure. A null
+   status records cancellation before the handler returned a response.
+
+Use `provider`, `client_id_sha256`, and `catalogue_sha256` to match discovery
+(`initialize` or `server/discover`), `tools/list`, and `tools/call` for the
+same verified client and tool view. When comparing repeated approval cards,
+those fields show whether the completed requests used the same registration
+and catalogue. An unverified request has null identity fields. The in-memory
+snapshot retains up to 2,048 completed requests from the past 24 hours, with
+separate quotas of 1,792 verified and 256 unverified records. When a group is
+full, a new record replaces its oldest entry. Expired entries are removed on the
+next read or insertion. `evicted_verified` and `evicted_unverified` count both
+capacity and age evictions since startup. `evicted` is their sum. A restart
+starts a new boot ID, sequence and counters. The audit stores allowlisted method
+and tool names, completion time, elapsed milliseconds and error codes. It omits
+credentials, request arguments, results, and mission handles.
+
+If the quota prevents the assigned agent from continuing, the attached
+mission owner can release the subtask through an already authorized client.
+Read the latest subtask revision, then call `agent_bridge_mission_subtask_update`
+with that `if_revision`, `status: "blocked"`, a nonblank `summary` giving the
+reason (up to 4,096 UTF-16 code units), and a fresh `idempotency_key`. When the
+owner releases another context's `in_progress` subtask, the status becomes
+`blocked` and the assignment is cleared. The previous `summary` is preserved
+and the reason is stored separately as `release_reason`. Reassignment preserves
+both fields, and later assignee updates can replace `summary` while keeping the
+last `release_reason`. Use the returned revision for a separate
+`agent_bridge_mission_subtask_assign` to an attached context.
+Have that context read the mission and its last checkpoint before continuing.
+Existing OAuth grants and local approvals still apply to the handoff.

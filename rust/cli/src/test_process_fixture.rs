@@ -24,13 +24,21 @@ pub(crate) fn args(name:&str,tail:&[&str])->Vec<String>{
         _=>panic!("unknown subprocess fixture: {name}"),
     }.to_owned()];
     #[cfg(not(windows))]
-    let mut result=vec!["--ignored".into(),"--exact".into(),name.into(),"--nocapture".into()];
+    let mut result=vec!["--exact".into(),name.into(),"--nocapture".into()];
     result.extend(tail.iter().map(|s|s.to_string()));result
+}
+
+/// A Unix child fixture runs only when its parent selected it by exact name.
+/// An ordinary test run returns from it at once instead of ignoring it.
+#[cfg(not(windows))]
+pub(crate) fn selected(name:&str)->bool{
+    let args:Vec<String>=std::env::args().collect();
+    args.iter().any(|arg|arg=="--exact")&&args.iter().any(|arg|arg==name)
 }
 
 /// A native fixture is externally pinned, not accepted from a path alone.
 /// Retain the image handle across the complete test, including child cleanup.
-#[cfg(windows)]
+#[cfg(all(windows, feature = "qualification"))]
 pub(crate) fn native_gui_fixture()->(PathBuf,std::fs::File){
     use sha2::{Digest,Sha256};
     use std::io::Read;

@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 const TTL: Duration = Duration::from_secs(30);
 const SESSION_AGE: Duration = Duration::from_secs(600);
 const MAX_ELEMENTS: usize = 80;
-const MAX_TEXT_CHARS: usize = 50_000;
+const MAX_TEXT_CHARS: u64 = 50_000;
 const PREFIX: &str = "bridge-project:///";
 const MAX_LOCAL_DOCUMENTS: usize = 8;
 
@@ -36,6 +36,7 @@ pub struct LocalInteractiveSelection {
 }
 
 pub struct LocalInteractiveApproval {
+    #[cfg(windows)]
     project: PathBuf,
     pages: Vec<(String,String)>,
     origins: Vec<String>,
@@ -107,6 +108,7 @@ fn remove_tree_no_symlinks(dir: &std::path::Path, depth: usize) -> io::Result<()
     chrome::native::remove_private_tree(dir)
 }
 
+#[cfg(windows)]
 pub struct LocalTransferSelection {
     /// Exact project-relative, UTF-8 witness names selected by operator argv.
     /// Web can choose only among these names, never arbitrary host paths.
@@ -164,7 +166,9 @@ pub fn approve_local(selection: LocalInteractiveSelection) -> io::Result<LocalIn
     }
     // No process is launched during local admission.
     Ok(LocalInteractiveApproval {
-        project:workspace,pages:owned,origins:allowed_origins,
+        #[cfg(windows)]
+        project:workspace,
+        pages:owned,origins:allowed_origins,
         approved_at:Instant::now(),transfers:None,profile_root:None,
     })
 }
@@ -172,17 +176,11 @@ pub fn approve_local(selection: LocalInteractiveSelection) -> io::Result<LocalIn
 /// Additional local approval for the two file-transfer actions. Separate from
 /// the read-only project page approval, so existing sessions retain NO file
 /// rights. Use only after the operator has selected a writable project profile.
+#[cfg(windows)]
 pub fn approve_local_with_transfers(
     selection:LocalInteractiveSelection,
     files:LocalTransferSelection,
 )->io::Result<LocalInteractiveApproval>{
-    #[cfg(unix)]
-    {
-        let _ = (selection, files);
-        Err(io::Error::new(io::ErrorKind::Unsupported, "UNIX_PROJECT_BROWSER_TRANSFERS_UNAVAILABLE"))
-    }
-    #[cfg(windows)]
-    {
     let mut approval=approve_local(selection)?;
     // A file input can expose selected bytes to the page's JavaScript.
     // Transfer grants are valid ONLY on the exact source-controlled, inert-
@@ -231,7 +229,6 @@ pub fn approve_local_with_transfers(
         .map_err(|e|chrome::operator_error("transfer.output_pin_open",e))?;
     approval.transfers=Some(ApprovedTransfers{inputs,output});
     Ok(approval)
-    }
 }
 
 #[derive(Clone)]
@@ -295,7 +292,7 @@ fn wants_screenshot(args:&Map<String,Value>)->io::Result<bool>{
 fn max_text(args:&Map<String,Value>)->io::Result<usize>{
     match args.get("max_text_chars") {
         None=>Ok(8000),
-        Some(v)=>match v.as_u64(){Some(1..=50000)=>Ok(v.as_u64().unwrap_or(0) as usize),_=>Err(invalid())}
+        Some(v)=>match v.as_u64(){Some(chars @ 1..=MAX_TEXT_CHARS)=>Ok(chars as usize),_=>Err(invalid())}
     }
 }
 fn public_origin(url:&str)->bool {
@@ -1047,7 +1044,7 @@ pub fn attach_native(
             "page_id":{"type":"string"},
             "mode":{"enum":["full","find"]},
             "find_query":{"type":"string","maxLength":256},
-            "max_text_chars":{"type":"integer","minimum":1,"maximum":50000},
+            "max_text_chars":{"type":"integer","minimum":1,"maximum":MAX_TEXT_CHARS},
             "screenshot":{"type":"boolean","default":false},
             "full_page":{"type":"boolean","const":false},
             "include_console":{"type":"boolean","const":false},
@@ -1081,7 +1078,7 @@ pub fn attach_native(
                     "delay_ms":{"type":"integer","minimum":0,"maximum":500}
                 }
             }},
-            "max_text_chars":{"type":"integer","minimum":1,"maximum":50000},
+            "max_text_chars":{"type":"integer","minimum":1,"maximum":MAX_TEXT_CHARS},
             "screenshot":{"type":"boolean","default":false},
             "full_page":{"type":"boolean","const":false},
             "include_console":{"type":"boolean","const":false},

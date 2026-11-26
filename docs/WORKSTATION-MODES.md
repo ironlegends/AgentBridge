@@ -86,7 +86,7 @@ Readers inspecting the live marker must share delete access. Kernel failure or p
 
 The native Approvals screen supports local enrollment and approval of incoming ChatGPT or Gemini OAuth requests. Review the client and paste its exact callback before approving. Callback drafts remain in memory across automatic refreshes and are cleared after approval or when their request disappears.
 
-For an attached workstation, the same screen shows each extension request's endpoint and complete proposal. Approve requires acknowledging that exact proposal; Refuse is a separate explicit action. Duplicate decisions are disabled while a decision is being processed.
+For an attached workstation, the same screen shows each extension request's HTTP endpoint and complete JSON proposal. For an `add_stdio` proposal without an HTTP endpoint, the native Endpoint field reads `Not configured`. The executable and pin appear in the proposal JSON. The embedded console also shows the executable in the Endpoint field. Approve requires acknowledging that exact proposal; Refuse is a separate explicit action. Both interfaces decide one request at a time. Grouped import approval is available through the local CLI only. Duplicate decisions are disabled while a decision is being processed.
 
 An extension OAuth authorization can remain pending after the local decision is accepted. Its status is refreshed without resubmitting the decision, and durable approval is shown only after the provider flow completes. An authorization page opens only when the operator clicks its button. The URL must use HTTPS or literal loopback HTTP; only the default browser is allowed by the Tauri URL permission. The application does not automatically open that page or log its authorization URL.
 
@@ -138,17 +138,17 @@ The legacy workstation file provider remains workspace-scoped. The unified 46-to
   "file_scope": {"kind": "workspace"},
   "allow_import": false,
   "browser": {
-    "bundle_root": "C:/path/to/AgentBridge/2.0.0/resources/automation/browser",
+    "bundle_root": "C:/path/to/AgentBridge/<version>/resources/automation/browser",
     "manifest_sha256": "<64 lowercase hex: components.browser.manifest_sha256>",
     "state_root": "C:/path/to/AgentBridge/private/automation/browser"
   },
   "windows": {
-    "bundle_root": "C:/path/to/AgentBridge/2.0.0/resources/automation/native",
+    "bundle_root": "C:/path/to/AgentBridge/<version>/resources/automation/native",
     "manifest_sha256": "<64 lowercase hex: components.native.manifest_sha256>",
     "state_root": "C:/path/to/AgentBridge/private/automation/windows"
   },
   "agent_desktop": {
-    "bundle_root": "C:/path/to/AgentBridge/2.0.0/resources/automation/native",
+    "bundle_root": "C:/path/to/AgentBridge/<version>/resources/automation/native",
     "manifest_sha256": "<64 lowercase hex: components.native.manifest_sha256>",
     "state_root": "C:/path/to/AgentBridge/private/automation/desktops",
     "desktops": []
@@ -159,7 +159,7 @@ The legacy workstation file provider remains workspace-scoped. The unified 46-to
 Field rules:
 
 - `version` and `policy_version` must be `1`. Every digest is exactly 64 lowercase hexadecimal characters.
-- `catalogue_sha256` must match the executable catalogue. For 2.0.0 it is `7603bc547b696a3c45e4cd3f5b0b98bbf0f51c9cad66bc31f5a75ae5259c349c`; any other value refuses startup with `UNIFIED_CATALOGUE_CHANGED`.
+- `catalogue_sha256` must match the executable catalogue. For the Windows unified catalogue in `2.0.0` and `2.1.0-alpha.1` it is `7603bc547b696a3c45e4cd3f5b0b98bbf0f51c9cad66bc31f5a75ae5259c349c`; any other value refuses startup with `UNIFIED_CATALOGUE_CHANGED`.
 - `file_scope` is one of `{"kind": "workspace"}`, `{"kind": "allowed-roots", "roots": ["<absolute directory>", ...]}` (1 to 32 distinct directories, none inside `private_root`, a protected root or a bundle) or `{"kind": "os-user"}`.
 - `allow_import` enables the historical `agent_bridge_task_import` tool; keep it `false` unless you need it. Import still requires an active write-capable mode.
 - Each `manifest_sha256` comes from the `release-manifest.json` at the root of the extracted desktop ZIP: `components.browser.manifest_sha256` for `browser`, and `components.native.manifest_sha256` for `windows` and `agent_desktop`.
@@ -180,7 +180,7 @@ Changing a workspace-scoped capability to OS-user scope changes the unified auth
 
 Click one of the four buttons in the attached console. Choices above the startup ceiling are disabled and rejected by the server. The interface reports the server's actual mode after each request.
 
-A successful downgrade revokes process authority before reporting the lower mode. Owned processes are stopped and old session identifiers become invalid; returning to a higher allowed mode permits new sessions. If cleanup cannot be confirmed, the console reports an error and keeps the prior mode visible. Mutating requests already admitted complete before a mode change takes effect. Process output waits do not hold the profile lock.
+A successful downgrade revokes removed process authority and closes idle pooled MCP extension sessions before reporting the lower mode. Owned processes are stopped and old session identifiers become invalid; returning to a higher allowed mode permits new sessions. If cleanup cannot be confirmed, the console reports an error and keeps the prior mode visible. Mutating requests already admitted complete before a mode change takes effect. Process output waits do not hold the profile lock.
 
 The process, TCP listener, tool catalog, OAuth resource, scope marker and grants remain unchanged. An existing bearer can continue to make calls permitted by the newly active mode.
 

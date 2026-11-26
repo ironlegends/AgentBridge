@@ -91,6 +91,7 @@ pub(in crate::browser_docs) struct NativeChrome {
 
 #[cfg(any(windows, unix))]
 impl NativeChrome {
+    #[cfg(all(test, unix))]
     pub(in crate::browser_docs) fn start(
         selected_documents: &[(String, String)],
         origins: Vec<String>,

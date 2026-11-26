@@ -1,7 +1,6 @@
 //! One authorized preparation-only public documentation walkthrough.
 //! No MCP service, OAuth, terminal session, personal profile or publication.
-#[path = "../src/browser_docs.rs"]
-mod browser_docs;
+use agent_bridge::walkthroughs::preparation_once;
 
 fn main() -> std::process::ExitCode {
     let mut args = std::env::args();
@@ -14,7 +13,7 @@ fn main() -> std::process::ExitCode {
         eprintln!("Exactly one locally approved public documentation URL is required.");
         return std::process::ExitCode::FAILURE;
     }
-    match browser_docs::learn::preparation_once(&home_url) {
+    match preparation_once(&home_url) {
         Ok(result) => {
             println!("{}", result);
             std::process::ExitCode::SUCCESS

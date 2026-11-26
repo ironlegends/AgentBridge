@@ -1,24 +1,43 @@
+#[cfg(windows)]
 use super::{BrowserConfig, BrowserTransferCallbacks};
+#[cfg(windows)]
 use super::profiles::{opaque_id, physical_directory, profile_id, remove_physical_tree, Profiles, SessionPaths};
+#[cfg(windows)]
 use super::resources::{digest, node_path, pin, Resources};
-use super::worker::{AuthorizedDownload, Failure, Reply, Worker, REQUEST_LIMIT, RESPONSE_LIMIT};
+#[cfg(windows)]
+use super::worker::{AuthorizedDownload, Failure, Reply, Worker, REQUEST_LIMIT};
+use super::worker::RESPONSE_LIMIT;
+#[cfg(windows)]
 use crate::agent_desktop::AgentDesktopHandle;
+#[cfg(windows)]
 use crate::owned_children::ChildSpec;
+#[cfg(windows)]
 use crate::provider_owner::ProviderOwner;
 use crate::runtime::RuntimeError;
+#[cfg(windows)]
 use crate::session_profile::{rank, ProfileControl};
+#[cfg(windows)]
 use agent_bridge_desktop::DesktopProfile;
-use agent_bridge_gateway::{ToolCallResult, ToolContent, ToolDefinition, ToolMapHandler};
+use agent_bridge_gateway::{ToolCallResult, ToolContent};
+#[cfg(windows)]
+use agent_bridge_gateway::{ToolDefinition, ToolMapHandler};
 use serde_json::{json, Map, Value};
+#[cfg(windows)]
 use std::collections::{BTreeMap, HashMap};
+#[cfg(windows)]
 use std::ffi::OsString;
+#[cfg(windows)]
 use std::fs::{self, File};
 use std::io::{self, Write};
+#[cfg(windows)]
 use std::path::PathBuf;
+#[cfg(windows)]
 use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(windows)]
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+#[cfg(windows)]
 struct Session {
     id: String,
     cleanup_error: Option<Value>,
@@ -29,11 +48,13 @@ struct Session {
     headless: bool,
     timeout_ms: u64,
 }
+#[cfg(windows)]
 struct State {
     resources: Option<Resources>,
     profiles: Option<Profiles>,
     sessions: HashMap<String, Session>,
 }
+#[cfg(windows)]
 struct Provider {
     state: Mutex<State>,
     closing: AtomicBool,
@@ -41,12 +62,14 @@ struct Provider {
     desktops: AgentDesktopHandle,
     transfers: BrowserTransferCallbacks,
 }
+#[cfg(windows)]
 enum DownloadFailure {
     Invalid(RuntimeError),
     Publication(RuntimeError, bool),
     Cleanup(RuntimeError),
 }
 
+#[cfg(windows)]
 fn tool_failure(error: Value) -> ToolCallResult { tool_failure_with_limit(error,RESPONSE_LIMIT-1024) }
 fn error_result(error: Value) -> ToolCallResult {
     let mut result=ToolCallResult::structured(error.to_string(),json!({"error":error})); result.is_error=true; result
@@ -92,16 +115,21 @@ fn tool_failure_with_limit(error: Value, limit: usize) -> ToolCallResult {
     result
 }
 
+#[cfg(windows)]
 fn failure(code: &str) -> ToolCallResult {
     tool_failure(json!({"code":code.split(':').next().unwrap_or("BROWSER_FAILED"),"message":code}))
 }
+#[cfg(windows)]
 fn text_field<'a>(arguments: &'a Map<String, Value>, name: &str) -> Result<&'a str, RuntimeError> {
     arguments.get(name).and_then(Value::as_str).filter(|s| !s.is_empty()).ok_or_else(|| format!("INVALID_ARGUMENT: {name} is required").into())
 }
+#[cfg(windows)]
 fn optional_text(arguments: &Map<String, Value>, name: &str) -> Option<String> {
     arguments.get(name).and_then(Value::as_str).map(str::to_owned)
 }
+#[cfg(windows)]
 fn timeout(arguments: &Map<String, Value>) -> u64 { arguments.get("timeout_ms").and_then(Value::as_u64).unwrap_or(15_000) }
+#[cfg(windows)]
 fn child_environment() -> BTreeMap<OsString, Option<OsString>> {
     let mut env = BTreeMap::new();
     for name in ["NODE_OPTIONS", "NODE_PATH", "NODE_EXTRA_CA_CERTS", "NODE_DEBUG", "NODE_DEBUG_NATIVE", "NODE_REPL_HISTORY", "NODE_REDIRECT_WARNINGS", "NODE_V8_COVERAGE", "NODE_ICU_DATA", "NODE_TLS_REJECT_UNAUTHORIZED", "OPENSSL_CONF", "OPENSSL_MODULES", "DEBUG", "PWDEBUG", "PW_TEST_DEBUG", "PLAYWRIGHT_BROWSERS_PATH", "PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH", "CHROME_LOG_FILE", "SSLKEYLOGFILE", "ELECTRON_RUN_AS_NODE"] {
@@ -112,40 +140,38 @@ fn child_environment() -> BTreeMap<OsString, Option<OsString>> {
     env
 }
 
+#[cfg(windows)]
 pub(super) fn attach(config: BrowserConfig, profile: Arc<ProfileControl>, desktops: AgentDesktopHandle,
     transfers: BrowserTransferCallbacks, catalog: &mut Vec<ToolDefinition>, handlers: &mut ToolMapHandler)
     -> Result<ProviderOwner, RuntimeError>
 {
-    #[cfg(not(windows))]
-    return Err("BROWSER_PLATFORM_UNSUPPORTED: owned browser requires Windows".into());
-    #[cfg(windows)] {
-        let resources = Resources::verify(&config.bundle_root, &config.manifest_sha256)?;
-        let profiles = Profiles::open(&config.state_root)?;
-        if profiles.root.starts_with(&resources.root) || resources.root.starts_with(&profiles.root) {
-            return Err("BROWSER_STATE_AND_RESOURCES_MUST_BE_SEPARATE".into());
-        }
-        let definitions: Vec<ToolDefinition> = serde_json::from_str(include_str!("../../../../contracts/browser-tools-v1.json"))?;
-        let provider = Arc::new(Provider { state:Mutex::new(State { resources:Some(resources), profiles:Some(profiles), sessions:HashMap::new() }),
-            closing:AtomicBool::new(false), cancel:Arc::new(AtomicBool::new(false)), desktops, transfers });
-        let revoke = Arc::clone(&provider); let shutdown = Arc::clone(&provider);
-        let owner = ProviderOwner::new(Arc::new(move || revoke.cleanup(false)), Arc::new(move || shutdown.cleanup(true)));
-        profile.register_revoker(DesktopProfile::FullControl, owner.revoker())?;
-        for definition in definitions {
-            let shared = Arc::clone(&provider); let live_profile = Arc::clone(&profile);
-            let name = definition.name.clone(); let schema = definition.input_schema.clone();
-            handlers.register(definition.name.clone(), move |arguments| {
-                if let Err(error) = validate_schema(&Value::Object(arguments.clone()), &schema) { return Ok(failure(&error.to_string())); }
-                let current = match live_profile.read() { Ok(value) => value, Err(error) => return Ok(failure(&error.to_string())) };
-                if rank(*current) < rank(DesktopProfile::FullControl) { return Ok(failure("BROWSER_PROFILE_REQUIRED: Full Control is required")); }
-                // Keep the live read guard through every child/file effect and callback.
-                Ok(match shared.call(*current, &name, arguments) { Ok(result) => result, Err(error) => failure(&error.to_string()) })
-            });
-            catalog.push(definition);
-        }
-        Ok(owner)
+    let resources = Resources::verify(&config.bundle_root, &config.manifest_sha256)?;
+    let profiles = Profiles::open(&config.state_root)?;
+    if profiles.root.starts_with(&resources.root) || resources.root.starts_with(&profiles.root) {
+        return Err("BROWSER_STATE_AND_RESOURCES_MUST_BE_SEPARATE".into());
     }
+    let definitions: Vec<ToolDefinition> = serde_json::from_str(include_str!("../../../../contracts/browser-tools-v1.json"))?;
+    let provider = Arc::new(Provider { state:Mutex::new(State { resources:Some(resources), profiles:Some(profiles), sessions:HashMap::new() }),
+        closing:AtomicBool::new(false), cancel:Arc::new(AtomicBool::new(false)), desktops, transfers });
+    let revoke = Arc::clone(&provider); let shutdown = Arc::clone(&provider);
+    let owner = ProviderOwner::new(Arc::new(move || revoke.cleanup(false)), Arc::new(move || shutdown.cleanup(true)));
+    profile.register_revoker(DesktopProfile::FullControl, owner.revoker())?;
+    for definition in definitions {
+        let shared = Arc::clone(&provider); let live_profile = Arc::clone(&profile);
+        let name = definition.name.clone(); let schema = definition.input_schema.clone();
+        handlers.register(definition.name.clone(), move |arguments| {
+            if let Err(error) = validate_schema(&Value::Object(arguments.clone()), &schema) { return Ok(failure(&error.to_string())); }
+            let current = match live_profile.read() { Ok(value) => value, Err(error) => return Ok(failure(&error.to_string())) };
+            if rank(*current) < rank(DesktopProfile::FullControl) { return Ok(failure("BROWSER_PROFILE_REQUIRED: Full Control is required")); }
+            // Keep the live read guard through every child/file effect and callback.
+            Ok(match shared.call(*current, &name, arguments) { Ok(result) => result, Err(error) => failure(&error.to_string()) })
+        });
+        catalog.push(definition);
+    }
+    Ok(owner)
 }
 
+#[cfg(windows)]
 impl Provider {
     fn cleanup(&self, final_shutdown: bool) -> Result<(), RuntimeError> {
         if final_shutdown { self.closing.store(true, Ordering::Release); }
@@ -457,6 +483,7 @@ impl Provider {
 
 }
 
+#[cfg(windows)]
 fn base_receipt(session: &Session, phase: &str) -> Value {
     json!({"session_id":session.id,"phase":phase,"completed_actions":0,"failed_action_index":null,
         "effect_uncertain":true,"session_usable":false,"upload_effect_started":false})
@@ -471,11 +498,13 @@ fn compact_artifact(value: &Value) -> Value {
     }
     Value::Object(result)
 }
+#[cfg(windows)]
 fn public_receipt(receipt: &Value) -> Value {
     let mut result=receipt.as_object().cloned().unwrap_or_default();
     for field in ["download","reservation_id","operation","browser_observation_id"] { result.remove(field); }
     Value::Object(result)
 }
+#[cfg(windows)]
 fn receipt_failure(mut error: Value, receipt: &Value) -> ToolCallResult {
     if !error["details"].is_object() { error["details"]=json!({}); }
     for field in ["download","reservation_id","operation","browser_observation_id"] { error["details"].as_object_mut().unwrap().remove(field); }
@@ -485,6 +514,7 @@ fn receipt_failure(mut error: Value, receipt: &Value) -> ToolCallResult {
     tool_failure(error)
 }
 
+#[cfg(windows)]
 fn safe_diagnostic_code(error: &(dyn std::error::Error + Send + Sync)) -> String {
     let message = error.to_string();
     let candidate = message.split(':').next().unwrap_or_default();
@@ -493,6 +523,7 @@ fn safe_diagnostic_code(error: &(dyn std::error::Error + Send + Sync)) -> String
     } else { "PROVIDER_IO_FAILURE".into() }
 }
 
+#[cfg(windows)]
 fn add_session_metadata(value: &mut Value, session: &Session) {
     if let Some(profile) = &session.profile_id { value["profile_id"] = json!(profile); }
     if let Some(lease) = &session.lease_id { value["agent_desktop_lease_id"] = json!(lease); }
@@ -514,6 +545,7 @@ fn rpc_budget(method: &str, arguments: &Map<String, Value>, default_timeout: u64
     Duration::from_millis(millis)
 }
 
+#[cfg(windows)]
 fn validate_schema(value: &Value, schema: &Value) -> Result<(), RuntimeError> {
     let invalid = || -> RuntimeError { "INVALID_ARGUMENT: browser argument violates the published contract".into() };
     if let Some(values) = schema["enum"].as_array() { if !values.contains(value) { return Err(invalid()); } }
@@ -600,8 +632,9 @@ mod tests {
         assert_eq!(result.structured_content.unwrap()["text"],"bounded");
     }
     #[cfg(windows)]
+    /// Requires the explicitly pinned offline Windows browser bundle.
+    #[cfg(feature = "qualification")]
     #[test]
-    #[ignore = "requires the explicitly pinned offline Windows browser bundle; run with --ignored"]
     fn review_cleanup_and_lost_lease_are_isolated_from_healthy_sessions() {
         use std::os::windows::fs::OpenOptionsExt;
         let root=PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../workers/browser-playwright/.test-state").join(format!("isolation-{}",opaque_id().unwrap()));
@@ -671,8 +704,9 @@ mod tests {
         assert_eq!(details["artifact"]["artifact_id"],"committed-witness");
     }
     #[cfg(windows)]
+    /// Requires the explicitly pinned offline Windows browser bundle.
+    #[cfg(feature = "qualification")]
     #[test]
-    #[ignore = "requires the explicitly pinned offline Windows browser bundle; run with --ignored"]
     fn round2_real_mcp_replies_cannot_publish_unrequested_files_and_closed_timeout_keeps_its_cause() {
         use agent_bridge_gateway::{GatewayConfig,McpGateway};
         use std::sync::atomic::AtomicUsize;

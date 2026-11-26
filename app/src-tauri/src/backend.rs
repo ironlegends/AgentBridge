@@ -386,6 +386,7 @@ fn map_attached_diagnostics(value: Value) -> Value {
         "workspaceAccess": value["workspace_inspection"],
         "capabilitySelection": value["capability_selection"],
         "providerCleanup": value["provider_cleanup"],
+        "mcpRequestAudit": value["mcp_request_audit"],
         "capabilities": {
             "missionsAndTaskRooms": value.pointer("/capabilities/missions_and_task_rooms").cloned().unwrap_or(Value::Null),
             "workspaceFilesAndArtifacts": value.pointer("/capabilities/workspace_files_and_artifacts").cloned().unwrap_or(Value::Null),

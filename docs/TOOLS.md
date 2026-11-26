@@ -1,6 +1,6 @@
 # MCP Tool Reference (46 Tools)
 
-Agent Bridge exposes **16 Mission & Subtask tools**, **27 Workstation tools**, **1 pinned project command** and **2 historical utilities** across MCP protocol versions `2025-03-26` and `2025-06-18`. The unified 2.0 workstation publishes all 46 under one sealed catalogue digest.
+Agent Bridge exposes **16 Mission & Subtask tools**, **27 Workstation tools**, **1 pinned project command** and **2 historical utilities** over MCP `2026-07-28` and the legacy `initialize` versions `2024-11-05` through `2025-11-25`. The unified 2.x workstation publishes all 46 under one sealed catalogue digest. Modern discovery and catalog listings include `ttlMs: 300000`, `cacheScope: "private"`, and the `io.github.ironlegends/catalogRevision` metadata key.
 
 Only the tools enabled by your local startup profile and explicit CLI flags are published in `tools/list`. The embedded workstation console changes handler admission within that immutable startup catalog; lowering the active profile does not change OAuth authority or tool schemas. `fully-unlocked` retains file-tool confinement and adds direct processes only when explicitly enabled at startup.
 
@@ -29,6 +29,13 @@ Backed by SQLite schema v7 (`contracts/mission-tools-v1.json`). Available in `st
 | `agent_bridge_mission_subtask_update` | Updates subtask status/result summary with optimistic concurrency. |
 | `agent_bridge_mission_subtask_list` | Lists subtasks for a mission. |
 
+The attached mission owner can release another context's `in_progress`
+subtask using `agent_bridge_mission_subtask_update` with `status: "blocked"`,
+the current `if_revision`, and the reason in `summary`. This clears the
+assignment. An assignee's own update to `blocked` keeps its assignment. The
+owner can explicitly assign the released subtask to an attached context using
+the new revision.
+
 ---
 
 ## 2. Workspace Files & Policy (9 Tools)
@@ -42,24 +49,24 @@ By default all paths are strictly workspace-relative (`..`, absolute paths, syml
 | `desktop_list_directory` | All workspace profiles | Directory listing (`depth` 1–4; locked to `1` in `gemini project-read`). |
 | `desktop_read_file` | All workspace profiles | Bounded line-range UTF-8 reader; issues a fresh one-time `observation_id`. |
 | `desktop_search` | All workspace profiles | Bounded file-name or content search (locked to file-name search in `gemini project-read`). |
-| `desktop_create_directory` | `workspace-write`, `full-control` | Creates directories strictly inside the workspace root. |
-| `desktop_write_file` | `workspace-write`, `full-control` | Creates new files, or `rewrite`/`append` existing files using a fresh `observation_id`. |
-| `desktop_edit_file` | `workspace-write`, `full-control` | Exact string replacement requiring a fresh `observation_id`. |
-| `desktop_move_file` | `workspace-write`, `full-control` | Moves an observed regular file to a non-existent destination inside the workspace. |
+| `desktop_create_directory` | `workspace-write`, `full-control`, `fully-unlocked` | Creates directories inside the active file scope. |
+| `desktop_write_file` | `workspace-write`, `full-control`, `fully-unlocked` | Creates new files, or `rewrite`/`append` existing files using a fresh `observation_id`. |
+| `desktop_edit_file` | `workspace-write`, `full-control`, `fully-unlocked` | Exact string replacement requiring a fresh `observation_id`. |
+| `desktop_move_file` | `workspace-write`, `full-control`, `fully-unlocked` | Moves an observed regular file to a non-existent destination inside the active file scope. |
 
 ---
 
 ## 3. Temporary Checksum-Verified Artifacts (1 Tool · 5 Actions)
 
-`desktop_artifact_manage` publishes workspace files into temporary, in-instance, SHA-256 verified artifacts:
+`desktop_artifact_manage` publishes policy-approved files into temporary, in-instance, SHA-256 verified artifacts. The legacy Web workstation refuses every artifact action in `read-only` (`PROFILE_DENIED` when the tool is published). The unified workstation admits these actions as follows:
 
 | Action | Profiles | Notes |
 | --- | --- | --- |
-| `list` | `read-only`, `workspace-write`, `full-control` | Lists live non-expired artifacts. |
-| `get` | `read-only`, `workspace-write`, `full-control` | Returns artifact metadata and SHA-256 digest. |
-| `read` | `read-only`, `workspace-write`, `full-control` | Reads bounded chunks in `utf8` (automatically trims cleanly at multi-byte UTF-8 boundaries; returns `INVALID_UTF8_BOUNDARY` or `INVALID_UTF8` when applicable) or `base64` (binary-safe). |
-| `publish` | `workspace-write`, `full-control` | Publishes a policy-approved workspace file (`READ_ONLY` refused in read-only profiles). |
-| `delete` | `workspace-write`, `full-control` | Deletes an artifact; subsequent `get`/`read` returns `ARTIFACT_NOT_FOUND`. |
+| `list` | `read-only`, `workspace-write`, `full-control`, `fully-unlocked` | Lists live non-expired artifacts. |
+| `get` | `read-only`, `workspace-write`, `full-control`, `fully-unlocked` | Returns artifact metadata and SHA-256 digest. |
+| `read` | `read-only`, `workspace-write`, `full-control`, `fully-unlocked` | Reads bounded chunks in `utf8` (automatically trims cleanly at multi-byte UTF-8 boundaries; returns `INVALID_UTF8_BOUNDARY` or `INVALID_UTF8` when applicable) or `base64` (binary-safe). |
+| `publish` | `workspace-write`, `full-control`, `fully-unlocked` | Publishes a policy-approved file (`READ_ONLY` in the unified read-only profile). |
+| `delete` | `workspace-write`, `full-control`, `fully-unlocked` | Deletes an artifact; subsequent `get`/`read` returns `ARTIFACT_NOT_FOUND`. |
 
 ---
 
@@ -67,11 +74,14 @@ By default all paths are strictly workspace-relative (`..`, absolute paths, syml
 
 `desktop_skill_manage` manages versioned, **documentary-only** skill packages under `<settings>/skills`. Bundled scripts are treated strictly as readable documentation and are **never auto-executed**.
 
+The legacy Web workstation requires `--enable-settings-tools` to publish the tool and refuses every action in `read-only` (`PROFILE_DENIED` when published). Its local `install` is available from `workspace-write`. The unified workstation admits these actions as follows:
+
 | Action | Profiles | Notes |
 | --- | --- | --- |
-| `list`, `get`, `read`, `validate` | `read-only`, `workspace-write`, `full-control` | Inspect installed revisions, read bounded resource files, or validate local folders/ZIPs. |
-| `install`, `activate`, `rollback` | `workspace-write`, `full-control` | Install versioned packages from workspace directories or local plain ZIP archives, switch active revision, or roll back safely. |
-| Remote `source_url` (`validate`/`install`) | `full-control` + `AGENT_BRIDGE_SKILL_ALLOWED_HTTPS_ORIGINS` | Bounded, redirect-free, proxy-free HTTPS ZIP fetch verified against required 64-hex `expected_sha256`. |
+| `list`, `get`, `read`, local `validate` | `read-only`, `workspace-write`, `full-control`, `fully-unlocked` | Inspect installed revisions, read bounded resource files, or validate local folders/ZIPs. |
+| Local `install` | `full-control`, `fully-unlocked` | Install versioned packages from workspace directories or local plain ZIP archives. Lower unified profiles return `LIVE_PROFILE_REFUSED`. |
+| `activate`, `rollback` | `workspace-write`, `full-control`, `fully-unlocked` | Switch active revision or roll back safely. |
+| Remote `source_url` (`validate`/`install`) | `full-control` or `fully-unlocked` | Requires `AGENT_BRIDGE_SKILL_ALLOWED_HTTPS_ORIGINS`. Bounded, redirect-free, proxy-free HTTPS ZIP fetch verified against required 64-hex `expected_sha256`. |
 
 ---
 
@@ -105,7 +115,13 @@ Rust-only automation over private inherited CDP pipes (`--remote-debugging-pipe`
 
 ---
 
-## 7. Streamable HTTP MCP Extensions & Outbound OAuth 2.1 (4 Tools)
+## 7. MCP Extensions over Streamable HTTP and Stdio (4 Tools)
+
+The outbound client uses rmcp `=3.11.0` and tries MCP `2026-07-28` first, with an `initialize` fallback for legacy servers. Only the local CLI can queue `add_stdio`, via `extensions import`. The proposal includes a SHA-256 pin for the native executable and an optional per-server `inherit_path`. On the unified catalogue, HTTP `add` accepts `header_env` references to local environment variables. Approving `set_oauth`, `auth_start`, or Web `refresh` for a `stdio` server yields `stdio_transport_unsupported_operation`.
+
+The registry checks individual grants, the active `ToolScope`, and approved argument types, including bounded `number` and `public_https_url`. A call handler with a `read-only` or unavailable profile limits registry scope to named data operations. The unified workstation requires `full-control` or `fully-unlocked` for `desktop_mcp_tool_call` (`LIVE_PROFILE_REFUSED` below that floor). The legacy Web workstation admits it from `workspace-write` upward when published (`PROFILE_DENIED` in `read-only`).
+
+Calls reuse idle sessions for the same server configuration for up to 120 seconds. Downgrades close idle sessions, as do configuration loss or OAuth authority changes detected by the call handler. Registry changes evict stale sessions on the next call.
 
 | Tool | Actions / Capabilities | Notes |
 | --- | --- | --- |
@@ -126,7 +142,7 @@ Used by full-control workstations and the existing `stdio` path:
 
 | Tool | Purpose |
 | --- | --- |
-| `desktop_start_process` | Accepts only a SHA-256 pinned executable from `<settings>/commands.json`; arbitrary shells are refused. Restricted Low-IL launching is unsupported in 2.0.0: on Windows the request is refused with `PROCESS_LOW_IL_UNQUALIFIED` before any process is created, and it never falls back to current-user execution. |
+| `desktop_start_process` | Accepts only a SHA-256 pinned executable from `<settings>/commands.json`; arbitrary shells are refused. Restricted Low-IL launching is unsupported: on Windows the request is refused with `PROCESS_LOW_IL_UNQUALIFIED` before any process is created, and it never falls back to current-user execution. |
 | `desktop_read_process` | Reads bounded stdout/stderr chunks from an owned process session. |
 | `desktop_interact_process` | Sends bounded input to a compatible owned process session. |
 | `desktop_terminate_process` | Terminates only a process session started by this gateway. |
@@ -196,5 +212,5 @@ Most bounds are stricter:
 - `oauth_client_secret_env` is at most 128 characters.
 
 Two limits are wider:
-- An extension server `name` may have up to 96 characters (upstream: 64).
+- `desktop_mcp_manage.name` may have up to 96 characters (upstream: 64). The `desktop_mcp_tool_search.server` filter remains limited to 64.
 - A process `cwd` may have up to 8192 characters (upstream: 4096).

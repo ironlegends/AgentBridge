@@ -1150,13 +1150,13 @@ impl PreparedGitRevision {
         })
     }
 }
-#[cfg(test)]
+#[cfg(all(test, feature = "low-il-specimen"))]
 mod restricted_access_diagnostics {
     use super::*;
     // The known, previously approved project specimen is used only for
     // metadata and handle-open checks. No executable or shell is started.
+    /// Requires explicit local specimen; read-only restricted-token probe.
     #[test]
-    #[ignore = "explicit local specimen; read-only restricted-token probe"]
     fn exact_project_token_access_matrix() {
         let executable=PathBuf::from(std::env::var_os("AB_LOW_IL_SPECIMEN").expect("exact local specimen"));
         let root=executable.parent().unwrap().to_owned();
@@ -1199,7 +1199,7 @@ mod restricted_access_diagnostics {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "low-il-specimen"))]
 mod restricted_access_layers {
     use super::*;
     use windows_sys::Win32::{
@@ -1314,8 +1314,8 @@ mod restricted_access_layers {
         }
         Ok(labels)
     }
+    /// Requires exact approved local specimen; read-only native open and token metadata.
     #[test]
-    #[ignore="exact approved local specimen; read-only native open and token metadata"]
     fn exact_low_il_kernel_open_diagnostic(){
         use windows_sys::Win32::{Security::{IsTokenRestricted,TokenMandatoryPolicy,TOKEN_MANDATORY_POLICY},System::Threading::{GetCurrentThread,OpenThreadToken}};
         let exe=PathBuf::from(std::env::var_os("AB_LOW_IL_SPECIMEN").expect("exact local specimen"));
@@ -1381,8 +1381,8 @@ mod restricted_access_layers {
         println!("LOW_IL_KERNEL diagnostic_only=true ACL_modified=false child_started=false identity_rechecked=true");
     }
 
+    /// Requires explicit approved local specimen; metadata/DACL and token queries only.
     #[test]
-    #[ignore="explicit approved local specimen; metadata/DACL and token queries only"]
     fn exact_low_il_access_layers(){
         let exe=PathBuf::from(std::env::var_os("AB_LOW_IL_SPECIMEN").expect("explicit specimen"));
         let root=exe.parent().unwrap().to_owned();

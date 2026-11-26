@@ -48,7 +48,7 @@ fn header_env_refuses_transport_overrides_secret_literals_and_insecure_destinati
     }
     let allowed = json!({"Authorization":"AGENT_BRIDGE_EXTENSION_AUTH"});
     assert!(Registry::parse(&config("http://127.0.0.1:39123/mcp", allowed.clone())).is_err());
-    assert!(Registry::parse(&config("https://learn.microsoft.com/api/mcp", allowed.clone())).is_err());
+    assert!(Registry::parse(&config("https://modelcontextprotocol.io/mcp", allowed.clone())).is_err());
     let mut duplicate: Value = serde_json::from_slice(&config("https://example.invalid/mcp", allowed)).unwrap();
     duplicate["servers"]["sample"]["bearer_env"] = json!("AGENT_BRIDGE_EXTENSION_BEARER");
     assert!(Registry::parse(&serde_json::to_vec(&duplicate).unwrap()).is_err(), "two Authorization sources must be refused");
@@ -57,12 +57,19 @@ fn header_env_refuses_transport_overrides_secret_literals_and_insecure_destinati
 #[test]
 fn task5_normalized_public_destination_never_accepts_private_header_references() {
     for endpoint in [
+        "https://MODELCONTEXTPROTOCOL.io/mcp",
+        "https://modelcontextprotocol.io:443/mcp",
+        "HTTPS://MODELCONTEXTPROTOCOL.IO:443/mcp",
+        "https://modelcontextprotocol.io/./mcp",
+        "https://modelcontextprotocol.io./mcp",
+        "https://MODELCONTEXTPROTOCOL.IO.:443/mcp",
+        "https://modelcontextprotocol.io./%6Dcp",
+        "https://modelcontextprotocol.io./other",
+        "https://modelcontextprotocol.io.:8443/mcp",
         "https://LEARN.microsoft.com/api/mcp",
         "https://learn.microsoft.com:443/api/mcp",
-        "HTTPS://LEARN.MICROSOFT.COM:443/api/mcp",
-        "https://learn.microsoft.com/api/./mcp",
+        "https://learn.microsoft.com/./api/mcp",
         "https://learn.microsoft.com./api/mcp",
-        "https://LEARN.MICROSOFT.COM.:443/api/mcp",
         "https://learn.microsoft.com./api/%6Dcp",
         "https://learn.microsoft.com./other",
         "https://learn.microsoft.com.:8443/api/mcp",
@@ -83,15 +90,15 @@ fn task5_normalized_public_destination_never_accepts_private_header_references()
 #[test]
 fn public_credential_guard_does_not_rewrite_endpoints_or_reject_unrelated_hosts() {
     let references = BTreeMap::from([("X-Api-Key".into(), "AGENT_BRIDGE_EXTENSION_SYNTHETIC".into())]);
-    for endpoint in ["https://learn.microsoft.com.evil.invalid/api/mcp", "https://private.example.invalid./api/mcp"] {
+    for endpoint in ["https://modelcontextprotocol.io.evil.invalid/api/mcp", "https://private.example.invalid./api/mcp"] {
         assert!(agent_bridge_extensions::validate_header_env(endpoint, &references, false).is_ok());
         assert!(agent_bridge_extensions::validate_header_env(endpoint, &BTreeMap::new(), true).is_ok());
     }
-    let alias = "https://learn.microsoft.com./api/mcp";
+    let alias = "https://modelcontextprotocol.io./mcp";
     let registry = Registry::parse(&config(alias, Value::Null)).unwrap();
     assert_eq!(registry.server_endpoint("sample"), Some(alias));
     let mut unapproved: Value = serde_json::from_slice(&config(alias, Value::Null)).unwrap();
-    unapproved["servers"]["sample"]["tools"]["microsoft_docs_search"] = json!({
+    unapproved["servers"]["sample"]["tools"]["search_model_context_protocol"] = json!({
         "descriptor_sha256": "0".repeat(64), "parameters": {"query":{"type":"search_terms"}}
     });
     assert!(Registry::parse(&serde_json::to_vec(&unapproved).unwrap()).is_err(),
@@ -99,15 +106,16 @@ fn public_credential_guard_does_not_rewrite_endpoints_or_reject_unrelated_hosts(
 }
 
 #[test]
-fn public_learn_oauth_flow_is_denied_before_config_storage_or_network() {
+fn public_docs_oauth_flow_is_denied_before_config_storage_or_network() {
     use agent_bridge_extensions::oauth::{run_oauth_flow, OAuthServerConfig};
     // Deliberately no client_id: on the old path this returns before network
     // discovery, so even RED is entirely offline and touches no token store.
     let cfg = OAuthServerConfig { enabled: true, scope: None, client_id: None,
         client_auth_method: None, client_secret_env: None };
-    for endpoint in ["https://learn.microsoft.com/api/mcp", "https://LEARN.MICROSOFT.COM.:443/api/mcp"] {
-        let error = run_oauth_flow(std::path::Path::new("unused-offline-test-setting"), "public_learn", endpoint,
+    for endpoint in ["https://modelcontextprotocol.io/mcp", "https://MODELCONTEXTPROTOCOL.IO.:443/mcp",
+        "https://learn.microsoft.com/api/mcp", "https://LEARN.microsoft.com.:443/api/mcp"] {
+        let error = run_oauth_flow(std::path::Path::new("unused-offline-test-setting"), "public_docs", endpoint,
             &cfg, false, |_| panic!("public OAuth must not present an authorization URL")).unwrap_err();
-        assert_eq!(error.to_string(), "Public Microsoft Learn search forbids credentials");
+        assert_eq!(error.to_string(), "Public documentation search forbids credentials");
     }
 }

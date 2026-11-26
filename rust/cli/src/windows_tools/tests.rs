@@ -37,7 +37,6 @@ fn text_value(response: &Value) -> Value {
 }
 
 #[test]
-#[ignore = "requires independently packaged Windows resources"]
 fn packaged_native_preflight_is_read_only_and_rejects_wrong_seals() {
     let config = config();
     assert!(!config.state_root.exists());
@@ -50,7 +49,6 @@ fn packaged_native_preflight_is_read_only_and_rejects_wrong_seals() {
 }
 
 #[test]
-#[ignore = "requires independently packaged Windows resources"]
 fn four_native_handlers_cross_the_real_mcp_schema_boundary() {
     let config = config();
     let profile = ProfileControl::new(DesktopProfile::FullyUnlocked);
@@ -156,7 +154,6 @@ fn selectors(snapshot:&Value)->std::collections::BTreeMap<String,String> {
 }
 
 #[test]
-#[ignore="requires real owned WPF fixture and explicit foreground synthetic input"]
 fn all_eight_action_families_have_real_effects_and_one_use_observations() {
     let rig=Rig::new(vec![]); let mut fixture=Fixture::new(); let id=select_fixture(&rig,&fixture,None);
     let screenshot=rig.snapshot(&id,None,true); let data=text_value(&screenshot);
@@ -207,7 +204,6 @@ struct DedicatedDesktop {handle:crate::agent_desktop::AgentDesktopHandle,binding
 impl Drop for DedicatedDesktop {fn drop(&mut self){self.fixture.take();let _=self.handle.local_remove_desktop(&self.binding);}}
 
 #[test]
-#[ignore="requires real owned WPF fixture and native Windows command-line limits"]
 fn literal_values_are_preserved_and_oversized_commands_have_no_effect() {
     let foreground=foreground_window();assert_ne!(foreground,0,"no independent foreground witness");
     let rig=Rig::new(vec![]);let mut fixture=Fixture::passive();
@@ -257,13 +253,11 @@ fn literal_values_are_preserved_and_oversized_commands_have_no_effect() {
 }
 
 #[test]
-#[ignore="requires explicitly created dedicated Virtual Desktop and owned fixture plus qualified passive capture bundle"]
 fn real_agent_desktop_moves_only_owned_windows_and_refuses_background_physical_input() {
     verify_passive_desktop(true);
 }
 
 #[test]
-#[ignore="requires exact pinned native bundle and passive fixture on dedicated Virtual Desktop; no capture or physical input"]
 fn real_agent_desktop_passive_semantic_actions_without_capture() {
     verify_passive_desktop(false);
 }

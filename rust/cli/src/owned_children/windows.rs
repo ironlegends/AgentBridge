@@ -232,23 +232,26 @@ fn compare_names(first: &[u16], second: &[u16]) -> io::Result<Ordering> {
         _ => Err(stage("COMPARE_ENVIRONMENT_NAMES")),
     }
 }
-pub(super) fn environment_block(
-    overrides: &BTreeMap<OsString, Option<OsString>>,
-) -> io::Result<Option<Vec<u16>>> {
-    if overrides.is_empty() { return Ok(None); }
-    if overrides.len() > 1024 {
-        return Err(invalid("Too many child environment overrides"));
+/// Encodes one supplied variable; the name and value rules apply to both blocks.
+fn supplied_entry(key: &OsStr, value: Option<&OsStr>) -> io::Result<(Vec<u16>, Option<Vec<u16>>)> {
+    let name: Vec<u16> = key.encode_wide().collect();
+    if name.is_empty() || name.len() > 32_767 || name.iter().any(|unit| matches!(*unit, 0 | 61)) {
+        return Err(invalid("Invalid child environment name"));
     }
+    let value = value.map(|value| value.encode_wide().collect::<Vec<_>>());
+    if value.as_ref().is_some_and(|value| value.len() > 32_767 || value.contains(&0)) {
+        return Err(invalid("Invalid child environment value"));
+    }
+    Ok((name, value))
+}
+
+/// Supplied names must stay distinct under Windows case-insensitive lookup.
+fn supplied_entries<'a>(
+    entries: impl Iterator<Item = (&'a OsString, Option<&'a OsString>)>,
+) -> io::Result<Vec<(Vec<u16>, Option<Vec<u16>>)>> {
     let mut changes: Vec<(Vec<u16>, Option<Vec<u16>>)> = Vec::new();
-    for (key, value) in overrides {
-        let name: Vec<u16> = key.encode_wide().collect();
-        if name.is_empty() || name.len() > 32_767 || name.iter().any(|unit| matches!(*unit, 0 | 61)) {
-            return Err(invalid("Invalid child environment name"));
-        }
-        let value = value.as_ref().map(|value| value.encode_wide().collect::<Vec<_>>());
-        if value.as_ref().is_some_and(|value| value.len() > 32_767 || value.contains(&0)) {
-            return Err(invalid("Invalid child environment value"));
-        }
+    for (key, value) in entries {
+        let (name, value) = supplied_entry(key, value.map(OsString::as_os_str))?;
         for (existing, _) in &changes {
             if compare_names(existing, &name)? == Ordering::Equal {
                 return Err(invalid("Child environment overrides contain case-ambiguous names"));
@@ -256,6 +259,17 @@ pub(super) fn environment_block(
         }
         changes.push((name, value));
     }
+    Ok(changes)
+}
+
+pub(super) fn environment_block(
+    overrides: &BTreeMap<OsString, Option<OsString>>,
+) -> io::Result<Option<Vec<u16>>> {
+    if overrides.is_empty() { return Ok(None); }
+    if overrides.len() > 1024 {
+        return Err(invalid("Too many child environment overrides"));
+    }
+    let changes = supplied_entries(overrides.iter().map(|(key, value)| (key, value.as_ref())))?;
     // Snapshot only; never temporarily mutate process-global environment.
     let mut entries: Vec<(Vec<u16>, Vec<u16>)> = std::env::vars_os()
         .map(|(key, value)| (key.encode_wide().collect(), value.encode_wide().collect())).collect();
@@ -267,6 +281,26 @@ pub(super) fn environment_block(
         if let Some(value) = replacement { retained.push((name, value)); }
         entries = retained;
     }
+    sorted_block(entries).map(Some)
+}
+
+/// A block holding exactly the supplied variables; nothing is inherited from
+/// this process. An empty map yields an empty (double-NUL) block.
+pub(super) fn exact_environment_block(
+    environment: &BTreeMap<OsString, OsString>,
+) -> io::Result<Vec<u16>> {
+    if environment.len() > 1024 {
+        return Err(invalid("Too many child environment overrides"));
+    }
+    let entries = supplied_entries(environment.iter().map(|(key, value)| (key, Some(value))))?
+        .into_iter()
+        .map(|(name, value)| (name, value.unwrap_or_default()))
+        .collect();
+    sorted_block(entries)
+}
+
+/// Sorts entries as CreateProcessW requires and encodes the bounded block.
+fn sorted_block(mut entries: Vec<(Vec<u16>, Vec<u16>)>) -> io::Result<Vec<u16>> {
     let mut comparison_error = None;
     entries.sort_by(|(first, _), (second, _)| match compare_names(first, second) {
         Ok(order) => order,
@@ -294,7 +328,7 @@ pub(super) fn environment_block(
     }
     if block.is_empty() { block.push(0); }
     block.push(0);
-    Ok(Some(block))
+    Ok(block)
 }
 fn process_birth(process: HANDLE) -> io::Result<u64> {
     #[cfg(test)]
@@ -493,20 +527,36 @@ pub(super) struct Process {
 }
 
 impl Process {
-    pub(super) fn spawn(specification: &ChildSpec) -> io::Result<Self> {
-        if !specification.executable.is_absolute() || !specification.cwd.is_absolute() {
+    fn check_launch(executable: &Path, cwd: &Path) -> io::Result<()> {
+        if !executable.is_absolute() || !cwd.is_absolute() {
             return Err(invalid("Provider executable and working directory must be absolute"));
         }
-        if !std::fs::metadata(&specification.executable)?.is_file() {
+        if !std::fs::metadata(executable)?.is_file() {
             return Err(invalid("Provider executable is not a file"));
         }
-        if !std::fs::metadata(&specification.cwd)?.is_dir() {
+        if !std::fs::metadata(cwd)?.is_dir() {
             return Err(invalid("Provider working directory is not a directory"));
         }
+        Ok(())
+    }
+
+    pub(super) fn spawn(specification: &ChildSpec) -> io::Result<Self> {
+        Self::check_launch(&specification.executable, &specification.cwd)?;
         let mut command = literal_command_line(&specification.executable, &specification.arguments)?;
         let mut environment = environment_block(&specification.env_overrides)?;
         Self::spawn_prepared(&specification.executable, &mut command,
             &specification.cwd, environment.as_deref_mut(), false)
+    }
+
+    /// Same owner as `spawn`, but the child receives exactly `environment`.
+    pub(super) fn spawn_with_environment(
+        executable: &Path, arguments: &[OsString], cwd: &Path,
+        environment: &BTreeMap<OsString, OsString>,
+    ) -> io::Result<Self> {
+        Self::check_launch(executable, cwd)?;
+        let mut command = literal_command_line(executable, arguments)?;
+        let mut block = exact_environment_block(environment)?;
+        Self::spawn_prepared(executable, &mut command, cwd, Some(&mut block), false)
     }
 
     pub(super) fn spawn_prepared(

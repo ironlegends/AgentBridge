@@ -49,6 +49,7 @@ pub struct UiConfig {
     pub project: Option<PathBuf>,
     pub open_browser: bool,
     pub capability_selection: Option<Value>,
+    pub(crate) request_audit: Option<Arc<crate::request_audit::RequestAudit>>,
 }
 
 #[derive(Clone)]
@@ -171,6 +172,7 @@ fn parse_args(args: &[OsString]) -> Result<UiConfig, RuntimeError> {
         project,
         open_browser,
         capability_selection: None,
+        request_audit: None,
     })
 }
 
@@ -1322,6 +1324,7 @@ async fn handle_diagnostics(State(state): State<Arc<UiState>>, headers: HeaderMa
             },
             "workspace_inspection": workspace_report,
             "capability_selection": cfg.capability_selection,
+            "mcp_request_audit": cfg.request_audit.as_ref().map(|audit| audit.snapshot()),
             "provider_cleanup": crate::provider_owner::ProviderOwner::rollback_status().map(|status|json!({
                 "pending":status.pending,"omitted":status.omitted,
                 "failures":status.failures.iter().map(|failure|json!({
@@ -1370,6 +1373,7 @@ mod shutdown_tests {
 pub(crate) struct NativeOperator { state: Arc<UiState> }
 
 impl NativeOperator {
+    #[cfg(test)]
     pub(crate) fn new(
         config: UiConfig,
         profile: ProfileControl,
@@ -1506,7 +1510,26 @@ mod native_operator_tests {
             port: 0, database: None, settings_dir: None, oauth_state: None,
             oauth_origin: None, oauth_audience: None, project: None, open_browser: false,
             capability_selection: None,
+            request_audit: Some(Arc::new(crate::request_audit::RequestAudit::new().unwrap())),
         }, ProfileControl::new(DesktopProfile::ReadOnly), None)
+    }
+
+    #[tokio::test]
+    async fn request_audit_requires_local_operator_diagnostics_authentication() {
+        let operator = operator();
+        let mut headers = operator.headers();
+        headers.remove("X-Agent-Bridge-Token");
+        let state = State(Arc::clone(&operator.state));
+        let unauthenticated = operator.reply(handle_diagnostics(state, headers).await).await.unwrap();
+        assert_eq!(unauthenticated.status, 401);
+        assert!(unauthenticated.body.get("mcp_request_audit").is_none());
+
+        let reply = operator.get(crate::backend::OperatorRead::Diagnostics).await.unwrap();
+        assert_eq!(reply.status, 200);
+        assert_eq!(reply.body["mcp_request_audit"]["boot_id"].as_str().unwrap().len(), 32);
+        assert_eq!(reply.body["mcp_request_audit"]["evicted"], 0);
+        assert_eq!(reply.body["mcp_request_audit"]["in_flight"], 0);
+        assert_eq!(reply.body["mcp_request_audit"]["records"], json!([]));
     }
 
     #[tokio::test]

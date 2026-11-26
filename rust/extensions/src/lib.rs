@@ -3,8 +3,11 @@
 //! interface changes. It does not attest the code behind an unchanged interface.
 
 pub mod oauth;
+mod pool;
+pub mod stdio;
 mod transport;
 pub use oauth::{ClientAuthMethod, OAuthServerConfig, OAuthTokenStore, TokenStatusSummary};
+pub use pool::SessionPool;
 pub use transport::fetch_https_bytes;
 
 use serde::{Deserialize, Serialize};
@@ -36,14 +39,14 @@ pub fn validate_proposed_endpoint(url: &str) -> Result<()> {
 /// Validate names and references without reading a secret or making a request.
 pub fn validate_header_env(address: &str, references: &BTreeMap<String, String>, bearer: bool) -> Result<()> {
     let endpoint = transport::endpoint(address)?;
-    // The public Learn host must never receive private credentials, including
-    // under its DNS absolute-name spelling. Match the parsed host (not an
+    // Public documentation hosts must never receive private
+    // credentials, including under a DNS absolute-name spelling. Match the parsed host (not an
     // endpoint string), regardless of path or port; do not rewrite the endpoint
     // or broaden the exact supported-operation allowlist.
-    let public_learn_host = endpoint.host_str().is_some_and(|host|
-        host.strip_suffix('.').unwrap_or(host).eq_ignore_ascii_case("learn.microsoft.com"));
-    if public_learn_host && (bearer || !references.is_empty()) {
-        return Err(error("Public Microsoft Learn search forbids credentials"));
+    let public_docs_host = endpoint.host_str().is_some_and(|host| PUBLIC_DOCS.iter().any(|docs|
+        host.strip_suffix('.').unwrap_or(host).eq_ignore_ascii_case(docs.host)));
+    if public_docs_host && (bearer || !references.is_empty()) {
+        return Err(error("Public documentation search forbids credentials"));
     }
     if references.len() > 16 || (!references.is_empty()
         && endpoint.scheme() != "https") {
@@ -71,12 +74,23 @@ pub fn validate_header_env(address: &str, references: &BTreeMap<String, String>,
 pub struct Registry {
     version: u8,
     servers: BTreeMap<String, Server>,
+    /// Process seam for stdio servers, attached by the CLI; never parsed.
+    #[serde(skip)]
+    stdio_launcher: Option<std::sync::Arc<dyn stdio::StdioLauncher>>,
+    /// Reusable sessions for tool calls, attached by the CLI; never parsed.
+    #[serde(skip)]
+    session_pool: Option<std::sync::Arc<SessionPool>>,
 }
 
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct Server {
-    endpoint: String,
+    /// Exactly one of `endpoint` and `stdio`. Both are omitted when absent,
+    /// so an HTTP entry serializes, and therefore fingerprints, as before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    endpoint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    stdio: Option<stdio::StdioSpec>,
     #[serde(default)]
     bearer_env: Option<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -106,6 +120,52 @@ enum Parameter {
     Boolean,
     Choice { values: Vec<String> },
     SearchTerms,
+    /// A finite number in an inclusive range.
+    Number { minimum: f64, maximum: f64 },
+    /// An `https` URL whose host is a public DNS name.
+    PublicHttpsUrl,
+}
+
+/// Which granted tools the active profile may call.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ToolScope {
+    /// The read-only profile, and a route without a profile: named data
+    /// operations only.
+    DataOperations,
+    /// Higher profiles: any tool the operator granted.
+    AnyGranted,
+}
+
+/// A public `https` URL: no credentials, no port other than 443, and a DNS
+/// host that is neither an address literal nor a local or reserved name.
+/// Name resolution is not checked here; a server that fetches the URL must
+/// still refuse private addresses itself.
+fn public_https_url(raw: &str) -> bool {
+    let Some(rest) = raw.strip_prefix("https://") else { return false };
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
+    let host = match authority.rsplit_once(':') {
+        Some((host, "443")) => host,
+        Some(_) => return false,
+        None => authority,
+    };
+    let labels: Vec<_> = host.split('.').collect();
+    let top = labels.last().copied().unwrap_or_default().to_ascii_lowercase();
+    raw.len() <= 2048 && !raw.chars().any(|c| c.is_control() || c.is_whitespace())
+        && host.len() <= 253 && labels.len() >= 2
+        && labels.iter().all(|label| !label.is_empty() && label.len() <= 63
+            && !label.starts_with('-') && !label.ends_with('-')
+            && label.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-'))
+        // WHATWG reads a host whose last label is decimal or `0x` hex as
+        // IPv4 (`127.0.0.0x1`), so the top label must start with a letter.
+        && top.bytes().next().is_some_and(|b| b.is_ascii_alphabetic())
+        && !matches!(top.as_str(), "localhost" | "local" | "internal" | "lan" | "home" | "corp"
+            | "intranet" | "private" | "test" | "invalid" | "example" | "arpa" | "localdomain")
+}
+
+/// A granted parameter name. `url` names a generic fetch target, so it is
+/// granted only as a public `https` URL.
+fn grant_parameter(name: &str, parameter: &Parameter) -> bool {
+    parameter.valid() && (data_name(name) || (name == "url" && matches!(parameter, Parameter::PublicHttpsUrl)))
 }
 
 pub fn valid_server_name(s: &str) -> bool {
@@ -137,6 +197,10 @@ impl Parameter {
     fn valid(&self) -> bool {
         match self {
             Self::Integer { minimum, maximum } => minimum <= maximum,
+            // Above 2^53 an `f64` no longer holds every integer, so a JSON
+            // integer could round into the range.
+            Self::Number { minimum, maximum } => minimum.abs() <= 9_007_199_254_740_992.0
+                && maximum.abs() <= 9_007_199_254_740_992.0 && minimum <= maximum,
             Self::Choice { values } => !values.is_empty() && values.len() <= 64 && values.iter().all(|s| valid_server_name(s)),
             _ => true,
         }
@@ -149,10 +213,18 @@ impl Parameter {
             Self::Choice { values } => value.as_str().is_some_and(|v| values.iter().any(|allowed| v == allowed)),
             Self::SearchTerms => value.as_str().is_some_and(|v| !v.is_empty() && v.len() <= 256 &&
                 v.chars().all(|c| c.is_alphanumeric() || matches!(c, ' ' | '-' | '_' | '\'' | '’'))),
+            Self::Number { minimum, maximum } =>
+                value.as_f64().is_some_and(|v| v.is_finite() && (*minimum..=*maximum).contains(&v)),
+            Self::PublicHttpsUrl => value.as_str().is_some_and(public_https_url),
         }
     }
     fn json_type(&self) -> &'static str {
-        match self { Self::Integer {..} => "integer", Self::Boolean => "boolean", _ => "string" }
+        match self {
+            Self::Integer {..} => "integer",
+            Self::Number {..} => "number",
+            Self::Boolean => "boolean",
+            _ => "string",
+        }
     }
 }
 
@@ -166,24 +238,109 @@ fn descriptor_hash(value: &Value) -> String {
 // confer its own authority by returning a harmless-looking name or schema.
 // The installed profile has no upstream servers. Populate this list only
 // with an independently verified service endpoint and a fixed data operation.
-// Public, tokenless Microsoft Learn documentation search only. Do not
-// authorize docs_fetch, code-sample search, arbitrary MCP tools or destinations.
-// The operator still pins the exact live descriptor and constrains `query`.
-const MICROSOFT_LEARN_ENDPOINT: &str = "https://learn.microsoft.com/api/mcp";
-const MICROSOFT_DOCS_SEARCH: &str = "microsoft_docs_search";
-const SUPPORTED_OPERATIONS: &[(&str, &str)] = &[
-    (MICROSOFT_LEARN_ENDPOINT, MICROSOFT_DOCS_SEARCH),
+// Public, tokenless documentation search only: the MCP documentation
+// (2026-07-28) and Microsoft Learn (legacy lifecycle). Do not authorize page
+// fetches, code-sample search, feedback submission, arbitrary MCP tools or
+// destinations. The operator still pins the exact live descriptor and
+// constrains `query`.
+struct PublicDocs {
+    server: &'static str,
+    endpoint: &'static str,
+    host: &'static str,
+    search: &'static str,
+}
+const PUBLIC_DOCS: &[PublicDocs] = &[
+    PublicDocs { server: "mcp_docs", endpoint: "https://modelcontextprotocol.io/mcp",
+        host: "modelcontextprotocol.io", search: "search_model_context_protocol" },
+    PublicDocs { server: "microsoft_learn", endpoint: "https://learn.microsoft.com/api/mcp",
+        host: "learn.microsoft.com", search: "microsoft_docs_search" },
 ];
 
+fn public_docs(endpoint: &str) -> Option<&'static PublicDocs> {
+    PUBLIC_DOCS.iter().find(|docs| docs.endpoint == endpoint)
+}
+
+/// True for the server names whose read-only remote catalog probe is supported.
+pub fn public_docs_server(name: &str) -> bool {
+    PUBLIC_DOCS.iter().any(|docs| docs.server == name)
+}
+
 fn supported(endpoint: &str, name: &str) -> bool {
-    SUPPORTED_OPERATIONS.contains(&(endpoint, name))
+    public_docs(endpoint).is_some_and(|docs| docs.search == name)
 }
 
 impl Registry {
+    /// Attaches the contained process launcher used by stdio servers.
+    pub fn with_stdio_launcher(mut self, launcher: std::sync::Arc<dyn stdio::StdioLauncher>) -> Self {
+        self.stdio_launcher = Some(launcher);
+        self
+    }
+
+    /// Reuses tool-call sessions through `pool`. Operator probes, such as
+    /// the refresh check and describe, still open their own session.
+    pub fn with_session_pool(mut self, pool: std::sync::Arc<SessionPool>) -> Self {
+        self.session_pool = Some(pool);
+        self
+    }
+
+    /// The pool key of one server: its name and its exact fingerprint.
+    fn session_key(&self, name: &str) -> Result<String> {
+        let fingerprint = self.server_sha256(name)?.ok_or_else(|| error("Unknown extension server"))?;
+        Ok(format!("{name}:{fingerprint}"))
+    }
+
+    /// The keys of every enabled server in this registry.
+    fn session_keys(&self) -> Result<std::collections::BTreeSet<String>> {
+        self.servers.iter().filter(|(_, server)| !server.disabled)
+            .map(|(name, _)| self.session_key(name)).collect()
+    }
+
+    /// The pinned launch specification of a stdio server.
+    pub fn server_stdio(&self, name: &str) -> Option<&stdio::StdioSpec> {
+        self.servers.get(name).and_then(|server| server.stdio.as_ref())
+    }
+
+    /// Read-only catalog probe of one enabled stdio server: one contained
+    /// child, one tools/list traversal, no tool call and no registry change.
+    /// A changed descriptor stays blocked by its pin on the next call.
+    pub fn refresh_stdio(&self, name: &str) -> Result<Value> {
+        let server = self.servers.get(name).ok_or_else(|| error("Stdio extension is not configured"))?;
+        let spec = server.stdio.as_ref().ok_or_else(|| error("Remote refresh is not supported for this server"))?;
+        if server.disabled { return Err(error("Extension disabled by the operator")); }
+        let mut session = self.open_session(server)?;
+        let live = session.catalog()?;
+        let mut report = catalog_report(server, &live)?;
+        report.extend([
+            ("server".to_owned(), json!(name)),
+            ("transport".to_owned(), json!("stdio")),
+            ("executable_sha256".to_owned(), json!(spec.executable_sha256)),
+            ("stderr_bytes".to_owned(), json!(session.stderr_bytes().unwrap_or(0))),
+            ("protocol_version".to_owned(), json!(session.protocol_version())),
+        ]);
+        Ok(Value::Object(report))
+    }
+
+    /// One session over the server's own transport. A stdio server needs
+    /// the launcher the CLI attaches; nothing is started without it.
+    fn open_session(&self, server: &Server) -> Result<transport::Session> {
+        match (&server.endpoint, &server.stdio) {
+            (Some(endpoint), None) =>
+                transport::Session::open(endpoint, server.bearer_env.as_deref(), &server.header_env),
+            (None, Some(spec)) => {
+                let launcher = self.stdio_launcher.as_deref()
+                    .ok_or_else(|| error("Stdio extensions are unavailable in this context"))?;
+                // An idle pooled child yields its slot to any new session.
+                if stdio::slots_exhausted() { pool::evict_idle_stdio(); }
+                transport::Session::open_stdio(spec, launcher, &|name| std::env::var_os(name))
+            }
+            _ => Err(error("Invalid extension server entry")),
+        }
+    }
+
     pub fn has_server(&self, name: &str) -> bool { self.servers.contains_key(name) }
 
     pub fn server_endpoint(&self, name: &str) -> Option<&str> {
-        self.servers.get(name).map(|s| s.endpoint.as_str())
+        self.servers.get(name).and_then(|s| s.endpoint.as_deref())
     }
 
     pub fn header_authorization_configured(&self, name: &str) -> bool {
@@ -219,18 +376,35 @@ impl Registry {
     }
 
     /// The CLI supplies bytes from its private operator-owned settings file.
+    /// A stdio server starts disabled: only an enabled local control that
+    /// matches its exact fingerprint activates it (see `with_controls`).
     pub fn parse(bytes: &[u8]) -> Result<Self> {
         if bytes.len() > 128 * 1024 { return Err(error("Extension registry exceeds limit")); }
-        let registry: Self = serde_json::from_slice(bytes).map_err(|_| error("Invalid extension registry"))?;
+        let mut registry: Self = serde_json::from_slice(bytes).map_err(|_| error("Invalid extension registry"))?;
         if registry.version != 1 || registry.servers.len() > 32 { return Err(error("Unsupported extension registry")); }
         for (id, server) in &registry.servers {
-            transport::endpoint(&server.endpoint)?;
-            validate_header_env(&server.endpoint, &server.header_env, server.bearer_env.is_some())?;
+            match (&server.endpoint, &server.stdio) {
+                (Some(endpoint), None) => {
+                    transport::endpoint(endpoint)?;
+                    validate_header_env(endpoint, &server.header_env, server.bearer_env.is_some())?;
+                }
+                // The executable pin replaces the verified-adapter allowlist
+                // for stdio only. Secrets never live in the registry, and a
+                // public documentation name keeps its HTTP meaning.
+                (None, Some(spec)) => {
+                    if server.bearer_env.is_some() || !server.header_env.is_empty() || public_docs_server(id) {
+                        return Err(error("A stdio extension forbids credential references and reserved names"));
+                    }
+                    spec.validate()?;
+                }
+                _ => return Err(error("An extension server needs exactly one endpoint or stdio launch")),
+            }
             if !valid_server_name(id) || server.tools.len() > 64 { return Err(error("Invalid extension server entry")); }
-            // Microsoft Learn's public search requires no credentials. Never
-            // read an environment bearer value for this one pinned endpoint.
-            if server.endpoint == MICROSOFT_LEARN_ENDPOINT && server.bearer_env.is_some() {
-                return Err(error("Public Microsoft Learn search forbids bearer credentials"));
+            let docs = server.endpoint.as_deref().and_then(public_docs);
+            // Public documentation search requires no credentials. Never read
+            // an environment bearer value for these pinned endpoints.
+            if docs.is_some() && server.bearer_env.is_some() {
+                return Err(error("Public documentation search forbids bearer credentials"));
             }
             if let Some(key) = &server.bearer_env {
                 if !key.starts_with("AGENT_BRIDGE_EXTENSION_") || key.len() > 128 ||
@@ -244,103 +418,72 @@ impl Registry {
                         || descriptor_hash(descriptor) != tool.descriptor_sha256 {
                         return Err(error("Cached extension descriptor does not match its approval"));
                     }
-                    check_schema(descriptor)?;
+                    check_schema(descriptor, &tool.parameters)?;
                 }
-                if !supported(&server.endpoint, name) {
+                if server.stdio.is_none() && !server.endpoint.as_deref().is_some_and(|e| supported(e, name)) {
                     return Err(error("No verified adapter for this extension operation"));
                 }
-                // The remote schema currently treats query as optional, but
-                // this operator grant permits exactly ONE constrained public
+                // A remote schema may offer optional filters, but this
+                // operator grant permits exactly ONE constrained public
                 // search string, never an empty or unrestricted payload.
-                if server.endpoint == MICROSOFT_LEARN_ENDPOINT
-                    && (name != MICROSOFT_DOCS_SEARCH
+                if docs.is_some_and(|docs| name != docs.search
                         || tool.parameters.len() != 1
                         || !matches!(tool.parameters.get("query"), Some(Parameter::SearchTerms)))
                 {
-                    return Err(error("Microsoft Learn requires one bounded query approval"));
+                    return Err(error("Public documentation search requires one bounded query approval"));
                 }
-                if !data_tool(name) || tool.descriptor_sha256.len() != 64 ||
+                // Code runners and dispatchers are never granted. Whether a
+                // granted tool is a named data operation is checked per call,
+                // against the active profile.
+                if !data_name(name) || tool.descriptor_sha256.len() != 64 ||
                     !tool.descriptor_sha256.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) ||
-                    tool.parameters.len() > 32 || !tool.parameters.iter().all(|(p,s)| data_name(p) && s.valid()) {
+                    tool.parameters.len() > 32 || !tool.parameters.iter().all(|(p,s)| grant_parameter(p, s)) {
                     return Err(error("Invalid individual tool approval or forbidden bridge"));
                 }
             }
         }
+        for server in registry.servers.values_mut() {
+            server.disabled |= server.stdio.is_some();
+        }
         Ok(registry)
     }
 
-    /// Revalidate ONLY the explicitly selected public Microsoft Learn
+    /// Revalidate ONLY the explicitly selected public documentation
     /// server using its existing Streamable HTTP MCP transport. This cannot
     /// modify a server, extend a tool grant, contact another host, or import
     /// the returned schemas into the registry. A changed descriptor remains
     /// blocked by the pinned hash on the next normal tool call.
-    pub fn refresh_microsoft_learn(&self, name: &str) -> Result<Value> {
-        if name != "microsoft_learn" {
-            return Err(error("Remote refresh is not supported for this server"));
-        }
+    pub fn refresh_public_docs(&self, name: &str) -> Result<Value> {
+        let docs = PUBLIC_DOCS.iter().find(|docs| docs.server == name)
+            .ok_or_else(|| error("Remote refresh is not supported for this server"))?;
         let server = self.servers.get(name)
-            .ok_or_else(|| error("Microsoft Learn server is not configured"))?;
-        if server.endpoint != MICROSOFT_LEARN_ENDPOINT || server.bearer_env.is_some() {
-            return Err(error("Microsoft Learn refresh requires the exact public tokenless endpoint"));
+            .ok_or_else(|| error("Public documentation server is not configured"))?;
+        if server.endpoint.as_deref() != Some(docs.endpoint) || server.bearer_env.is_some() {
+            return Err(error("Documentation refresh requires the exact public tokenless endpoint"));
         }
-        let mut session = transport::Session::open(MICROSOFT_LEARN_ENDPOINT, None, &BTreeMap::new())?;
+        let mut session = transport::Session::open(docs.endpoint, None, &BTreeMap::new())?;
         let live = session.catalog()?;
-        let mut live_hashes = BTreeMap::<String, String>::new();
-        for tool in &live {
-            let name = tool.get("name").and_then(Value::as_str)
-                .ok_or_else(|| error("Remote catalog entry has no tool name"))?;
-            live_hashes.insert(name.to_owned(), descriptor_hash(tool));
-        }
-        let mut approved = Vec::new();
-        let mut drift = false;
-        for (tool_name, approval) in &server.tools {
-            let observed = live_hashes.get(tool_name);
-            let status = match observed {
-                None => "missing",
-                Some(sha) if *sha == approval.descriptor_sha256 => "unchanged",
-                Some(_) => "descriptor_changed",
-            };
-            drift |= status != "unchanged";
-            approved.push(json!({
-                "tool_name": tool_name,
-                "status": status,
-                "approved_sha256": approval.descriptor_sha256,
-                "observed_sha256": observed
-            }));
-        }
-        let unapproved: Vec<_> = live_hashes.keys()
-            .filter(|tool_name| !server.tools.contains_key(*tool_name))
-            .map(|tool_name| tool_name.to_owned())
-            .collect();
-        drift |= !unapproved.is_empty();
-        Ok(json!({
-            "server":name,
-            "endpoint":MICROSOFT_LEARN_ENDPOINT,
-            "remote_refreshed":true,
-            "transport":"mcp_streamable_http_tools_list",
-            "live_tool_count":live_hashes.len(),
-            "approved_tool_count":server.tools.len(),
-            "approved_tools":approved,
-            "unapproved_live_tool_names":unapproved,
-            "catalog_changes_detected":drift,
-            "operator_approval_required_for_any_new_scope":true,
-            "approved_grants_changed":false,
-            "registry_changed":false,
-            "oauth_used":false,
-            "tool_invoked":false,
-            "remote_session_close":"best_effort"
-        }))
+        let mut report = catalog_report(server, &live)?;
+        report.extend([
+            ("server".to_owned(), json!(name)),
+            ("endpoint".to_owned(), json!(docs.endpoint)),
+            ("transport".to_owned(), json!("mcp_streamable_http_tools_list")),
+            ("protocol_version".to_owned(), json!(session.protocol_version())),
+        ]);
+        Ok(Value::Object(report))
     }
 
     /// Administrative discovery only. No configuration or grant is written.
     pub fn describe_for_operator(&self, server_id: &str, name: &str) -> Result<Value> {
-        if !data_tool(name) { return Err(error("Terminal, generic dispatcher or unsupported domain operation")); }
+        if !data_name(name) { return Err(error("Terminal, generic dispatcher or unsupported domain operation")); }
         let server = self.servers.get(server_id).ok_or_else(|| error("Unknown configured extension"))?;
-        if !supported(&server.endpoint, name) { return Err(error("No verified adapter for this operation")); }
+        if server.stdio.is_none() && !server.endpoint.as_deref().is_some_and(|e| supported(e, name)) {
+            return Err(error("No verified adapter for this operation"));
+        }
         if server.disabled { return Err(error("Extension disabled by the operator")); }
-        let mut session = transport::Session::open(&server.endpoint, server.bearer_env.as_deref(), &server.header_env)?;
+        let mut session = self.open_session(server)?;
         let descriptor = session.tool(name)?;
-        check_schema(&descriptor)?;
+        check_schema(&descriptor, &BTreeMap::new())?;
         Ok(json!({"descriptor_sha256":descriptor_hash(&descriptor),"descriptor":descriptor}))
     }
 
@@ -539,48 +682,135 @@ impl Registry {
         Ok(response)
     }
 
-    pub fn call(&self, qualified: &str, args: &Map<String,Value>) -> Result<Value> {
+    pub fn call(&self, qualified: &str, args: &Map<String,Value>, scope: ToolScope) -> Result<Value> {
+        // Idle sessions of removed, disabled or changed servers close first,
+        // even when this call is refused.
+        if let Some(pool) = &self.session_pool { pool.retain(&self.session_keys()?); }
         let (server_id, name) = qualified.split_once(':').ok_or_else(||error("An exact qualified tool name is required"))?;
         let (server, approval) = self.servers.get(server_id).and_then(|s| s.tools.get(name).map(|a|(s,a)))
             .ok_or_else(|| error("Individual tool approval required"))?;
+        if scope == ToolScope::DataOperations && !data_tool(name) {
+            return Err(error("The active profile allows only named data operations"));
+        }
         if !args.iter().all(|(key,value)| approval.parameters.get(key).is_some_and(|p|p.allows(value))) {
             return Err(error("Arguments outside the operator-approved contract"));
         }
-        if server.endpoint == MICROSOFT_LEARN_ENDPOINT
-            && (name != MICROSOFT_DOCS_SEARCH || args.len() != 1
+        if server.endpoint.as_deref().and_then(public_docs).is_some_and(|docs| name != docs.search || args.len() != 1
                 || !args.get("query").is_some_and(|query|
                     matches!(approval.parameters.get("query"), Some(Parameter::SearchTerms))
                         && approval.parameters["query"].allows(query)))
         {
-            return Err(error("Microsoft Learn search requires one approved public query"));
+            return Err(error("Public documentation search requires one approved public query"));
         }
         if server.disabled { return Err(error("Extension disabled by the operator")); }
-        let mut session = transport::Session::open(&server.endpoint, server.bearer_env.as_deref(), &server.header_env)?;
-        let descriptor = session.tool(name)?;
-        if descriptor_hash(&descriptor) != approval.descriptor_sha256 { return Err(error("Extension descriptor changed; local reapproval required")); }
-        let properties = check_schema(&descriptor)?;
-        for (key, parameter) in &approval.parameters {
-            if properties.get(key).and_then(|p| p.get("type")).and_then(Value::as_str) != Some(parameter.json_type()) {
-                return Err(error("Local argument approval does not match the extension schema"));
-            }
+        // A pooled child is reused only where a new one could be launched.
+        if server.stdio.is_some() && self.stdio_launcher.is_none() {
+            return Err(error("Stdio extensions are unavailable in this context"));
         }
-        if let Some(required) = descriptor["inputSchema"]["required"].as_array() {
-            if !required.iter().all(|r| r.as_str().is_some_and(|k| args.contains_key(k))) { return Err(error("Required extension argument missing")); }
+        let pool = self.session_pool.as_ref();
+        let key = pool.map(|_| self.session_key(server_id)).transpose()?;
+        // A reused session that fails before the tool call is replaced once.
+        // Listing is read-only, so the replacement cannot repeat an effect.
+        let reused = pool.zip(key.as_deref()).and_then(|(pool, key)| pool.take(key));
+        let (mut session, descriptor) = match reused.map(|mut session| (session.tool(name), session)) {
+            Some((Ok(descriptor), session)) => (session, descriptor),
+            stale => {
+                // The broken child closes before its replacement takes a slot.
+                drop(stale);
+                let mut session = self.open_session(server)?;
+                let descriptor = session.tool(name)?;
+                (session, descriptor)
+            }
+        };
+        let give_back = |session: transport::Session| {
+            if let (Some(pool), Some(key)) = (pool, &key) { pool.put(key.clone(), server.stdio.is_some(), session); }
+        };
+        if let Err(refusal) = admit(&descriptor, approval, args) {
+            give_back(session);
+            return Err(refusal);
         }
         // There is exactly one effectful request, including on disconnect.
-        let response = session.request("tools/call", json!({"name":name,"arguments":args}))
+        // A failed call drops its session; only a confirmed reply returns it.
+        let response = session.call_tool(name, args.clone())
             .map_err(|_| error("Extension outcome uncertain; do not replay the request"))?;
+        give_back(session);
         Ok(response)
     }
 }
 
-fn check_schema(descriptor: &Value) -> Result<&Map<String,Value>> {
+/// The live descriptor must match its pin and grant before the one call.
+fn admit(descriptor: &Value, approval: &Approval, args: &Map<String, Value>) -> Result<()> {
+    if descriptor_hash(descriptor) != approval.descriptor_sha256 { return Err(error("Extension descriptor changed; local reapproval required")); }
+    check_schema(descriptor, &approval.parameters)?;
+    if transport::declares_parameter_headers(descriptor) {
+        return Err(error("Extension tool requires parameter headers that this client does not send"));
+    }
+    if let Some(required) = descriptor["inputSchema"]["required"].as_array() {
+        if !required.iter().all(|r| r.as_str().is_some_and(|k| args.contains_key(k))) { return Err(error("Required extension argument missing")); }
+    }
+    Ok(())
+}
+
+/// Compares one live catalog with the pinned grants. Nothing is approved,
+/// imported or written; the operator decides on any new scope.
+fn catalog_report(server: &Server, live: &[Value]) -> Result<Map<String, Value>> {
+    let mut live_hashes = BTreeMap::<String, String>::new();
+    for tool in live {
+        let name = tool.get("name").and_then(Value::as_str)
+            .ok_or_else(|| error("Remote catalog entry has no tool name"))?;
+        live_hashes.insert(name.to_owned(), descriptor_hash(tool));
+    }
+    let mut approved = Vec::new();
+    let mut drift = false;
+    for (tool_name, approval) in &server.tools {
+        let observed = live_hashes.get(tool_name);
+        let status = match observed {
+            None => "missing",
+            Some(sha) if *sha == approval.descriptor_sha256 => "unchanged",
+            Some(_) => "descriptor_changed",
+        };
+        drift |= status != "unchanged";
+        approved.push(json!({
+            "tool_name": tool_name,
+            "status": status,
+            "approved_sha256": approval.descriptor_sha256,
+            "observed_sha256": observed
+        }));
+    }
+    let unapproved: Vec<_> = live_hashes.keys()
+        .filter(|tool_name| !server.tools.contains_key(*tool_name))
+        .map(|tool_name| tool_name.to_owned())
+        .collect();
+    drift |= !unapproved.is_empty();
+    let report = json!({
+        "remote_refreshed":true,
+        "live_tool_count":live_hashes.len(),
+        "approved_tool_count":server.tools.len(),
+        "approved_tools":approved,
+        "unapproved_live_tool_names":unapproved,
+        "catalog_changes_detected":drift,
+        "operator_approval_required_for_any_new_scope":true,
+        "approved_grants_changed":false,
+        "registry_changed":false,
+        "oauth_used":false,
+        "tool_invoked":false
+    });
+    Ok(report.as_object().cloned().unwrap_or_default())
+}
+
+/// Only granted parameters are ever sent, so only they must be plain data
+/// of the granted type. Optional properties the operator did not grant may
+/// have any shape: they are never forwarded.
+fn check_schema(descriptor: &Value, granted: &BTreeMap<String, Parameter>) -> Result<()> {
     let schema = &descriptor["inputSchema"];
     let properties = schema["properties"].as_object().ok_or_else(|| error("Extension needs an explicit data schema"))?;
-    if schema["type"] != "object" || properties.len() > 32 || !properties.iter().all(|(key,p)|
-        data_name(key) && matches!(p["type"].as_str(),Some("string"|"integer"|"boolean"))) ||
-        ["$ref","oneOf","allOf","anyOf","patternProperties"].iter().any(|k| schema.get(*k).is_some()) {
+    if schema["type"] != "object"
+        || ["$ref","oneOf","allOf","anyOf","patternProperties"].iter().any(|k| schema.get(*k).is_some()) {
         return Err(error("Generic dispatchers and opaque payloads cannot be approved"));
     }
-    Ok(properties)
+    if !granted.iter().all(|(key, parameter)|
+        properties.get(key).and_then(|p| p["type"].as_str()) == Some(parameter.json_type())) {
+        return Err(error("Local argument approval does not match the extension schema"));
+    }
+    Ok(())
 }
