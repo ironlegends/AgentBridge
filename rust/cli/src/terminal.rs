@@ -1,4 +1,5 @@
 mod metadata_child;
+#[cfg(windows)]
 mod operator_confirmation;
 mod sessions;
 mod unrestricted;
@@ -9,6 +10,7 @@ pub(crate) enum SessionSupervisor {
 }
 
 impl SessionSupervisor {
+    #[cfg(all(test, windows))]
     pub(crate) fn minimum_profile(&self) -> agent_bridge_desktop::DesktopProfile {
         use agent_bridge_desktop::DesktopProfile;
         match self {
@@ -130,6 +132,7 @@ fn private_files(database: &Path, settings: &Path) -> std::io::Result<Vec<PathBu
     Ok(files)
 }
 
+#[cfg(windows)]
 fn configured_command(
     settings: &Path,
     root: &Path,
@@ -213,10 +216,6 @@ pub(super) fn inspect_revision(settings: &Path, root: &Path, database: &Path) ->
 
 /// These project commands have a fixed argument vector and bounded output.
 /// A configurable command string can never be substituted for their argv.
-fn run(settings: &Path, root: &Path, database: &Path, action: &str) -> Result<Value, RuntimeError> {
-    run_with_snapshot(settings,root,database,action,None,false)
-}
-
 fn run_with_snapshot(settings:&Path,root:&Path,database:&Path,action:&str,
     commands:Option<&CommandCatalogueSnapshot>, fully_unlocked:bool)->Result<Value,RuntimeError> {
     let (image, args): (&str, &[&str]) = match action {
@@ -374,21 +373,10 @@ fn run_with_snapshot(settings:&Path,root:&Path,database:&Path,action:&str,
         "stdout_truncated":stdout.1,"stderr_truncated":stderr.1}))
 }
 
-/// The last argument is a LOCAL startup policy decision, fixed for this
-/// handler's lifetime. A request cannot change it or prompt for permission.
-pub fn attach(
-    settings: &Path,
-    root: &Path,
-    database: &Path,
-    catalog: &mut Vec<ToolDefinition>,
-    handlers: &mut ToolMapHandler,
-    process_enabled: bool,
-) -> Result<Option<SessionSupervisor>, RuntimeError> {
-    attach_inner(settings, root, database, catalog, handlers, process_enabled, None)
-}
-
 /// Attach restricted diagnostics to the same workspace capability used by the
 /// file tools. Unix metadata children receive a clone of this exact root.
+/// The process flag is a LOCAL startup policy decision, fixed for the
+/// handler's lifetime. A request cannot change it or prompt for permission.
 pub(crate) fn attach_with_workspace(
     settings: &Path,
     root: &Path,

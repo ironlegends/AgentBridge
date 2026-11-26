@@ -44,6 +44,58 @@ fn rev_of(v: &Value) -> i64 {
 }
 
 #[test]
+fn ordinary_subtask_update_replay_requires_the_current_assignee() {
+    let mut t = TempDb::new("subtask-update-replay");
+    let conn = t.db.connection_mut();
+    let owner = dispatch_tool(conn, "agent_bridge_context_create", &json!({})).unwrap();
+    let next = dispatch_tool(conn, "agent_bridge_context_create", &json!({})).unwrap();
+    let owner_handle = &owner["context_handle"];
+    let next_id = &next["context_id"];
+    let mission = dispatch_tool(conn, "agent_bridge_mission_create", &json!({
+        "actor_context_handle": owner_handle, "goal": "Check update replay",
+        "idempotency_key": "k-owner-mission-create"
+    })).unwrap();
+    let mid = &mission["mission_id"];
+    let granted = dispatch_tool(conn, "agent_bridge_mission_grant", &json!({
+        "actor_context_handle": owner_handle, "mission_id": mid, "target_context_id": next_id,
+        "if_revision": rev_of(&mission)
+    })).unwrap();
+    dispatch_tool(conn, "agent_bridge_mission_attach", &json!({
+        "actor_context_handle": next["context_handle"], "mission_id": mid,
+        "if_revision": rev_of(&granted)
+    })).unwrap();
+
+    let owned = dispatch_tool(conn, "agent_bridge_mission_subtask_create", &json!({
+        "actor_context_handle": owner_handle, "mission_id": mid, "goal": "Owner's assigned work",
+        "assignee_context_id": owner["context_id"], "idempotency_key": "k-owner-work-create"
+    })).unwrap();
+    let owned_id = &owned["subtask"]["subtask_id"];
+    let started = dispatch_tool(conn, "agent_bridge_mission_subtask_update", &json!({
+        "actor_context_handle": owner_handle, "mission_id": mid, "subtask_id": owned_id,
+        "if_revision": rev_of(&owned["subtask"]), "status": "in_progress",
+        "idempotency_key": "k-owner-work-start"
+    })).unwrap();
+    let owner_update = json!({
+        "actor_context_handle": owner_handle, "mission_id": mid, "subtask_id": owned_id,
+        "if_revision": rev_of(&started["subtask"]), "status": "blocked",
+        "summary": "Waiting for input", "idempotency_key": "k-owner-work-block"
+    });
+    let blocked = dispatch_tool(conn, "agent_bridge_mission_subtask_update", &owner_update).unwrap();
+    assert_eq!(blocked["subtask"]["assignee_context_id"], owner["context_id"]);
+    let prior = dispatch_tool(conn, "agent_bridge_mission_subtask_update", &owner_update).unwrap();
+    assert_eq!(prior["replayed"], true);
+    assert_eq!(prior["subtask"], blocked["subtask"]);
+    let reassigned = dispatch_tool(conn, "agent_bridge_mission_subtask_assign", &json!({
+        "actor_context_handle": owner_handle, "mission_id": mid, "subtask_id": owned_id,
+        "if_revision": rev_of(&blocked["subtask"]), "assignee_context_id": next_id,
+        "idempotency_key": "k-owner-work-reassign"
+    })).unwrap();
+    assert_eq!(reassigned["subtask"]["assignee_context_id"], *next_id);
+    assert_eq!(dispatch_tool(conn, "agent_bridge_mission_subtask_update", &owner_update)
+        .unwrap_err().code, "SECURITY_DENIED");
+}
+
+#[test]
 fn missions_all_16_tools_concurrency_idempotency_and_ownership_regressions() {
     let mut t = TempDb::new("missions16");
     let conn = t.db.connection_mut();
@@ -222,6 +274,99 @@ fn missions_all_16_tools_concurrency_idempotency_and_ownership_regressions() {
     let st_arr = stl.as_array().or_else(|| stl.get("subtasks").and_then(Value::as_array)).expect("subtasks array");
     assert_eq!(st_arr.len(), 1);
 
+    let stuck = dispatch_tool(
+        conn,
+        "agent_bridge_mission_subtask_create",
+        &json!({"actor_context_handle": h1, "mission_id": mid, "goal": "Recover stuck work",
+            "assignee_context_id": id2, "idempotency_key": "k-recover-create"}),
+    ).unwrap();
+    let stuck_id = &stuck["subtask"]["subtask_id"];
+    let update_as_assignee = |revision, status, key| json!({
+        "actor_context_handle": h2, "mission_id": mid, "subtask_id": stuck_id,
+        "if_revision": revision, "status": status, "summary": "Assignee update",
+        "idempotency_key": key
+    });
+    let progress = dispatch_tool(conn, "agent_bridge_mission_subtask_update",
+        &update_as_assignee(rev_of(&stuck["subtask"]), "in_progress", "k-recover-first-start")).unwrap();
+    let blocked = dispatch_tool(conn, "agent_bridge_mission_subtask_update",
+        &update_as_assignee(rev_of(&progress["subtask"]), "blocked", "k-recover-assignee-block")).unwrap();
+    assert_eq!(blocked["subtask"]["assignee_context_id"], id2);
+    let progress = dispatch_tool(conn, "agent_bridge_mission_subtask_update",
+        &update_as_assignee(rev_of(&blocked["subtask"]), "in_progress", "k-recover-second-start")).unwrap();
+    let stuck_rev = rev_of(&progress["subtask"]);
+    let assign = |revision| json!({"actor_context_handle": h1, "mission_id": mid,
+        "subtask_id": stuck_id, "if_revision": revision, "assignee_context_id": id1,
+        "idempotency_key": "k-recover-assign"});
+    assert_eq!(dispatch_tool(conn, "agent_bridge_mission_subtask_assign", &assign(stuck_rev))
+        .unwrap_err().code, "INVALID_TRANSITION");
+
+    let mut release = json!({"actor_context_handle": h3, "mission_id": mid, "subtask_id": stuck_id,
+        "if_revision": stuck_rev, "status": "blocked", "summary": "Provider quota exhausted",
+        "idempotency_key": "k-recover-release"});
+    assert_eq!(dispatch_tool(conn, "agent_bridge_mission_subtask_update", &release)
+        .unwrap_err().code, "SECURITY_DENIED");
+    let observed = dispatch_tool(conn, "agent_bridge_mission_observe",
+        &json!({"actor_context_handle": h1, "mission_id": mid})).unwrap();
+    let invited = dispatch_tool(conn, "agent_bridge_mission_grant",
+        &json!({"actor_context_handle": h1, "mission_id": mid, "if_revision": rev_of(&observed),
+            "target_context_id": c3["context_id"]})).unwrap();
+    dispatch_tool(conn, "agent_bridge_mission_attach",
+        &json!({"actor_context_handle": h3, "mission_id": mid, "if_revision": rev_of(&invited)})).unwrap();
+    assert_eq!(dispatch_tool(conn, "agent_bridge_mission_subtask_update", &release)
+        .unwrap_err().code, "SECURITY_DENIED");
+    release["actor_context_handle"] = json!(h1);
+    release["if_revision"] = json!(stuck_rev - 1);
+    assert_eq!(dispatch_tool(conn, "agent_bridge_mission_subtask_update", &release)
+        .unwrap_err().code, "CONFLICT_REVISION");
+    release["if_revision"] = json!(stuck_rev);
+    let mut no_reason = release.clone();
+    no_reason.as_object_mut().unwrap().remove("summary");
+    assert_eq!(dispatch_tool(conn, "agent_bridge_mission_subtask_update", &no_reason)
+        .unwrap_err().code, "INVALID_PAYLOAD");
+    no_reason["summary"] = json!("  ");
+    assert_eq!(dispatch_tool(conn, "agent_bridge_mission_subtask_update", &no_reason)
+        .unwrap_err().code, "INVALID_PAYLOAD");
+    let mut too_long = release.clone();
+    let reason = format!("Provider quota exhausted{}", "\u{1f9ea}".repeat(2036));
+    assert_eq!(reason.encode_utf16().count(), 4096);
+    too_long["summary"] = json!(format!("{reason}!"));
+    assert_eq!(dispatch_tool(conn, "agent_bridge_mission_subtask_update", &too_long)
+        .unwrap_err().code, "INVALID_PAYLOAD");
+    release["summary"] = json!(reason);
+    let released = dispatch_tool(conn, "agent_bridge_mission_subtask_update", &release).unwrap();
+    assert_eq!(released["subtask"]["status"], "blocked");
+    assert_eq!(released["subtask"]["summary"], progress["subtask"]["summary"]);
+    assert_eq!(released["subtask"]["summary"], "Assignee update");
+    assert_eq!(released["subtask"]["release_reason"], release["summary"]);
+    assert!(released["subtask"].get("assignee_context_id").is_none());
+    assert_eq!(rev_of(&released["subtask"]), stuck_rev + 1);
+    assert_eq!(dispatch_tool(conn, "agent_bridge_mission_subtask_update",
+        &update_as_assignee(stuck_rev + 1, "in_progress", "k-recover-former-assignee"))
+        .unwrap_err().code, "SECURITY_DENIED");
+    let reassigned = dispatch_tool(conn, "agent_bridge_mission_subtask_assign", &assign(stuck_rev + 1)).unwrap();
+    assert_eq!(reassigned["subtask"]["assignee_context_id"], id1);
+    assert_eq!(reassigned["subtask"]["status"], "pending");
+    assert_eq!(reassigned["subtask"]["summary"], "Assignee update");
+    assert_eq!(reassigned["subtask"]["release_reason"], release["summary"]);
+    let prior = dispatch_tool(conn, "agent_bridge_mission_subtask_update", &release).unwrap();
+    assert_eq!(prior["replayed"], true);
+    assert_eq!(prior["subtask"], released["subtask"]);
+    let current = dispatch_tool(conn, "agent_bridge_mission_subtask_list",
+        &json!({"actor_context_handle": h1, "mission_id": mid, "subtask_id": stuck_id})).unwrap();
+    assert_eq!(current["subtasks"][0], reassigned["subtask"]);
+    let resumed = dispatch_tool(conn, "agent_bridge_mission_subtask_update", &json!({
+        "actor_context_handle": h1, "mission_id": mid, "subtask_id": stuck_id,
+        "if_revision": rev_of(&reassigned["subtask"]), "status": "in_progress",
+        "idempotency_key": "k-recover-resume"
+    })).unwrap();
+    let completed = dispatch_tool(conn, "agent_bridge_mission_subtask_update", &json!({
+        "actor_context_handle": h1, "mission_id": mid, "subtask_id": stuck_id,
+        "if_revision": rev_of(&resumed["subtask"]), "status": "completed",
+        "summary": "Completed after handoff", "idempotency_key": "k-recover-complete"
+    })).unwrap();
+    assert_eq!(completed["subtask"]["summary"], "Completed after handoff");
+    assert_eq!(completed["subtask"]["release_reason"], release["summary"]);
+
     // Transfer ownership to h2, then h2 completes
     let obs_tr = dispatch_tool(
         conn,
@@ -238,6 +383,10 @@ fn missions_all_16_tools_concurrency_idempotency_and_ownership_regressions() {
     )
     .expect("transfer");
     rev = rev_of(&tr);
+
+    // The former owner is now only the assignee and cannot replay the release.
+    assert_eq!(dispatch_tool(conn, "agent_bridge_mission_subtask_update", &release)
+        .unwrap_err().code, "SECURITY_DENIED");
 
     let comp = dispatch_tool(
         conn,

@@ -346,6 +346,60 @@ fn backend_access(server:&mut agent_bridge_oauth_server::OAuthServer,state:&std:
     tokens["access_token"].as_str().unwrap().to_owned()
 }
 
+#[tokio::test]
+async fn request_audit_public_listener_refuses_diagnostics_with_valid_mcp_bearer() {
+    use std::io::Read;
+
+    let _serial = BACKEND_TEST_OWNER.lock().unwrap_or_else(|p| p.into_inner());
+    let fixture = Fixture::new();
+    let mut running = start_backend(fixture.config()).await.unwrap();
+    let token = backend_access(&mut running.owner.as_ref().unwrap()._oauth.lock().unwrap(),
+        &fixture.root.join("oauth-workstation"));
+    let operator = running.operator();
+    let port = fixture.port;
+    let host = ORIGIN.strip_prefix("https://").unwrap();
+    let send = |method: &str, path: &str, body: &str| {
+        let request = format!(
+            "{method} {path} HTTP/1.1\r\nHost: {host}\r\nAuthorization: Bearer {token}\r\n\
+            Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        tokio::task::spawn_blocking(move || {
+            let timeout = Duration::from_secs(3);
+            let mut stream = TcpStream::connect_timeout(&(Ipv4Addr::LOCALHOST, port).into(), timeout).unwrap();
+            stream.set_read_timeout(Some(timeout)).unwrap();
+            stream.set_write_timeout(Some(timeout)).unwrap();
+            stream.write_all(request.as_bytes()).unwrap();
+            let mut response = String::new();
+            stream.read_to_string(&mut response).unwrap();
+            response
+        })
+    };
+
+    let ping = send("POST", "/mcp", r#"{"jsonrpc":"2.0","id":1,"method":"ping"}"#).await.unwrap();
+    let before = operator.get(OperatorRead::Diagnostics).await.unwrap();
+    let public = send("GET", "/api/diagnostics", "").await.unwrap();
+    let after = operator.get(OperatorRead::Diagnostics).await.unwrap();
+    assert!(running.shutdown().await.unwrap().clean);
+
+    assert!(ping.starts_with("HTTP/1.1 200 "));
+    let (_, ping_body) = ping.split_once("\r\n\r\n").unwrap();
+    let ping_body: serde_json::Value = serde_json::from_str(ping_body).unwrap();
+    assert_eq!(ping_body["result"], serde_json::json!({}));
+    assert_eq!(before.status, 200);
+    let audit = &before.body["mcp_request_audit"];
+    assert_eq!(audit["records"].as_array().unwrap().len(), 1);
+    assert_eq!(audit["records"][0]["method"], "ping");
+    assert_eq!(audit["records"][0]["provider"], "gemini");
+
+    assert!(public.starts_with("HTTP/1.1 404 "));
+    let (_, body) = public.split_once("\r\n\r\n").unwrap();
+    assert_eq!(serde_json::from_str::<serde_json::Value>(body).unwrap(),
+        serde_json::json!({"error":"not_found"}));
+    assert_eq!(after.status, 200);
+    assert_eq!(after.body["mcp_request_audit"], *audit);
+}
+
 #[tokio::test(flavor="multi_thread",worker_threads=2)]
 async fn capability_fix_stop_refuses_post_body_completed_after_stop() {
     use std::io::Read;

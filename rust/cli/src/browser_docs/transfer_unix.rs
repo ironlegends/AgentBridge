@@ -11,7 +11,6 @@ fn unavailable() -> io::Error {
     io::Error::new(io::ErrorKind::Unsupported, "UNIX_PROJECT_BROWSER_TRANSFERS_UNAVAILABLE")
 }
 pub(super) struct ProjectInputPin {
-    pub(super) relative: String,
     pub(super) basename: String,
     pub(super) size: u64,
     pub(super) sha256: String,
@@ -19,7 +18,7 @@ pub(super) struct ProjectInputPin {
 impl ProjectInputPin {
     pub(super) fn verify(&mut self) -> io::Result<PathBuf> { Err(unavailable()) }
 }
-pub(super) struct ProjectOutputPin { pub(super) relative: String }
+pub(super) struct ProjectOutputPin;
 impl ProjectOutputPin {
     pub(super) fn write_new(&self, _filename: &str, _bytes: &[u8]) -> io::Result<(String, u64, String)> {
         Err(unavailable())

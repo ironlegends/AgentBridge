@@ -6,6 +6,8 @@ license = "Apache-2.0"
 description = "Local IPv4 loopback MCP HTTP transport for agent-bridge"
 
 [dependencies]
+base64 = "0.22.1"
+agent-bridge-gateway = { path = "../gateway" }
 axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }
 http-body-util = "0.1"
 serde = { version = "1.0", features = ["derive"] }

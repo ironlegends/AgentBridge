@@ -1,5 +1,10 @@
 # v2.0.0 Release
 
+This historical record describes the 2.0.0 release and its qualification
+results. The current development manifests are at `2.1.0-alpha.1`. The
+default Rust suites now have zero ignored tests. See the
+[contributor test guide](../CONTRIBUTING.md#build--test) for opt-in tests.
+
 ## Status
 
 The Rust CLI and native desktop manifests are aligned at **2.0.0**, the first stable release for **Windows x64**. The release comprises the portable desktop ZIP (application, pinned browser and native resource bundles, notices and `release-manifest.json`), the canonical source ZIP, the MPL-2.0 source companion and a detached ECDSA P-256 signature over their SHA-256 checksums. The release key is a non-exportable local CNG key; its public half is `licenses/agent-bridge-release-public.pem`. The executables are not Authenticode-signed. No prebuilt CLI binary is published; build the CLI from source. Linux and macOS remain experimental. Exact artifact hashes are published with the GitHub release rather than in this file, because the source archive cannot contain its own checksum.
@@ -102,6 +107,11 @@ Chrome installations with unsafe writable ancestors are refused. Required native
 
 The `build_script` hash in `WINAPP-BUILD-PROVENANCE.json` was computed over a CRLF checkout of the script, so it does not match the LF bytes in the source ZIP. It is informational; the pinned WinApp output hashes are the enforced values.
 
+Since 2.0.0, the source archive has been changed to preserve the pinned CRLF
+bytes. The current provenance test checks both the SHA-256 and byte length of
+the build script and other pinned inputs. See
+[archive privacy and provenance](PUBLIC-RELEASE-SCOPE.md#archive-privacy-and-provenance).
+
 The main Rust workspace does not test the independent desktop Cargo workspace; run both suites.
 
 ## Reproduce the gates
@@ -119,5 +129,10 @@ python3 scripts/rust/source-release.py --repo . --out-dir <new-existing-output-d
 On Windows, run the desktop tests from a shell whose `PSModulePath` is not inherited from PowerShell 7; the DPAPI fixtures call Windows PowerShell 5.1. Use a separate release target directory so a running executable remains untouched.
 
 `scripts/rust/package-desktop.py` builds the desktop ZIP offline in a new isolated target directory from a clean checkout. It takes the browser and native bundles with their manifest SHA-256 values, a new existing output directory and one `--ack-review` per reviewed notice item, and refuses before writing an archive if a staged file contains a private path. See [release notices and package decisions](RELEASE-NOTICES.md). Pass `--release-channel stable` only for a build that will be signed and published. The packager always sets `AGENT_BRIDGE_RELEASE_CHANNEL` for the compiler, so `agent_bridge_status` reports `"channel":"stable","production":true` only for that build. Other packaged builds report `development`, and so does a plain `cargo build` unless its environment sets that variable to exactly `stable`.
+
+On the current tree, pass `--build-dir <new-target-directory>` to the desktop
+packager. Packaged builds, and any desktop build with
+`AGENT_BRIDGE_RELEASE_CHANNEL` set, refuse `TAURI_CONFIG`. The private-path scan also
+covers compressed and embedded archive members and the Tauri frontend sources.
 
 Run `scripts/windows/sign-release.ps1 -Mode Sign` with the desktop, source and MPL companion ZIPs as the explicit archive list. It writes `SHA256SUMS` and the detached CNG signature `SHA256SUMS.sig`. Verify the signature, then compare the listed hashes with the released downloads.

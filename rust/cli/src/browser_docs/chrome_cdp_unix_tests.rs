@@ -7,7 +7,7 @@ use std::sync::mpsc;
 const FIXTURE: &str = "browser_docs::chrome::cdp::unixpipe::tests::pipe_child_fixture";
 
 fn fixture_args() -> Vec<OsString> {
-    ["--exact", FIXTURE, "--ignored", "--nocapture"]
+    ["--exact", FIXTURE, "--nocapture"]
         .into_iter().map(OsString::from).collect()
 }
 
@@ -232,10 +232,10 @@ fn lost_child_ownership_refuses_every_group_signal() {
     assert!(!child.terminated && !child.finished);
 }
 
+/// Subprocess fixture for the private pipe tests; an ordinary run returns.
 #[test]
-#[ignore = "subprocess fixture; invoked only by the private pipe tests"]
 fn pipe_child_fixture() {
-    let mode = std::env::var("AGENT_BRIDGE_CDP_PIPE_FIXTURE").unwrap();
+    let Ok(mode) = std::env::var("AGENT_BRIDGE_CDP_PIPE_FIXTURE") else { return };
     if mode == "collision" {
         // Preserve the controller's descriptors above the remap targets.
         let controller_in = duplicate_source(3).unwrap();

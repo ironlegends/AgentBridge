@@ -127,7 +127,7 @@ mod tests {
     const MARKER: &[u8] = b"owned stderr from exact fixture\n";
 
     fn fixture(mode: &str, mappings: &[(RawFd, RawFd)]) -> ChildProcess {
-        let arguments = ["--exact", FIXTURE, "--ignored", "--nocapture"]
+        let arguments = ["--exact", FIXTURE, "--nocapture"]
             .into_iter().map(OsString::from).collect::<Vec<_>>();
         spawn_requested(&std::env::current_exe().unwrap(), &std::env::temp_dir(),
             &arguments, &[("AGENT_BRIDGE_STDERR_FIXTURE".into(), mode.into())], mappings, true).unwrap()
@@ -170,12 +170,13 @@ mod tests {
         assert_eq!(captured(&mut child), MARKER);
     }
 
+    /// Child fixture for the private diagnostic pipe tests; an ordinary run returns.
     #[test]
-    #[ignore = "child fixture invoked by the private diagnostic pipe tests"]
     fn stderr_child_fixture() {
         use std::os::fd::FromRawFd;
+        let Ok(mode) = std::env::var("AGENT_BRIDGE_STDERR_FIXTURE") else { return };
         std::io::stderr().write_all(MARKER).unwrap();
-        match std::env::var("AGENT_BRIDGE_STDERR_FIXTURE").unwrap().as_str() {
+        match mode.as_str() {
             "cdp" => {
                 let mut input = unsafe { File::from_raw_fd(3) };
                 let mut output = unsafe { File::from_raw_fd(4) };

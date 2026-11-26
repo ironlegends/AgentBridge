@@ -104,9 +104,9 @@ impl Runner {
         let mut args: Vec<OsString> = arguments.into_iter().map(Into::into).collect();
         let separator=args.iter().position(|argument|argument=="--").unwrap_or(args.len());
         args.insert(separator,"--json".into());
-        let spec = ChildSpec { executable: self.resources.winapp.clone(), arguments: args,
-            cwd: self.resources.winapp.parent().ok_or("UI_RESOURCE_PARENT_MISSING")?.to_path_buf(),
-            env_overrides: BTreeMap::from([("WINAPP_CLI_TELEMETRY_OPTOUT".into(), Some("1".into())), ("NO_COLOR".into(), Some("1".into()))]) };
+        let spec = ChildSpec::new(self.resources.winapp.clone(), args,
+            self.resources.winapp.parent().ok_or("UI_RESOURCE_PARENT_MISSING")?.to_path_buf(),
+            BTreeMap::from([("WINAPP_CLI_TELEMETRY_OPTOUT".into(), Some("1".into())), ("NO_COLOR".into(), Some("1".into()))]));
         #[cfg(windows)] {
             let mut command_units=crate::owned_children::quote_argument(spec.executable.as_os_str())?.len()+1;
             for argument in &spec.arguments {command_units=command_units.checked_add(crate::owned_children::quote_argument(argument)?.len()+1).ok_or("UI_WINDOWS_COMMAND_LINE_LIMIT")?;}
@@ -202,8 +202,9 @@ mod tests {
         assert_eq!(code(json!({"error":{"code":"internal_error","message":"Passive window capture is unavailable; focus was not changed."}})),"UI_PASSIVE_CAPTURE_UNAVAILABLE");
         assert_eq!(code(json!({"error":{"code":"internal_error","message":"must-not-leak"}})),"UI_BACKEND_INTERNAL_ERROR");
     }
+    /// Requires existing independently pinned diagnostic native bundle; no screenshot is launched.
+    #[cfg(all(windows, feature = "qualification"))]
     #[test]
-    #[ignore="requires existing independently pinned diagnostic native bundle; no screenshot is launched"]
     fn unqualified_native_bundle_refuses_capture_before_child_or_file_creation(){
         let bundle=PathBuf::from(std::env::var_os("AGENT_BRIDGE_NATIVE_TEST_BUNDLE").expect("explicit diagnostic bundle"));
         let seal=std::env::var("AGENT_BRIDGE_NATIVE_TEST_MANIFEST_SHA256").expect("explicit seal");

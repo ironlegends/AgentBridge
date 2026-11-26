@@ -180,14 +180,17 @@ impl AnonymousFile {
 
 pub(super) fn anonymous_file(directory: &Dir) -> Result<AnonymousFile> {
     let name = format!("art_{}.tmp", Uuid::new_v4().simple());
-    let mut options = private_file_options();
-    #[cfg(windows)] {
+    let options = private_file_options();
+    #[cfg(windows)]
+    let options = {
         use cap_std::fs::OpenOptionsExt;
         use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_DELETE_ON_CLOSE;
+        let mut options = options;
         // GENERIC_READ | GENERIC_WRITE | DELETE. Exclusive ownership prevents
         // another process from retaining a handle past this artifact's lifetime.
         options.access_mode(0xc001_0000).share_mode(0).custom_flags(FILE_FLAG_DELETE_ON_CLOSE);
-    }
+        options
+    };
     let file = directory.open_with(&name, &options)?;
     #[cfg(not(any(unix, windows)))] {
         drop(file);

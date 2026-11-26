@@ -36,3 +36,7 @@ windows-sys = { version = "0.61", features = [
 # product, no attach to existing processes and no debug privilege requested.
 [target.'cfg(windows)'.dev-dependencies]
 windows-sys = { version = "0.61", features = ["Win32_System_Diagnostics_Debug"] }
+
+[features]
+# Compiles the tests that need an approved local Low-IL specimen.
+low-il-specimen = []

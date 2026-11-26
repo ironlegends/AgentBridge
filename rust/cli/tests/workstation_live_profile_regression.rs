@@ -562,7 +562,7 @@ fn run_native_shell(mcp: &mut AuthenticatedMcp, project: &Path, label: &str) {
 fn start_owned_fixture(mcp: &mut AuthenticatedMcp, heartbeat: &Path) -> String {
     let started = mcp.call_json("desktop_start_process", json!({
         "program":std::env::current_exe().unwrap(),
-        "args":["--ignored", "--exact", "owned_process_fixture", "--nocapture"],
+        "args":["--exact", "owned_process_fixture", "--nocapture", "--test-threads=1"],
         "timeout_ms":1000
     }));
     let sid = started["session_id"].as_str().unwrap().to_owned();
@@ -606,11 +606,14 @@ fn assert_heartbeat_stopped(path: &Path) {
         "owned child continued running after the profile change returned");
 }
 
-// This ignored test is launched only as the literal child of the MCP fixture.
-// Its only effects are stdout and a bounded heartbeat file in that fixture's sandbox.
+// This test acts only as the literal child of the MCP fixture, which passes
+// `--test-threads=1`; an ordinary run returns at once. Its only effects are
+// stdout and a bounded heartbeat file in that fixture's sandbox.
 #[test]
-#[ignore]
 fn owned_process_fixture() {
+    if !std::env::args().any(|arg| arg == "--test-threads=1") {
+        return;
+    }
     println!("live-owned-ready");
     std::io::stdout().flush().unwrap();
     for line in std::io::stdin().lock().lines() {

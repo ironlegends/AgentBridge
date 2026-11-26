@@ -26,7 +26,7 @@ pub(crate) fn unified_router(
         Some(&database),database_path,Some(settings),
         DesktopSurface {web_read_only:false,task_rooms:true,settings_tools:true,terminal_tool:false,processes:false},
         &mut catalogue,&mut handlers,supervisors,Some(extension_authority),Some(&profile))?;
-    replace_extension_view(settings,&mut catalogue,&mut handlers)?;
+    replace_extension_view(settings,&mut catalogue,&mut handlers,&profile)?;
     handlers=guard_common(handlers,&catalogue,profile.clone());
 
     let specs=files.tool_catalog();
@@ -79,10 +79,13 @@ pub(crate) fn unified_router(
     profile.register_revoker(DesktopProfile::FullControl,windows_owner.revoker())?;
     providers.push(windows_owner);
 
-    let uploads=Arc::clone(&files); let downloads=Arc::clone(&files);
+    #[cfg(windows)]
+    let (uploads, downloads)=(Arc::clone(&files), Arc::clone(&files));
     let callbacks=crate::browser_owned::BrowserTransferCallbacks {
+        #[cfg(windows)]
         stage_uploads:Arc::new(move |active,paths,session|uploads.stage_uploads(active,paths,session)
             .map_err(|error|io::Error::other(error.message).into())),
+        #[cfg(windows)]
         publish_download:Arc::new(move |active,path,name|downloads.publish_download(active,path,name)
             .map_err(|error|io::Error::other(error.message).into())),
     };
@@ -126,17 +129,19 @@ pub(crate) fn unified_router(
         Some("Report the exact selected tool capability, family counts, live profile and component qualification.".into()),
         json!({"type":"object","properties":{},"additionalProperties":false})));
     Ok(WorkstationRuntime {
-        router:McpGateway::new(GatewayConfig::new("agent-bridge-workstation",env!("CARGO_PKG_VERSION")),
+        router:McpGateway::new(GatewayConfig::new("agent-bridge-workstation",env!("CARGO_PKG_VERSION"))
+            .with_catalog_ttl_ms(CATALOG_TTL_MS),
             catalogue,handlers),
         database:Some(database),
     })
 }
 
 fn replace_extension_view(
-    settings:&Path,catalogue:&mut Vec<ToolDefinition>,handlers:&mut ToolMapHandler,
+    settings:&Path,catalogue:&mut Vec<ToolDefinition>,handlers:&mut ToolMapHandler,profile:&ProfileControl,
 )->Result<(),RuntimeError> {
     let mut replacement=Vec::new(); let mut new_handlers=ToolMapHandler::new();
-    crate::extensions::attach_unified(settings,&mut replacement,&mut new_handlers)?;
+    crate::extensions::attach_unified(settings,&mut replacement,&mut new_handlers,
+        crate::extensions::ExtensionScope::live(profile)?)?;
     // The effectful call retains the exact-authority/same-Registry handler
     // already attached above. Do not silently preserve it if its schema grows.
     let before=catalogue.iter().find(|tool|tool.name=="desktop_mcp_tool_call")

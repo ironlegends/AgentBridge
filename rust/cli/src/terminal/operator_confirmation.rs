@@ -5,7 +5,6 @@
 
 use agent_bridge_commands::PendingApprovalView;
 
-#[cfg(windows)]
 pub(super) fn confirm(view: &PendingApprovalView) -> Result<bool, &'static str> {
 
     // Use the universally available USER32 Yes/No dialog. Requiring the
@@ -54,9 +53,4 @@ pub(super) fn confirm(view: &PendingApprovalView) -> Result<bool, &'static str> 
         return Err("PROCESS_APPROVAL_UNAVAILABLE: native operator dialog failed");
     }
     Ok(response==ID_YES)
-}
-
-#[cfg(not(windows))]
-pub(super) fn confirm(_view:&PendingApprovalView)->Result<bool,&'static str> {
-    Err("PROCESS_APPROVAL_UNAVAILABLE: local confirmation requires Windows")
 }

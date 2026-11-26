@@ -2,6 +2,7 @@
 mod client;
 pub(crate) use client::NativeWindow;
 use client::NativeClient;
+#[cfg(windows)]
 use crate::owned_children::OwnedChild;
 use crate::provider_owner::ProviderOwner;
 use crate::runtime::RuntimeError;
@@ -14,7 +15,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+#[cfg(windows)]
+use std::time::Instant;
 
 #[derive(Clone, Debug)]
 pub(crate) struct AgentDesktopConfig {
@@ -63,6 +66,7 @@ pub(crate) fn validate_bundle(config: &AgentDesktopConfig) -> Result<(), Runtime
     Resources::verify(&config.bundle_root, &config.manifest_sha256).map(|_| ())
 }
 impl AgentDesktopHandle {
+    #[cfg(test)]
     pub(crate) fn disabled() -> Self { Self { runtime: None } }
     fn runtime(&self) -> Result<&Arc<DesktopRuntime>, RuntimeError> {
         self.runtime.as_ref().ok_or_else(|| "AGENT_DESKTOP_UNAVAILABLE".into())
@@ -84,6 +88,7 @@ impl AgentDesktopHandle {
         }
         Ok(())
     }
+    #[cfg(windows)]
     pub(crate) fn place_owned_tree(&self, lease: &DesktopLease, child: &OwnedChild, timeout: Duration) -> Result<(), RuntimeError> {
         let runtime = self.runtime()?;
         let deadline = Instant::now() + timeout.min(Duration::from_secs(15));
@@ -121,11 +126,13 @@ impl AgentDesktopHandle {
 
     // These are local operator operations, never registered as MCP tools. They
     // return candidate GUIDs; changing the selected pool requires a new seal.
+    #[cfg(all(test, windows, feature = "qualification"))]
     pub(crate) fn local_pool_candidates(&self) -> Result<Vec<DesktopBinding>, RuntimeError> {
         let runtime = self.runtime()?; let profile = runtime.profile.read().map_err(|_| "PROFILE_STATE_UNAVAILABLE")?;
         if rank(*profile) < rank(DesktopProfile::FullControl) { return Err("PROFILE_FULL_CONTROL_REQUIRED".into()); }
         Ok(runtime.actual_desktops()?.into_iter().filter(|item| item.desktop_number != 1).collect())
     }
+    #[cfg(all(test, windows, feature = "qualification"))]
     pub(crate) fn local_create_desktop(&self) -> Result<DesktopBinding, RuntimeError> {
         let runtime = self.runtime()?; let profile = runtime.profile.read().map_err(|_| "PROFILE_STATE_UNAVAILABLE")?;
         if rank(*profile) < rank(DesktopProfile::FullControl) { return Err("PROFILE_FULL_CONTROL_REQUIRED".into()); }
@@ -133,6 +140,7 @@ impl AgentDesktopHandle {
         let result = runtime.client.call("create_desktop", json!({}), Duration::from_secs(3))?;
         let binding: DesktopBinding = serde_json::from_value(result)?; bindings_valid(std::slice::from_ref(&binding))?; Ok(binding)
     }
+    #[cfg(all(test, windows, feature = "qualification"))]
     pub(crate) fn local_remove_desktop(&self, binding: &DesktopBinding) -> Result<(), RuntimeError> {
         bindings_valid(std::slice::from_ref(binding))?;
         let runtime = self.runtime()?; let profile = runtime.profile.read().map_err(|_| "PROFILE_STATE_UNAVAILABLE")?;

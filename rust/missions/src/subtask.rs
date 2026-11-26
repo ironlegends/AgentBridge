@@ -23,6 +23,8 @@ pub struct MissionSubtask {
     pub status: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub summary: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub release_reason: Option<String>,
     pub revision: i64,
     pub created_revision: i64,
     pub mission_revision: i64,
@@ -156,7 +158,7 @@ pub fn create_subtask(
         let subtask = MissionSubtask {
             subtask_id: new_id("sub"), mission_id: request.mission_id.clone(),
             goal: request.goal.clone(), assignee_context_id: request.assignee_context_id.clone(),
-            status: "pending".into(), summary: None, revision: 1,
+            status: "pending".into(), summary: None, release_reason: None, revision: 1,
             created_revision: next.revision, mission_revision: next.revision,
             created_at: next.updated_at.clone(), updated_at: next.updated_at,
         };
@@ -229,11 +231,23 @@ pub fn update_subtask(
             "SELECT 1 FROM agent_contexts WHERE context_id=?1 AND handle_hash=?2",
             params![current.assignee_context_id.as_deref(), actor], |r| r.get(0),
         ).optional()?;
-        if is_assignee.is_none() {
-            return Err(denied("Only the assigned context can update this subtask."));
+        // On the existing blocked transition, an owner can release another
+        // context's assignment. An assignee's own update retains its assignment.
+        let owner_release = is_assignee.is_none();
+        if owner_release {
+            if request.status != "blocked" {
+                return Err(denied("Only the assigned context can update this subtask."));
+            }
+            membership(tx, &request.mission_id, &actor, true)?;
         }
         let digest = digest_json(&OperationDigest { method, actor: &actor, request: &request })?;
         if let Some(prior) = replay::<MissionSubtask>(tx, &request.idempotency_key, &digest)? {
+            // A release clears the assignment in its receipt; a regular update retains it.
+            if prior.assignee_context_id.is_none() {
+                membership(tx, &request.mission_id, &actor, true)?;
+            } else if owner_release {
+                return Err(denied("Only the assigned context can update this subtask."));
+            }
             return Ok(SubtaskMutation { subtask: prior, replayed: true });
         }
         if current.revision != request.if_revision {
@@ -249,9 +263,16 @@ pub fn update_subtask(
         }
         let mission = open_mission(tx, &request.mission_id)?;
         let next = touch(tx, &mission, mission.revision)?;
+        let (summary, release_reason) = if owner_release {
+            (current.summary, request.summary)
+        } else {
+            (request.summary.or(current.summary), current.release_reason)
+        };
         let updated = MissionSubtask {
+            assignee_context_id: if owner_release { None } else { current.assignee_context_id },
             status: request.status.clone(),
-            summary: request.summary.clone().or_else(|| current.summary.clone()),
+            summary,
+            release_reason,
             revision: current.revision.checked_add(1)
                 .ok_or_else(|| invalid("Subtask revision overflow."))?,
             mission_revision: next.revision,

@@ -19,6 +19,8 @@
 //! status), without event replay, content logging, tool implementations, or
 //! non-loopback network binding.
 
+pub mod modern;
+
 use axum::body::Body;
 use axum::extract::State;
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
@@ -532,6 +534,15 @@ async fn handle_mcp_post(
         .into_response();
     }
 
+    // Modern requests are checked before dispatch; legacy ones are unchanged.
+    let modern_request = match modern::preflight(&headers, &body_text) {
+        modern::Preflight::Legacy => false,
+        modern::Preflight::Modern => true,
+        modern::Preflight::Reject(status, body) => {
+            return build_response(status, Some(CONTENT_TYPE_JSON_UTF8), None, Body::from(body));
+        }
+    };
+
     let dispatch = Arc::clone(&state.dispatch);
     let dispatch_result = tokio::task::spawn_blocking(move || {
         let _guard = in_flight_guard;
@@ -551,8 +562,13 @@ async fn handle_mcp_post(
                 )
                 .into_response();
             }
+            let status = if modern_request {
+                modern::response_status(&response_json)
+            } else {
+                StatusCode::OK
+            };
             build_response(
-                StatusCode::OK,
+                status,
                 Some(CONTENT_TYPE_JSON_UTF8),
                 None,
                 Body::from(response_json),

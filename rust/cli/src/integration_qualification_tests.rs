@@ -105,9 +105,14 @@ fn attach(bench: &Bench) -> Attached {
 
 /// Shuts every owner down and proves no provider retained the Core database.
 fn shutdown(attached: Attached, db: &Path) {
+    shutdown_after(attached, db, drop);
+}
+
+fn shutdown_after(attached: Attached, db: &Path, verify: impl FnOnce(Router)) {
     let Attached {runtime,mut supervisors,mut providers,profile,manifest}=attached;
     let database_owner=Arc::downgrade(runtime.database.as_ref().expect("real Core owner"));
-    drop(runtime);
+    verify(runtime.router);
+    drop(runtime.database);
     for supervisor in supervisors.iter_mut().rev() {supervisor.shutdown().unwrap();}
     for owner in providers.iter_mut().rev() {owner.shutdown().unwrap();}
     drop(supervisors); drop(providers); drop(profile); drop(manifest);
@@ -128,18 +133,29 @@ fn listed_digest(attached: &Attached) -> String {
         expected.difference(&names).collect::<Vec<_>>(),names.difference(&expected).collect::<Vec<_>>());
     assert_eq!(tools.len(),46);
     assert_eq!(names,expected);
+    // A 2026-07-28 client sees the same 46 schemas, in name order.
+    let meta=json!({"io.modelcontextprotocol/protocolVersion":"2026-07-28",
+        "io.modelcontextprotocol/clientCapabilities":{}});
+    let modern:Value=serde_json::from_str(&attached.runtime.router.handle_str(&json!({"jsonrpc":"2.0","id":2,
+        "method":"tools/list","params":{"_meta":meta}}).to_string()).unwrap()).unwrap();
+    assert_eq!(modern["result"]["resultType"],"complete");
+    assert_eq!(modern["result"]["ttlMs"],crate::runtime::CATALOG_TTL_MS);
+    assert_eq!(modern["result"]["cacheScope"],"private");
+    let mut ordered=tools.clone();
+    ordered.sort_by(|a,b|a["name"].as_str().cmp(&b["name"].as_str()));
+    assert_eq!(modern["result"]["tools"].as_array().unwrap(),&ordered);
     let catalogue:Vec<_>=attached.runtime.router.published_tools().into_iter().cloned().collect();
-    catalogue_digest(&catalogue).unwrap()
+    let digest = catalogue_digest(&catalogue).unwrap();
+    assert_eq!(digest, "7603bc547b696a3c45e4cd3f5b0b98bbf0f51c9cad66bc31f5a75ae5259c349c");
+    digest
 }
 
 #[test]
-#[ignore = "requires the explicitly pinned Windows native and headless browser resource bundles"]
 fn integration_real_catalogue_46_providers_and_lifecycle() {
     qualify_catalogue(false);
 }
 
 #[test]
-#[ignore = "requires the explicitly pinned Windows native and headless browser resource bundles"]
 fn integration_real_catalogue_46_os_user_scope_and_downgrade() {
     qualify_catalogue(true);
 }
@@ -201,19 +217,28 @@ fn qualify_catalogue(os_user: bool) {
             assert_eq!(status["desktop_profile"],"read-only");
             assert_eq!(status["process_tools_enabled"],false);
         }
-        shutdown(attached,&bench.db);
+        if pass == 1 && !os_user {
+            let manifest = attached.manifest.clone();
+            shutdown_after(attached, &bench.db, |router| {
+                tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap()
+                    .block_on(crate::gemini::assert_audited_unified_status(
+                        &bench.fixture.root.join("oauth"), &bench.settings, &bench.extension_authority,
+                        manifest, router, &digest,
+                    ));
+            });
+        } else {
+            shutdown(attached,&bench.db);
+        }
     }
     eprintln!("catalogue_sha256={digest}; real provider attachment, MCP list, exact seal, isolated status/read and downgrade verified");
 }
 
 #[test]
-#[ignore = "requires pinned native and browser bundles, the pinned WPF fixture, the reviewed Microsoft Learn descriptor and network access"]
 fn integration_every_46_tool_has_an_observed_real_effect_workspace_scope() {
     exercise_every_tool(false);
 }
 
 #[test]
-#[ignore = "requires pinned native and browser bundles, the pinned WPF fixture, the reviewed Microsoft Learn descriptor and network access"]
 fn integration_every_46_tool_has_an_observed_real_effect_os_user_scope() {
     exercise_every_tool(true);
 }
@@ -295,9 +320,9 @@ fn descriptor_hash(descriptor: &Value) -> String {
 
 fn exercise_every_tool(os_user: bool) {
     let descriptor_path=PathBuf::from(std::env::var_os("AGENT_BRIDGE_EXTENSION_TEST_DESCRIPTOR")
-        .expect("reviewed public Microsoft Learn microsoft_docs_search descriptor"));
+        .expect("reviewed public MCP documentation search_model_context_protocol descriptor"));
     let descriptor:Value=serde_json::from_slice(&std::fs::read(&descriptor_path).unwrap()).unwrap();
-    assert_eq!(descriptor["name"],"microsoft_docs_search");
+    assert_eq!(descriptor["name"],"search_model_context_protocol");
     let git=PathBuf::from("C:/Program Files/Git/cmd/git.exe");
     let git_pin=agent_bridge_commands::EnvironmentVerifier::verify_executable(
         &agent_bridge_commands::FsEnvironmentVerifier,&git).expect("pinned Git for Windows");
@@ -308,9 +333,9 @@ fn exercise_every_tool(os_user: bool) {
             "---\nname: catalogue-skill\ndescription: qualification\nversion: 0.1.0\n---\n# Catalogue skill body\n").unwrap();
         std::fs::write(settings.join("commands.json"),json!({"version":1,"programs":{
             "git-version":{"executable":git,"sha256":git_pin.sha256,"preapproved":true}}}).to_string()).unwrap();
-        std::fs::write(settings.join("extensions.json"),json!({"version":1,"servers":{"microsoft_learn":{
-            "endpoint":"https://learn.microsoft.com/api/mcp",
-            "tools":{"microsoft_docs_search":{"descriptor_sha256":descriptor_hash(&descriptor),
+        std::fs::write(settings.join("extensions.json"),json!({"version":1,"servers":{"mcp_docs":{
+            "endpoint":"https://modelcontextprotocol.io/mcp",
+            "tools":{"search_model_context_protocol":{"descriptor_sha256":descriptor_hash(&descriptor),
                 "descriptor":descriptor,"parameters":{"query":{"type":"search_terms"}}}}}}}).to_string()).unwrap();
     });
     let workspace=bench.workspace.clone();
@@ -504,16 +529,16 @@ version: 0.2.0
     run.refused("desktop_task_manage",json!({"action":"list","context_handle":handle}));
 
     // Extensions: cached inspection, a queued local proposal, and one real
-    // public Microsoft Learn search through the pinned descriptor.
-    assert!(run.ok("desktop_mcp_manage",json!({"action":"list"})).to_string().contains("microsoft_learn"));
-    run.ok("desktop_mcp_manage",json!({"action":"inspect","name":"microsoft_learn"}));
-    run.ok("desktop_mcp_manage",json!({"action":"refresh","name":"microsoft_learn"}));
-    assert!(run.ok("desktop_mcp_tool_search",json!({"query":"docs"})).to_string().contains("microsoft_learn:microsoft_docs_search"));
-    assert_eq!(run.ok("desktop_mcp_tool_inspect",json!({"name":"microsoft_learn:microsoft_docs_search"}))["name"],
-        "microsoft_learn:microsoft_docs_search");
-    let searched=run.ok("desktop_mcp_tool_call",json!({"name":"microsoft_learn:microsoft_docs_search",
-        "arguments":{"query":"Windows virtual desktops"}}));
-    assert!(searched.to_string().contains("learn.microsoft.com"),"{searched}");
+    // public MCP documentation search through the pinned descriptor.
+    assert!(run.ok("desktop_mcp_manage",json!({"action":"list"})).to_string().contains("mcp_docs"));
+    run.ok("desktop_mcp_manage",json!({"action":"inspect","name":"mcp_docs"}));
+    run.ok("desktop_mcp_manage",json!({"action":"refresh","name":"mcp_docs"}));
+    assert!(run.ok("desktop_mcp_tool_search",json!({"query":"docs"})).to_string().contains("mcp_docs:search_model_context_protocol"));
+    assert_eq!(run.ok("desktop_mcp_tool_inspect",json!({"name":"mcp_docs:search_model_context_protocol"}))["name"],
+        "mcp_docs:search_model_context_protocol");
+    let searched=run.ok("desktop_mcp_tool_call",json!({"name":"mcp_docs:search_model_context_protocol",
+        "arguments":{"query":"server discover caching"}}));
+    assert!(searched.to_string().contains("modelcontextprotocol.io"),"{searched}");
 
     // Owned headless browser on a loopback page.
     let page=Page::start();

@@ -119,6 +119,7 @@ mod wire_tests {
         fn snapshot(&mut self, _: SnapshotOptions) -> io::Result<NativeSnapshot> {
             Ok(self.capture.take().unwrap())
         }
+        #[cfg(any(target_os="linux",target_os="macos"))]
         fn confirm(&mut self, _: &DedicatedWindow) -> io::Result<()> { unreachable!() }
         fn action(&mut self, _: &Action) -> io::Result<Value> { unreachable!() }
     }
@@ -165,7 +166,10 @@ mod wire_tests {
             let mut session = Session { selection, approved_identity: "selected".into(), ticket: None,
                 observation: None, backend: Box::new(CapturedFixture { width, height, capture: Some(capture) }) };
             let snapshot = session.render(window_id, SnapshotOptions {
-                tree: true, screenshot: true, interactive: true, maximum: 200,
+                tree: true, screenshot: true,
+                #[cfg(target_os="macos")]
+                interactive: true,
+                maximum: 200,
             }).unwrap();
             let result = serde_json::to_value(tool_result(Ok(snapshot))).unwrap();
             let reply = JsonRpcResponse::success(JsonRpcId::String(window_id.into()), result);

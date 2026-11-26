@@ -1,29 +1,84 @@
 mod admin;
+pub(crate) mod stdio_child;
 pub(crate) use admin::UiOAuthOwner;
 
-use agent_bridge_extensions::Registry;
+use agent_bridge_desktop::DesktopProfile;
+use agent_bridge_extensions::{Registry, SessionPool, ToolScope};
 use agent_bridge_gateway::{ToolCallResult, ToolDefinition, ToolMapHandler};
 use serde_json::{json, Value};
 use std::path::Path;
+use std::sync::{Arc, RwLock};
 use crate::runtime::RuntimeError;
+use crate::session_profile::ProfileControl;
+
+/// The profile that decides which granted extension tools a route may call.
+/// It is read at each call, so a profile change applies to the next one.
+/// The route's tool calls share its pool of idle sessions.
+#[derive(Clone)]
+pub(crate) struct ExtensionScope {
+    profile: Option<Arc<RwLock<DesktopProfile>>>,
+    pool: Arc<SessionPool>,
+}
+
+impl ExtensionScope {
+    /// A route without a profile: named data operations only.
+    pub(crate) fn data_only() -> Self { Self { profile: None, pool: SessionPool::new() } }
+    pub(crate) fn fixed(profile: DesktopProfile) -> Self {
+        Self { profile: Some(Arc::new(RwLock::new(profile))), pool: SessionPool::new() }
+    }
+    /// A live profile. Any lowering closes the idle sessions, like the
+    /// other processes the bridge owns; routes gate calls at different ranks.
+    pub(crate) fn live(profile: &ProfileControl) -> Result<Self, RuntimeError> {
+        let pool = SessionPool::new();
+        for minimum in [DesktopProfile::WorkspaceWrite, DesktopProfile::FullControl, DesktopProfile::FullyUnlocked] {
+            let idle = Arc::downgrade(&pool);
+            profile.register_revoker(minimum, Arc::new(move || {
+                if let Some(pool) = idle.upgrade() { pool.close_all(); }
+                Ok(())
+            }))?;
+        }
+        Ok(Self { profile: Some(profile.shared()), pool })
+    }
+    pub(crate) fn current(&self) -> ToolScope {
+        // An unreadable profile is treated as read-only.
+        match self.profile.as_ref().and_then(|profile| profile.read().ok().map(|active| *active)) {
+            Some(profile) if profile != DesktopProfile::ReadOnly => ToolScope::AnyGranted,
+            _ => ToolScope::DataOperations,
+        }
+    }
+    /// The registry of one call, reusing this route's idle sessions.
+    pub(crate) fn sessions(&self, registry: Registry) -> Registry { registry.with_session_pool(self.pool.clone()) }
+    /// Closes the idle sessions, for example when the configuration is lost.
+    pub(crate) fn close_sessions(&self) { self.pool.close_all(); }
+}
 
 pub fn read(settings: &Path) -> Result<Registry, RuntimeError> {
     let bytes = agent_bridge_lifecycle::read_operator_setting(settings, "extensions.json")?;
     // The private journal supplies server tombstones and generation-bound
     // additions. A matching local tool grant marker is stripped by admin
     // before the strict Registry parser verifies each individual approval.
-    Ok(admin::apply_local(settings, &bytes)?)
+    // Stdio servers start only through the contained launcher, and only after
+    // the extensions crate re-verifies the executable pin for each session.
+    Ok(admin::apply_local(settings, &bytes)?.with_stdio_launcher(Arc::new(stdio_child::ContainedLauncher)))
 }
 
 /// Explicitly selected, *read-only* local CLI catalog probe. Unlike a Web
 /// administration proposal this does not change the private journal. The
-/// only supported destination is public Microsoft Learn; no OAuth or new
-/// tool approval is conferred by discovery.
+/// supported destinations are the public documentation servers
+/// (`mcp_docs`, `microsoft_learn`) and enabled, operator-approved local stdio
+/// servers; no OAuth or new tool approval is conferred by discovery.
 pub fn refresh_check(settings: &Path, server: &str) -> Result<(), RuntimeError> {
-    if server != "microsoft_learn" {
-        return Err("Only the exact Microsoft Learn staging server supports this read-only probe".into());
-    }
-    let report = read(settings)?.refresh_microsoft_learn(server)?;
+    let report = if agent_bridge_extensions::public_docs_server(server) {
+        read(settings)?.refresh_public_docs(server)?
+    } else {
+        let registry = read(settings)?;
+        let enabled = registry.servers(Some(server)).ok()
+            .and_then(|view| view["server"]["enabled"].as_bool()) == Some(true);
+        if registry.server_stdio(server).is_none() || !enabled {
+            return Err("Only the exact public documentation servers or an enabled local stdio server support this read-only probe".into());
+        }
+        registry.refresh_stdio(server)?
+    };
     println!("{}", serde_json::to_string_pretty(&report)?);
     Ok(())
 }
@@ -35,6 +90,22 @@ pub fn local(settings: &Path, action: &str, id: Option<&str>) -> Result<(), Runt
     if answer.get("decision").and_then(Value::as_str) == Some("unsupported") {
         return Err("Extension operation explicitly refused: not implemented by the local adapter".into());
     }
+    Ok(())
+}
+
+/// `extensions approve` with several request ids of one import.
+pub fn approve_batch(settings: &Path, ids: &[&str]) -> Result<(), RuntimeError> {
+    let answer = admin::approve_batch(settings, ids)?;
+    println!("{}", serde_json::to_string_pretty(&answer)?);
+    Ok(())
+}
+
+/// `extensions import` with `--inherit-path <server>` options.
+pub fn import(settings: &Path, mcp_json: &Path, inherit_path: &std::collections::BTreeSet<String>)
+    -> Result<(), RuntimeError>
+{
+    let answer = admin::import(settings, mcp_json, inherit_path)?;
+    println!("{}", serde_json::to_string_pretty(&answer)?);
     Ok(())
 }
 
@@ -53,20 +124,20 @@ pub(crate) fn decide_from_operator_ui(
     Ok(admin::decide_from_operator_ui(owner, settings, id, approve)?)
 }
 
-pub fn attach(settings: &Path, catalog: &mut Vec<ToolDefinition>, handlers: &mut ToolMapHandler)
-    -> Result<(), RuntimeError>
+pub(crate) fn attach(settings: &Path, catalog: &mut Vec<ToolDefinition>, handlers: &mut ToolMapHandler,
+    scope: ExtensionScope) -> Result<(), RuntimeError>
 {
-    attach_inner(settings, catalog, handlers, false)
+    attach_inner(settings, catalog, handlers, false, scope)
 }
 
-pub(crate) fn attach_unified(settings: &Path, catalog: &mut Vec<ToolDefinition>, handlers: &mut ToolMapHandler)
-    -> Result<(), RuntimeError>
+pub(crate) fn attach_unified(settings: &Path, catalog: &mut Vec<ToolDefinition>, handlers: &mut ToolMapHandler,
+    scope: ExtensionScope) -> Result<(), RuntimeError>
 {
-    attach_inner(settings, catalog, handlers, true)
+    attach_inner(settings, catalog, handlers, true, scope)
 }
 
-fn attach_inner(settings: &Path, catalog: &mut Vec<ToolDefinition>, handlers: &mut ToolMapHandler, unified: bool)
-    -> Result<(), RuntimeError>
+fn attach_inner(settings: &Path, catalog: &mut Vec<ToolDefinition>, handlers: &mut ToolMapHandler, unified: bool,
+    scope: ExtensionScope) -> Result<(), RuntimeError>
 {
     // Read now to report configuration errors to the operator; read again
     // for each call so local revocation applies to the next admission.
@@ -160,6 +231,8 @@ fn attach_inner(settings: &Path, catalog: &mut Vec<ToolDefinition>, handlers: &m
             Err(_) => ToolCallResult::tool_error("Local extension configuration unavailable"),
         })
     });
+    // Tool calls reuse an idle session of the same exact server. The pool
+    // lives with the route scope; dropping it closes every idle child.
     handlers.register("desktop_mcp_tool_call", move |args| {
         let Some(name) = args.get("name").and_then(Value::as_str) else {
             return Ok(ToolCallResult::tool_error("An approved tool name is required"));
@@ -174,9 +247,11 @@ fn attach_inner(settings: &Path, catalog: &mut Vec<ToolDefinition>, handlers: &m
             return Ok(ToolCallResult::tool_error("Unexpected extension input"));
         }
         let Ok(registry) = read(&settings) else {
+            scope.close_sessions();
             return Ok(ToolCallResult::tool_error("Local extension configuration unavailable"));
         };
-        Ok(match registry.call(name, arguments) {
+        let registry = scope.sessions(registry);
+        Ok(match registry.call(name, arguments, scope.current()) {
             Ok(value) => {
                 // Third-party content is data. It cannot register tools or
                 // trigger another action, and resources are never auto-read.

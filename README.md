@@ -88,6 +88,10 @@ Some desktop automation features are experimental. Restricted Low-IL processes a
 - [MCP Tools](docs/TOOLS.md)
 - [Permissions and Security](docs/WORKSTATION-MODES.md)
 - [Architecture](docs/ARCHITECTURE.md)
+- [Unix Platform Parity](docs/UNIX-PARITY.md)
+- [MCP Modernization](docs/MCP-MODERNIZATION.md)
+- [Public Release Scope](docs/PUBLIC-RELEASE-SCOPE.md)
+- [Release Notices](docs/RELEASE-NOTICES.md)
 - [Security Policy](SECURITY.md)
 - [Contributing](CONTRIBUTING.md)
 

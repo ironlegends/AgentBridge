@@ -3,7 +3,7 @@ mod workspace_qualification;
 #[path = "runtime_unified.rs"]
 mod unified;
 pub(crate) use unified::unified_router;
-#[cfg(all(test, windows))]
+#[cfg(all(test, windows, feature = "qualification"))]
 #[path = "integration_qualification_tests.rs"]
 mod integration_qualification_tests;
 
@@ -206,7 +206,8 @@ pub fn project_read_router(
         return Err("Required read-only DesktopFiles tools are unavailable".into());
     }
     Ok(McpGateway::new(
-        GatewayConfig::new("agent-bridge-project-read", env!("CARGO_PKG_VERSION")),
+        GatewayConfig::new("agent-bridge-project-read", env!("CARGO_PKG_VERSION"))
+            .with_catalog_ttl_ms(CATALOG_TTL_MS),
         catalog, handlers,
     ))
 }
@@ -437,7 +438,11 @@ fn attach_desktop_surface(
 
     if selection.settings_tools {
         let directory=settings.ok_or("Private settings directory not selected")?;
-        crate::extensions::attach(directory,catalog,handlers)?;
+        let scope=match live_profile {
+            Some(profile)=>crate::extensions::ExtensionScope::live(profile)?,
+            None=>crate::extensions::ExtensionScope::fixed(work.profile),
+        };
+        crate::extensions::attach(directory,catalog,handlers,scope.clone())?;
         if let Some(expected)=extension_authority {
             // This overrides the only effectful extension dispatch with a
             // grant-bound one. It reads ONE effective Registry, compares
@@ -459,12 +464,16 @@ fn attach_desktop_surface(
                     _=>return Ok(ToolCallResult::tool_error("Extension arguments must be an object")),
                 };
                 let Ok(registry)=crate::extensions::read(&local_settings) else {
+                    scope.close_sessions();
                     return Ok(ToolCallResult::tool_error("EXTENSION_AUTHORITY_UNAVAILABLE"));
                 };
                 if !registry_matches_authority(&registry,&bound).unwrap_or(false) {
+                    scope.close_sessions();
                     return Ok(ToolCallResult::tool_error("EXTENSION_AUTHORITY_CHANGED: new local OAuth authorization required"));
                 }
-                Ok(match registry.call(name,params) {
+                // The same registry instance, with this route's idle sessions.
+                let registry=scope.sessions(registry);
+                Ok(match registry.call(name,params,scope.current()) {
                     Ok(value)=>{
                         let mut output=ToolCallResult::text(value.to_string());
                         output.is_error=value.get("isError").and_then(Value::as_bool).unwrap_or(false);
@@ -662,10 +671,16 @@ pub(crate) fn workstation_router(
     )?;
     Ok(WorkstationRuntime {
         router: McpGateway::new(GatewayConfig::new("agent-bridge-workstation",
-            env!("CARGO_PKG_VERSION")),catalog,handlers),
+            env!("CARGO_PKG_VERSION")).with_catalog_ttl_ms(CATALOG_TTL_MS),catalog,handlers),
         database,
     })
 }
+
+/// Freshness hint for discovery and catalog listings. A router's catalog is
+/// fixed until the process restarts, and a sealed grant is refused when its
+/// catalogue digest changes, so a stale cached listing can never authorize a
+/// call. Five minutes bounds how long a client may show a retired tool.
+pub(crate) const CATALOG_TTL_MS: u64 = 300_000;
 
 const WORKSTATION_READ_TOOLS: &[&str] = &[
     "desktop_get_file_info", "desktop_list_directory", "desktop_read_file", "desktop_search",
@@ -827,7 +842,8 @@ fn open_qualified(
     } else if let Some(settings) = settings {
         // Preserve the existing mission-only stdio + explicitly selected
         // operator settings behavior; never enabled on the Web mission route.
-        crate::extensions::attach(settings,&mut catalog,&mut handlers)?;
+        crate::extensions::attach(settings,&mut catalog,&mut handlers,
+            crate::extensions::ExtensionScope::data_only())?;
     }
     if let Some(approval) = window_approval {
         // No HTTP/Web route accepts this unforgeable, locally granted value.
@@ -859,7 +875,7 @@ fn open_qualified(
             "channel": channel, "production": production
         }).to_string()))
     });
-    Ok(McpGateway::new(GatewayConfig::new("agent-bridge", version), catalog, handlers))
+    Ok(McpGateway::new(GatewayConfig::new("agent-bridge", version).with_catalog_ttl_ms(CATALOG_TTL_MS), catalog, handlers))
 }
 
 pub fn serve_stdio(
@@ -957,8 +973,11 @@ pub fn serve_stdio(
         #[cfg(any(windows, unix))] native_chrome_approval,
         &mut supervisors,
     )?;
+    // The first discovery or initialize fixes the protocol era of this
+    // process; a frame from the other era is refused instead of downgraded.
+    let mut era = agent_bridge_gateway::modern::StdioEra::default();
     let served = agent_bridge_gateway::stdio::serve(
-        io::stdin().lock(), io::stdout().lock(), |frame| gateway.handle_str(frame)
+        io::stdin().lock(), io::stdout().lock(), |frame| era.dispatch(&gateway, frame)
     );
     // stdio EOF or an I/O error must not allow any owned child or watchdog to
     // survive the stream. Join even when the client was idle at disconnect.

@@ -101,7 +101,6 @@ pub(super) struct ProjectInputPin {
     _folder: PinnedProjectDirectory,
     file: File,
     path: PathBuf,
-    pub(super) relative: String,
     pub(super) basename: String,
     pub(super) size: u64,
     pub(super) sha256: String,
@@ -132,7 +131,7 @@ impl ProjectInputPin {
         let basename=path.file_name().and_then(|v|v.to_str())
             .ok_or_else(refuse)?.to_owned();
         Ok(Self{
-            _folder:folder,file,path,relative:relative.into(),basename,
+            _folder:folder,file,path,basename,
             size,sha256:sha(&buffer),volume:identity.volume,
             file_index:((identity.index_hi as u64)<<32)|identity.index_lo as u64
         })

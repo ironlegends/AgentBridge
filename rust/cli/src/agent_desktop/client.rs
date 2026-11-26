@@ -160,12 +160,12 @@ impl NativeClient {
     pub(crate) fn new(resources: Arc<Resources>, state_root: &Path) -> Result<Arc<Self>, RuntimeError> {
         let (root, mut pins) = bundle::private_directory(state_root)?;
         let (extract, extract_pins) = bundle::private_directory(&root.join("native-extract"))?; pins.extend(extract_pins);
-        let spec = ChildSpec { executable: resources.native.clone(), arguments: vec![], cwd: resources.root.clone(),
-            env_overrides: BTreeMap::from([
+        let spec = ChildSpec::new(resources.native.clone(), vec![], resources.root.clone(),
+            BTreeMap::from([
                 ("DOTNET_BUNDLE_EXTRACT_BASE_DIR".into(), Some(extract.into_os_string())),
                 ("DOTNET_CLI_TELEMETRY_OPTOUT".into(), Some("1".into())),
                 ("DOTNET_NOLOGO".into(), Some("1".into())),
-            ]) };
+            ]));
         Ok(Arc::new(Self { _resources: resources, spec, _state_pins: pins, state: Mutex::new(State::new()), serial: Mutex::new(()),
             final_stop: AtomicBool::new(false), epoch: AtomicU64::new(1), thread: Mutex::new(None),
             diagnostic_path:root.join("native-diagnostics.jsonl"),diagnostics:Mutex::new(()) }))

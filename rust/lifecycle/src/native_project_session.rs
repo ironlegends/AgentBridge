@@ -55,11 +55,11 @@ impl PreparedProjectCommand {
         // locally authorized command. No Job, pipe or child is created.
         require_project_launch_qualification()?;
         self.start_impl(
-            #[cfg(test)]
+            #[cfg(all(test, feature = "low-il-specimen"))]
             false,
         )
     }
-    fn start_impl(self, #[cfg(test)] observe_loader:bool) -> Result<RestrictedProjectProcess> {
+    fn start_impl(self, #[cfg(all(test, feature = "low-il-specimen"))] observe_loader:bool) -> Result<RestrictedProjectProcess> {
         let mut prepared=self.inner;
         if prepared.project_run.is_none() {
             return Err(refused("Only the confirmed project program may create a live session"));
@@ -110,7 +110,7 @@ impl PreparedProjectCommand {
         // Only the exact local specimen test can request launch-time debug
         // events. The same primary token, Job, pipes, image pins, environment
         // and physical boundaries remain mandatory. No debug attach.
-        #[cfg(test)]
+        #[cfg(all(test, feature = "low-il-specimen"))]
         let flags=flags|if observe_loader {windows_sys::Win32::System::Threading::DEBUG_ONLY_THIS_PROCESS}else{0};
         // SAFETY: a verified Low-IL restricted primary token and atomic Job
         // plus inherited-handle list are supplied to CreateProcessAsUserW.
@@ -156,7 +156,7 @@ impl PreparedProjectCommand {
         if unsafe{ResumeThread(child.thread.raw())}==u32::MAX {
             return Err(uncertain("Cannot resume restricted project primary thread"));
         }
-        #[cfg(test)]
+        #[cfg(all(test, feature = "low-il-specimen"))]
         if observe_loader {loader_diagnostic::observe(&child,info.dwProcessId,until)?;}
         Ok(RestrictedProjectProcess{
             _prepared:prepared,child,
@@ -263,7 +263,7 @@ fn unqualified_project_launch_has_a_deterministic_pre_start_refusal() {
 // Test-only passive observation of Windows launch-time debug events. No
 // remote memory access, debugger attachment, exception injection, token
 // changes, privilege enabling, loader snaps, registry or system changes.
-#[cfg(test)]
+#[cfg(all(test, feature = "low-il-specimen"))]
 mod loader_diagnostic {
     use super::*;
     use windows_sys::Win32::{
@@ -390,8 +390,8 @@ mod loader_diagnostic {
         drop(pins);
         Ok(())
     }
+    /// Requires exact existing approved Low-IL echo specimen; test-only launch-time event observation.
     #[test]
-    #[ignore="requires exact existing approved Low-IL echo specimen; test-only launch-time event observation"]
     fn exact_approved_low_il_loader_events(){
         let exe=PathBuf::from(std::env::var_os("AB_LOW_IL_SPECIMEN").expect("explicit approved specimen"));
         let root=exe.parent().unwrap();

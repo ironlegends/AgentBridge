@@ -2,7 +2,7 @@
 
 [package]
 name = "agent-bridge-desktop-app"
-version = "2.0.0"
+version = "2.1.0-alpha.1"
 edition = "2021"
 license = "Apache-2.0"
 description = "Native Tauri v2 desktop control panel for Agent Bridge"

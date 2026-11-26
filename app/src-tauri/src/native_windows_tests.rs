@@ -69,6 +69,8 @@ fn config(root: &Directory) -> TunnelConfig {
         .join("System32/WindowsPowerShell/v1.0/powershell.exe");
     let encrypted = Command::new(powershell).args(["-NoProfile", "-NonInteractive", "-Command",
         "$s=ConvertTo-SecureString -String 'fixture-tunnel-key-only' -AsPlainText -Force; ConvertFrom-SecureString $s"])
+        // A PowerShell 7 parent's module path breaks Windows PowerShell 5.1.
+        .env_remove("PSModulePath")
         .creation_flags(CREATE_NO_WINDOW.0).stdin(Stdio::null()).output().unwrap();
     assert!(encrypted.status.success(), "fixture DPAPI creation failed");
     private_log(&config.dpapi_key_path).unwrap().write_all(&encrypted.stdout).unwrap();
@@ -112,7 +114,7 @@ fn silent_owned_job_drains_descendants_and_preserves_foreign_process_and_diagnos
     let config = config(&root);
     let foreign_dir = Directory::new();
     let mut foreign = Witness(Command::new(std::env::current_exe().unwrap())
-        .args(["--exact", "native_windows::tests::owned_leaf_fixture", "--ignored", "--nocapture"])
+        .args(["--exact", "native_windows::tests::owned_leaf_fixture", "--nocapture"])
         .env("AB_NATIVE_FIXTURE_ROOT", &foreign_dir.0).creation_flags(CREATE_NO_WINDOW.0)
         .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap());
     await_file(&foreign_dir.0.join("leaf.json"));
@@ -122,7 +124,7 @@ fn silent_owned_job_drains_descendants_and_preserves_foreign_process_and_diagnos
         let err = private_log(&run.0.join("stderr.log")).unwrap();
         let args: &[&OsStr] = &[
             OsStr::new("--exact"), OsStr::new("native_windows::tests::owned_child_fixture"),
-            OsStr::new("--ignored"), OsStr::new("--nocapture"),
+            OsStr::new("--nocapture"),
         ];
         let mut environment = fixture_environment(&config, &run.0);
         let mut child = OwnedProcess::spawn(&std::env::current_exe().unwrap(), args,
@@ -184,12 +186,28 @@ fn tunnel_retry_rechecks_image_and_stop_cancels_the_pending_generation() {
     assert!(!tunnel.tick());
 }
 
+/// The root of an owned process fixture, only when its parent selected it
+/// by exact name with a non-empty root. An ordinary run returns at once.
+fn selected_fixture_root(name: &str) -> Option<std::path::PathBuf> {
+    let root = std::env::var_os("AB_NATIVE_FIXTURE_ROOT").filter(|root| !root.is_empty())?;
+    let args: Vec<String> = std::env::args().collect();
+    (args.iter().any(|arg| arg == "--exact") && args.iter().any(|arg| arg == name))
+        .then(|| std::path::PathBuf::from(root))
+}
+
+/// A fixture outlives its test only as long as a parent can need it.
+fn hold_fixture() {
+    for _ in 0..300 { std::thread::sleep(Duration::from_secs(1)); }
+}
+
 #[test]
-#[ignore = "owned process fixture"]
 fn owned_child_fixture() {
-    let root = std::path::PathBuf::from(std::env::var_os("AB_NATIVE_FIXTURE_ROOT").unwrap());
+    let Some(root) = selected_fixture_root("native_windows::tests::owned_child_fixture") else { return };
+    let trusted = std::env::var("MCP_OAUTH_TRUSTED_ORIGINS").unwrap();
+    let forward = std::env::var("HARPOON_OAUTH_FORWARD_ORIGINS").unwrap();
+    let plaintext = std::env::var("HARPOON_ALLOW_PLAINTEXT_HTTP").unwrap();
     let child = Command::new(std::env::current_exe().unwrap())
-        .args(["--exact", "native_windows::tests::owned_leaf_fixture", "--ignored", "--nocapture"])
+        .args(["--exact", "native_windows::tests::owned_leaf_fixture", "--nocapture"])
         .creation_flags(CREATE_NO_WINDOW.0).stdin(Stdio::null())
         .stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap();
     println!("fixture stdout");
@@ -202,20 +220,17 @@ fn owned_child_fixture() {
         "keyInEnvironment": std::env::var("AGENT_BRIDGE_TUNNEL_API_KEY").ok().as_deref() == Some(KEY),
         "keyInArguments": std::env::args().any(|arg| arg.contains(KEY)),
         "inheritedPath": std::env::var_os("PATH").is_some(),
-        "trusted": std::env::var("MCP_OAUTH_TRUSTED_ORIGINS").unwrap(),
-        "forward": std::env::var("HARPOON_OAUTH_FORWARD_ORIGINS").unwrap(),
-        "plaintext": std::env::var("HARPOON_ALLOW_PLAINTEXT_HTTP").unwrap(),
+        "trusted": trusted, "forward": forward, "plaintext": plaintext,
     }).to_string()).unwrap();
-    loop { std::thread::sleep(Duration::from_secs(1)); }
+    hold_fixture();
 }
 #[test]
-#[ignore = "owned process fixture"]
 fn owned_leaf_fixture() {
-    let root = std::path::PathBuf::from(std::env::var_os("AB_NATIVE_FIXTURE_ROOT").unwrap());
+    let Some(root) = selected_fixture_root("native_windows::tests::owned_leaf_fixture") else { return };
     std::fs::write(root.join("leaf.json"), serde_json::json!({
         "pid": std::process::id(), "console": !unsafe { GetConsoleWindow() }.0.is_null(),
     }).to_string()).unwrap();
-    loop { std::thread::sleep(Duration::from_secs(1)); }
+    hold_fixture();
 }
 
 #[test]

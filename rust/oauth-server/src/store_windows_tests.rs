@@ -48,7 +48,7 @@ struct OwnerChild(Child);
 impl OwnerChild {
     fn start(root: &Fixture) -> Self {
         let mut child = Self(Command::new(std::env::current_exe().unwrap())
-            .args(["--ignored", "--exact", "store::windows_tests::owner_child", "--nocapture"])
+            .args(["--exact", "store::windows_tests::owner_child", "--nocapture"])
             .env(CHILD_ROOT, &root.0)
             .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::inherit())
             .spawn().unwrap());
@@ -77,10 +77,11 @@ impl Drop for OwnerChild {
     }
 }
 
+/// Child of the owner-lifetime test; it returns at once in an ordinary run.
 #[test]
-#[ignore = "subprocess entry point; invoked by the owner-lifetime test"]
 fn owner_child() {
-    let root = PathBuf::from(std::env::var_os(CHILD_ROOT).expect("fixture root"));
+    let Some(root) = std::env::var_os(CHILD_ROOT) else { return };
+    let root = PathBuf::from(root);
     assert!(root.file_name().unwrap().to_string_lossy().starts_with("oauth-gate-lifetime-"));
     let policy = Policy::new("https://oauth-gate.example.invalid", Audience::Workstation).unwrap();
     let (store, data) = Store::open(&root, &policy, 1_800_000_000_000).unwrap();

@@ -53,6 +53,18 @@ fn gateway_initialize_tools_dispatch_errors_and_notifications_regressions() {
     assert!(ok_init.error.is_none());
     assert_eq!(ok_init.result.unwrap()["protocolVersion"], "2025-03-26");
 
+    // By default the newest legacy revision, sent by current SDK clients, is
+    // served as is, and an unknown version negotiates down to it.
+    let initialize = |version: &str| json!({
+        "jsonrpc": "2.0", "id": 3, "method": "initialize",
+        "params": {"protocolVersion": version, "capabilities": {}, "clientInfo": {"name": "c", "version": "1"}}
+    });
+    let defaults = McpGateway::new(GatewayConfig::new("test-gw", "1.0.0"), Vec::new(), ToolMapHandler::new());
+    let newest = defaults.handle_value(initialize("2025-11-25")).unwrap();
+    assert_eq!(newest.result.unwrap()["protocolVersion"], "2025-11-25");
+    let lenient = defaults.handle_value(initialize("1999-01-01")).unwrap();
+    assert_eq!(lenient.result.unwrap()["protocolVersion"], "2025-11-25");
+
     // Notification returns None (no JSON-RPC reply)
     assert!(gw
         .handle_value(json!({"jsonrpc": "2.0", "method": "notifications/initialized"}))

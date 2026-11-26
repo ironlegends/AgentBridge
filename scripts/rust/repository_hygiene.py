@@ -6,12 +6,18 @@ import json
 import re
 import subprocess
 import sys
+import tomllib
 from pathlib import Path, PurePosixPath
 
 ALLOWANCES = "scripts/rust/legacy-reference-allowlist.json"
 LEGACY = re.compile("desk" + ".?" + "mcp", re.I)
 SECRET = re.compile("gh" + "p_|gh" + "o_|github" + "_pat_|sk-[A-Za-z0-9]{16,}|AIza[0-9A-Za-z_-]{20,}|BEGIN (RSA|EC|OPENSSH|PRIVATE) KEY")
 FORBIDDEN = {".pdb", ".exe", ".dll", ".lib", ".obj", ".sqlite"}
+# The product version lives in these two manifests and nowhere else: the
+# MCP status, build metadata and archive names read it from Cargo.
+PRODUCT_MANIFESTS = ("rust/cli/Cargo.toml", "app/src-tauri/Cargo.toml")
+TAURI_CONFIG = "app/src-tauri/tauri.conf.json"
+SEMVER = re.compile(r"(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(-(alpha|beta|rc)\.[1-9]\d*)?")
 
 
 def scan_files(root: Path, paths: list[str], allowances: dict) -> list[str]:
@@ -50,6 +56,18 @@ def scan_files(root: Path, paths: list[str], allowances: dict) -> list[str]:
     return errors
 
 
+def product_version_errors(root: Path) -> list[str]:
+    versions = {path: tomllib.loads((root / path).read_text(encoding="utf-8"))["package"]["version"]
+                for path in PRODUCT_MANIFESTS}
+    errors = [f"{path}: product version {version} is not X.Y.Z or X.Y.Z-alpha|beta|rc.N"
+              for path, version in versions.items() if not SEMVER.fullmatch(version)]
+    if len(set(versions.values())) != 1:
+        errors.append("product versions differ: " + ", ".join(f"{p}={v}" for p, v in versions.items()))
+    if "version" in json.loads((root / TAURI_CONFIG).read_text(encoding="utf-8")):
+        errors.append(f"{TAURI_CONFIG}: remove version; Tauri reads it from the app Cargo.toml")
+    return errors
+
+
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repo", type=Path, default=Path(__file__).resolve().parents[2])
@@ -57,7 +75,7 @@ def main(argv: list[str]) -> int:
     paths = subprocess.check_output(["git", "-C", str(args.repo), "ls-files", "-z"]).decode("utf-8").split("\0")
     paths = [path for path in paths if path]
     allowances = json.loads((args.repo / ALLOWANCES).read_text(encoding="utf-8"))
-    errors = scan_files(args.repo, paths, allowances)
+    errors = scan_files(args.repo, paths, allowances) + product_version_errors(args.repo)
     if errors:
         print("\n".join(errors), file=sys.stderr)
         return 1

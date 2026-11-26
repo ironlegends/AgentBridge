@@ -10,4 +10,12 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
 hex = "0.4"
-reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+# TLS stays ring with the bundled webpki roots, as with reqwest 0.12; the
+# operating system certificate store is not trusted.
+reqwest = { version = "0.13.2", default-features = false, features = ["blocking", "json", "rustls-no-provider"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+webpki-roots = "1"
+# Official MCP SDK, pinned. The 2026-07-28 client over Streamable HTTP, and
+# over stdio through `transport-async-rw` only: the CLI owns the child process.
+rmcp = { version = "=3.11.0", default-features = false, features = ["client", "transport-streamable-http-client-reqwest", "reqwest-tls-no-provider", "transport-async-rw"] }
+tokio = { version = "1", features = ["rt", "time"] }

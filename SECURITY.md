@@ -7,7 +7,8 @@ Security fixes are applied to the latest commit on `main` and the most recent ta
 | Version | Platform | Supported |
 | --- | --- | --- |
 | 2.0.x | Windows 10/11 x64 (portable desktop ZIP; headless CLI built from source, no prebuilt CLI binary) | Yes |
-| 2.0.x | Linux, macOS | Experimental; reports are welcome, no release binaries |
+| 2.1.0-alpha.1 (`main`, source) | Windows 10/11 x64 | Yes, on the latest commit |
+| 2.0.x and current `main` | Linux, macOS | Experimental; reports are welcome, no release binaries |
 | < 2.0 | Any | No |
 
 ## Security Model & Scope
@@ -16,7 +17,7 @@ Agent Bridge is designed as a **fail-closed** local MCP gateway connecting untru
 
 The following invariants are treated as security boundaries; any bypass is considered a security vulnerability:
 
-1. **Local-only capability escalation:** An MCP client must never widen its own workspace root, desktop profile (`read-only` -> `workspace-write` -> `full-control`), pinned command catalog, browser origin allowlist, or target window selection.
+1. **Local-only capability escalation:** An MCP client must never widen its own workspace root, desktop profile (`read-only`, `workspace-write`, `full-control`, `fully-unlocked`), pinned command catalog, browser origin allowlist, or target window selection.
 2. **Workspace confinement:** File operations must stay strictly within the operator-selected workspace root and reject path traversal (`..`), absolute paths, symlinks, NTFS junctions/reparse points, and hard links.
    - **Explicit operator opt-in, unified catalogue:** the owner may select a wider file scope (`allowed-roots` or `os-user`) only in the operator-private `unified-v1.json` manifest. An MCP client can never select or widen that scope. `os-user` scope applies only while the active mode is Fully Unlocked; lower modes revert to the workspace policy. File tools still refuse protected authority roots and private state, and still require fresh write observations and filesystem identity checks. Changing the scope changes the authority seal and requires a new OAuth authorization; existing grants are not transplanted.
 3. **Single-use observations:** Mutating file, browser, and desktop UI actions must consume a fresh single-use observation token and re-verify target identity before acting.
@@ -28,6 +29,7 @@ The following invariants are treated as security boundaries; any bypass is consi
    - **Explicit operator opt-in, Fully Unlocked:** direct shell or program sessions exist only when the operator starts the workstation with both `--profile fully-unlocked` and `--enable-processes`. They run with the current user's existing OS permissions, without elevation or a different token. An MCP client can never enable them, and lowering the active mode revokes every owned session before the lower mode is confirmed.
 6. **Documentary-only Agent Skills:** Bundled scripts inside skill packages must never be auto-executed.
 7. **Isolated browser & desktop scope:** Native Chrome sessions must never access personal Chrome profiles, expose a TCP CDP port, or allow arbitrary agent-supplied JavaScript; desktop UI actions must never inject global foreground mouse/keyboard input.
+8. **Contained outbound stdio extensions:** Local approval pins the native executable by SHA-256. The child receives an exact environment from the OS safe set, fixed path, and approved variable references. A per-server `inherit_path` opt-in appends the bridge's `PATH`. Import drops literal environment values and rejects arguments that match its secret checks. Extension calls require individual tool grants and the active runtime's profile floor. Downgrades close idle sessions, and subsequent calls close sessions whose registry entry no longer matches or whose configuration or OAuth authority fails the handler's checks.
 
 ## Reporting a Vulnerability
 

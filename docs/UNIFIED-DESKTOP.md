@@ -122,7 +122,7 @@ Use a recorded, reversible handoff. The source worktree used to build the applic
 3. Stop the old workstation through its authenticated operator action. Verify that its exact process has exited and both old listener ports have closed.
 4. Stop the project tunnel through its verified local owner, then close the old attached panel. Disable the old project startup tasks after preserving their definitions.
 5. With previous owners absent, install the new configuration and one current-user, non-elevated login task pointing to the desktop executable with `--config` and `--background`. Use the same executable and configuration in the foreground shortcut.
-6. Start once. Confirm that the desktop executable owns MCP18856 and that no operator listener remains on18890. Verify the native interface, second launch, hide, Stop/Start and Restart behavior.
+6. Start once. Confirm that the desktop executable owns MCP port 18856 and that no operator listener remains on port 18890. Verify the native interface, second launch, hide, Stop/Start and Restart behavior.
 7. Exercise actual ChatGPT and Gemini native tools, including an independently checked UTF-8 file. Compare logical database contents and confirm that existing OAuth grants still work.
 8. Perform the next real Windows reboot deliberately and verify the single startup task after login. Local lifecycle tests do not substitute for this last observation.
 

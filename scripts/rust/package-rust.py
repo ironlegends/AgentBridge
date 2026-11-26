@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import gzip
 import hashlib
+import io
 import json
 import os
 import re
@@ -23,6 +24,7 @@ import sys
 import tarfile
 import tempfile
 import zipfile
+import zlib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -368,6 +370,170 @@ def remap_source_root(flags: list[str], path: Path, target: str, name: str) -> N
     original = path.resolve()
     for spelling in sorted({str(original), original.as_posix()}):
         flags.append(f"--remap-path-prefix={spelling}={virtual_source_root(target, name)}")
+
+
+# Compressed members are opened within these bounds. Anything deeper,
+# larger or unreadable is refused rather than published unscanned.
+PRIVATE_SCAN_DEPTH = 3
+PRIVATE_SCAN_MAX_BYTES = 2 * 1024 * 1024 * 1024
+
+
+def short_path(path: Path) -> Path | None:
+    # 8.3 names (for example C:/Users/LONGUS~1 in TEMP) are another spelling
+    # of the same directory. Only Windows can report them.
+    if os.name != "nt":
+        return None
+    import ctypes
+    size = ctypes.windll.kernel32.GetShortPathNameW(str(path), None, 0)
+    if size == 0:
+        return None
+    buffer = ctypes.create_unicode_buffer(size)
+    if ctypes.windll.kernel32.GetShortPathNameW(str(path), buffer, size) == 0:
+        return None
+    return Path(buffer.value)
+
+
+def path_spellings(path: Path) -> set[str]:
+    spellings = {str(path), path.as_posix(), str(path).replace("\\", "\\\\")}
+    if path.drive[1:] == ":":
+        spellings.add("/" + path.drive[0] + path.as_posix()[2:])
+    return spellings
+
+
+def private_path_needles(roots: list[Path]) -> set[bytes]:
+    # Scanned bytes are lowered with ASCII rules only, so each needle is
+    # lowered the same way, in its original, lower and upper Unicode case.
+    needles = set()
+    for root in roots:
+        forms = {root.absolute(), root.resolve()}
+        forms.update(filter(None, [short_path(form) for form in list(forms)]))
+        for form in forms:
+            for spelling in path_spellings(form):
+                text = spelling.rstrip("\\/")
+                if len(text) < 4:
+                    raise ValueError("private build root is too short to scan reliably")
+                for variant in {text, text.lower(), text.upper()}:
+                    for encoding in ("utf-8", "utf-16-le"):
+                        needles.add(variant.encode(encoding).lower())
+                    # JSON (a source map, a manifest) can keep non-ASCII as \\u escapes.
+                    needles.add(json.dumps(variant)[1:-1].encode("ascii").lower())
+    return needles
+
+
+def zip_member_bytes(data: bytes, info: zipfile.ZipInfo, budget: list[int]) -> bytes:
+    # The member is decoded here, not by zipfile, so the output is bounded and
+    # the whole compressed stream must match its declared size and CRC.
+    if info.flag_bits & 1:
+        raise ValueError("encrypted compressed content cannot be scanned for private paths")
+    if info.compress_type not in (zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED):
+        raise ValueError("unsupported compression method cannot be scanned for private paths")
+    budget[0] -= info.file_size
+    if budget[0] < 0:
+        raise ValueError("compressed content too large to scan for private paths")
+    offset = info.header_offset
+    local = data[offset:offset + 30]
+    if (len(local) != 30 or local[:4] != b"PK\x03\x04"
+            or int.from_bytes(local[6:8], "little") != info.flag_bits
+            or int.from_bytes(local[8:10], "little") != info.compress_type):
+        raise ValueError("unreadable compressed content cannot be scanned for private paths")
+    start = offset + 30 + int.from_bytes(local[26:28], "little") + int.from_bytes(local[28:30], "little")
+    raw = data[start:start + info.compress_size]
+    if len(raw) != info.compress_size:
+        raise ValueError("unreadable compressed content cannot be scanned for private paths")
+    if info.compress_type == zipfile.ZIP_STORED:
+        if info.compress_size != info.file_size:
+            raise ValueError("unreadable compressed content cannot be scanned for private paths")
+        member = raw
+    else:
+        reader = zlib.decompressobj(-zlib.MAX_WBITS)
+        member = reader.decompress(raw, info.file_size + 1)
+        if not reader.eof or reader.unconsumed_tail or reader.unused_data:
+            raise ValueError("unreadable compressed content cannot be scanned for private paths")
+    if len(member) != info.file_size or zlib.crc32(member) != info.CRC:
+        raise ValueError("unreadable compressed content cannot be scanned for private paths")
+    return member
+
+
+def gzip_stream_bytes(data: bytes, budget: list[int]) -> bytes:
+    # Members are joined so a path split between two of them is still seen.
+    # Zero padding between members is skipped; any other trailing data is refused.
+    parts, rest = [], data
+    while rest:
+        if rest[:3] != b"\x1f\x8b\x08":
+            raise ValueError("unreadable compressed content cannot be scanned for private paths")
+        reader = zlib.decompressobj(16 + zlib.MAX_WBITS)
+        inner = reader.decompress(rest, max(budget[0], 0) + 1)
+        budget[0] -= len(inner)
+        if budget[0] < 0 or reader.unconsumed_tail:
+            raise ValueError("compressed content too large to scan for private paths")
+        if not reader.eof:
+            raise ValueError("unreadable compressed content cannot be scanned for private paths")
+        parts.append(inner)
+        rest = reader.unused_data.lstrip(b"\x00")
+    return b"".join(parts)
+
+
+def exact_zip_end_record(data: bytes, window: int) -> int | None:
+    # A well-formed end record ends the data exactly, its comment included.
+    position = len(data)
+    while True:
+        position = data.rfind(b"PK\x05\x06", window, position)
+        if position < 0:
+            return None
+        if position + 22 + int.from_bytes(data[position + 20:position + 22], "little") == len(data):
+            return position
+
+
+def contains_private_path(data: bytes, needles: set[bytes], depth: int = 0, budget: list[int] | None = None) -> bool:
+    # A zip or gzip member hides its bytes from a plain scan, so it is opened.
+    # Data that starts like an archive or ends with a well-formed end record
+    # must open. An end-record signature elsewhere (machine code, an archive
+    # after a preamble with trailing bytes) is opened when zipfile reads it.
+    budget = [PRIVATE_SCAN_MAX_BYTES] if budget is None else budget
+    if any(needle in data.lower() for needle in needles):
+        return True
+    zipped, gzipped = data[:4] == b"PK\x03\x04", data[:3] == b"\x1f\x8b\x08"
+    window = max(0, len(data) - 65535 - 22)
+    last = data.rfind(b"PK\x05\x06", window)
+    if not (zipped or gzipped or last >= 0):
+        return False
+    try:
+        if gzipped:
+            if depth >= PRIVATE_SCAN_DEPTH:
+                raise ValueError("compressed content nested too deeply to scan for private paths")
+            return contains_private_path(gzip_stream_bytes(data, budget), needles, depth + 1, budget)
+        exact = exact_zip_end_record(data, window)
+        try:
+            archive = zipfile.ZipFile(io.BytesIO(data))
+        except Exception:
+            if zipped or exact is not None:
+                raise
+            return False
+        with archive:
+            # zipfile reads the last signature; it must be the validated record.
+            if exact is not None and exact != last:
+                raise ValueError("ambiguous zip end record cannot be scanned for private paths")
+            if depth >= PRIVATE_SCAN_DEPTH:
+                raise ValueError("compressed content nested too deeply to scan for private paths")
+            for info in archive.infolist():
+                if contains_private_path(zip_member_bytes(data, info, budget), needles, depth + 1, budget):
+                    return True
+        return False
+    except ValueError:
+        raise
+    except Exception as error:
+        raise ValueError("unreadable compressed content cannot be scanned for private paths") from error
+
+
+def assert_no_private_content(items, roots: list[Path]) -> None:
+    # A remap that becomes relative, or a linker PDB record, can silently embed
+    # the private checkout or profile directory. Refuse before any archive exists.
+    # One decompression budget covers the whole release.
+    needles = private_path_needles(roots)
+    budget = [PRIVATE_SCAN_MAX_BYTES]
+    for label, data in items:
+        if contains_private_path(data, needles, 0, budget):
+            raise ValueError("private build path found in staged file: " + label)
 
 
 RELEASE_CHANNELS = ("development", "stable")
@@ -827,6 +993,9 @@ def main(argv: list[str]) -> int:
             *notice_entries,
         ]
         entries.append(ArchiveEntry(arcname=f"{root_prefix}/README.md", data=usage_bytes, mode=0o644))
+        assert_no_private_content(((entry.arcname, entry.data) for entry in entries),
+                                  [Path.home(), workspace_root, out_dir, Path(tmp_root), sysroot,
+                                   Path(tool_env.get("CARGO_HOME", Path.home() / ".cargo"))])
 
         entries.sort(key=lambda e: e.arcname)
 

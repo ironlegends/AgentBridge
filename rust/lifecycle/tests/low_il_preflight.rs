@@ -1,11 +1,10 @@
-#![cfg(windows)]
+#![cfg(all(windows, feature = "low-il-specimen"))]
 // Read-only, opt-in diagnosis of the existing pinned project specimen.
 // Never consumes a PreparedProjectCommand, changes ACLs or spawns a child.
 use agent_bridge_lifecycle::{initialize_operator_settings, git_revision_windows::{prepare_project_command, ProjectCommandSpec, GitRevisionError}};
 use std::{path::PathBuf, time::Duration};
 
 #[test]
-#[ignore = "local operator-owned specimen; preflight only"]
 fn exact_low_il_specimen_preflight_without_launch() {
     let exe=PathBuf::from(std::env::var_os("AB_LOW_IL_SPECIMEN").expect("explicit specimen"));
     let root=exe.parent().expect("specimen parent");
@@ -35,7 +34,6 @@ fn exact_low_il_specimen_preflight_without_launch() {
 }
 
 #[test]
-#[ignore="requires exact existing operator-approved Low-IL specimen; no launch"]
 fn exact_low_il_specimen_prepares_with_private_boundaries() {
     let exe=PathBuf::from(std::env::var_os("AB_LOW_IL_SPECIMEN").expect("explicit specimen"));
     let root=exe.parent().expect("specimen parent");
@@ -64,7 +62,6 @@ fn exact_low_il_specimen_prepares_with_private_boundaries() {
 }
 
 #[test]
-#[ignore="BLOCKED #96: real restricted echo launch requires compatible qualified loader; no elevation"]
 fn exact_low_il_public_echo_starts_interacts_and_drains() {
     use std::time::Instant;
     let exe=PathBuf::from(std::env::var_os("AB_LOW_IL_SPECIMEN").expect("explicit specimen"));
@@ -133,7 +130,6 @@ fn exact_low_il_public_echo_starts_interacts_and_drains() {
 // Separate negative capability qualification. Never replace the real
 // positive echo recipe above with an expected failure.
 #[test]
-#[ignore="requires exact previously approved public echo specimen for prepared refusal; no launch"]
 fn exact_prepared_low_il_specimen_refuses_before_native_creation() {
     use agent_bridge_lifecycle::git_revision_windows::PROJECT_LOW_IL_UNQUALIFIED;
     let exe=PathBuf::from(std::env::var_os("AB_LOW_IL_SPECIMEN").expect("exact approved specimen"));

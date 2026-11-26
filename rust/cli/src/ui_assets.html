@@ -685,13 +685,13 @@
           ? (oauthInfo.token_status && oauthInfo.token_status.token_stored ? statusBadge("token_stored") : statusBadge("oauth_configured"))
           : '<span class="muted">None</span>';
         return "<tr><td><code>" + escapeHtml(s.id) + "</code></td><td>" + statusBadge(s.enabled ? "active" : "disabled") +
-          "</td><td><code>" + escapeHtml(s.endpoint || "") + "</code></td><td>" + oauthBadge + "</td></tr>";
+          "</td><td><code>" + escapeHtml(s.endpoint || s.executable || "") + "</code></td><td>" + oauthBadge + "</td></tr>";
       }).join("") || '<tr><td colspan="4" class="muted">No configured MCP extension servers.</td></tr>';
 
       const reqRows = (ext.requests || []).map((r) => {
         const isPending = r.decision === "pending";
         const server = (ext.servers || []).find((candidate) => candidate.id === r.name);
-        const endpoint = (r.payload && r.payload.url) || (server && server.endpoint) || "Not configured";
+        const endpoint = (r.payload && (r.payload.url || r.payload.executable)) || (server && (server.endpoint || server.executable)) || "Not configured";
         const review =
           '<details class="proposal-review"><summary>Review exact proposal</summary>' +
             '<p class="muted">Request: <code>' + escapeHtml(r.request_id) + "</code></p>" +

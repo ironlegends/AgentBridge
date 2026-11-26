@@ -15,10 +15,14 @@ struct Fixture {
     _root: TestRoot,
     legacy_access: String,
     unified_access: String,
+    unified_client_id: String,
 }
 fn identity() -> CapabilityIdentity {
-    CapabilityIdentity::UnifiedV1 { manifest_sha256:"ab".repeat(32),
-        catalogue_sha256:"cd".repeat(32),policy_version:1 }
+    CapabilityIdentity::UnifiedV1 {
+        manifest_sha256: "ab".repeat(32),
+        catalogue_sha256: router_catalogue_digest(&fixture_router(true)).unwrap().to_string(),
+        policy_version: 1,
+    }
 }
 fn b64url(bytes:&[u8]) -> String {
     const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
@@ -42,11 +46,15 @@ fn oauth_reply(server:&mut OAuthServer, method:&str, target:&str, body:&[u8],
         _=>panic!("OAuth-only synthetic request unexpectedly dispatched MCP"),
     }
 }
-fn issue_access(server:&mut OAuthServer,root:&Path,label:&str) -> String {
+fn issue_access(server:&mut OAuthServer,root:&Path,label:&str) -> (String, String) {
+    issue_provider_access(server, root, label, CALLBACK)
+}
+
+fn issue_provider_access(server:&mut OAuthServer,root:&Path,label:&str,callback:&str) -> (String, String) {
     let owner=LocalOwner::open(OAuthConfig {state_dir:root.into(), public_origin:ORIGIN.into(),
         audience:Audience::Workstation}).unwrap();
     owner.enable_enrollment(||true).unwrap();
-    let registration=serde_json::to_vec(&json!({"redirect_uris":[CALLBACK],
+    let registration=serde_json::to_vec(&json!({"redirect_uris":[callback],
         "token_endpoint_auth_method":"client_secret_post"})).unwrap();
     let reply=oauth_reply(server,"POST","/oauth/register",&registration,Some("application/json"));
     assert!((200..300).contains(&reply.status));
@@ -55,7 +63,7 @@ fn issue_access(server:&mut OAuthServer,root:&Path,label:&str) -> String {
     let secret=client["client_secret"].as_str().unwrap();
     let verifier="V".repeat(43);
     let challenge=b64url(&Sha256::digest(verifier.as_bytes()));
-    let target=format!("/oauth/authorize?response_type=code&client_id={id}&redirect_uri={CALLBACK}&code_challenge_method=S256&code_challenge={challenge}&state={label}");
+    let target=format!("/oauth/authorize?response_type=code&client_id={id}&redirect_uri={callback}&code_challenge_method=S256&code_challenge={challenge}&state={label}");
     assert_eq!(oauth_reply(server,"GET",&target,b"",None).status,200);
     let pending=owner.pending_requests().unwrap().into_iter().find(|r|r.client_id==id).unwrap();
     owner.approve_request(&pending.id,|_|true).unwrap();
@@ -64,12 +72,12 @@ fn issue_access(server:&mut OAuthServer,root:&Path,label:&str) -> String {
     let location=&approved.headers.iter().find(|(name,_)|name=="location").unwrap().1;
     let code=location.split_once('?').unwrap().1.split('&')
         .find_map(|part|part.strip_prefix("code=")).unwrap();
-    let form=format!("grant_type=authorization_code&client_id={id}&client_secret={secret}&redirect_uri={CALLBACK}&code={code}&code_verifier={verifier}");
+    let form=format!("grant_type=authorization_code&client_id={id}&client_secret={secret}&redirect_uri={callback}&code={code}&code_verifier={verifier}");
     let reply=oauth_reply(server,"POST","/oauth/token",form.as_bytes(),
         Some("application/x-www-form-urlencoded"));
     assert_eq!(reply.status,200);
     let tokens:Value=serde_json::from_slice(&reply.body).unwrap();
-    tokens["access_token"].as_str().unwrap().to_owned()
+    (tokens["access_token"].as_str().unwrap().to_owned(), id.to_owned())
 }
 fn fixture_router(unified:bool) -> MissionRouter {
     let argument=if unified {"unified_arg"}else{"legacy_arg"};
@@ -111,19 +119,22 @@ impl Fixture {
         }
         let config=OAuthConfig{state_dir:root.0.clone(),public_origin:ORIGIN.into(),audience:Audience::Workstation};
         let mut legacy=OAuthServer::open(config.clone()).unwrap();
-        let legacy_access=issue_access(&mut legacy,&root.0,"legacy");
+        let (legacy_access, _)=issue_access(&mut legacy,&root.0,"legacy");
         drop(legacy);
         let mut oauth=OAuthServer::open_with_capability(config,identity()).unwrap();
-        let unified_access=issue_access(&mut oauth,&root.0,"unified");
+        let (unified_access, unified_client_id)=issue_access(&mut oauth,&root.0,"unified");
+        let legacy_router = fixture_router(false);
         let app=Gateway { oauth:Arc::new(Mutex::new(oauth)),
-            router:Arc::new(fixture_router(false)),
+            legacy_catalogue_sha256: router_catalogue_digest(&legacy_router).unwrap(),
+            router:Arc::new(legacy_router),
+            request_audit: Arc::new(RequestAudit::new().unwrap()),
             unified:Some(Arc::new(UnifiedRoute {identity:identity(),router:Arc::new(fixture_router(true)),
                 extension_guard:None,manifest_guard:Arc::new(||Ok(())),
                 response_permits:Arc::new(Semaphore::new(2))})),
             audience:Audience::Workstation,expected_resource:Some(format!("{ORIGIN}/mcp")),
             public_host:"router-capability.example.invalid".into(),loopback_host:"127.0.0.1:18856".into(),
             requests:Arc::new(Semaphore::new(32)),effects:OperationAdmission::default(),extension_guard:None };
-        Self{app,_root:root,legacy_access,unified_access}
+        Self{app,_root:root,legacy_access,unified_access,unified_client_id}
     }
 }
 async fn mcp(app:Gateway,access:&str,frame:Value)->(u16,Value) {
@@ -138,6 +149,244 @@ async fn mcp(app:Gateway,access:&str,frame:Value)->(u16,Value) {
 fn list()->Value{json!({"jsonrpc":"2.0","id":1,"method":"tools/list"})}
 fn call(name:&str,arguments:Value)->Value {
     json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":name,"arguments":arguments}})
+}
+
+fn assert_audit_refusal(app: &Gateway, count: usize, status: Option<u16>, code: &str) -> Value {
+    let snapshot = serde_json::to_value(app.request_audit.snapshot()).unwrap();
+    assert_eq!(snapshot["in_flight"], 0);
+    let records = snapshot["records"].as_array().unwrap();
+    assert_eq!(records.len(), count);
+    let record = &records[count - 1];
+    assert_eq!(record["sequence"], count);
+    assert_eq!(record["outcome"], "http_refusal");
+    assert_eq!(record["http_status"], json!(status));
+    assert_eq!(record["error_code"], code);
+    record.clone()
+}
+
+#[tokio::test]
+async fn request_audit_records_admission_header_and_body_refusals_once() {
+    let fixture = Fixture::new();
+    let app = &fixture.app;
+    let request = || Request::builder().method("POST").uri("/mcp")
+        .header("host", "127.0.0.1:18856");
+
+    let permits = app.requests.try_acquire_many(32).unwrap();
+    let response = handle(State(app.clone()), request().body(Body::empty()).unwrap()).await;
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_audit_refusal(app, 1, Some(503), "request_capacity_busy");
+    drop(permits);
+
+    let malformed = request().header("authorization", "Bearer first")
+        .header("authorization", "Bearer second").body(Body::empty()).unwrap();
+    let response = handle(State(app.clone()), malformed).await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_audit_refusal(app, 2, Some(400), "invalid_http_headers");
+
+    let oversized = request().body(Body::from(vec![b'x'; 1024 * 1024 + 1])).unwrap();
+    let response = handle(State(app.clone()), oversized).await;
+    assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    assert_audit_refusal(app, 3, Some(413), "invalid_or_oversized_body");
+
+    app.effects.close();
+    let response = handle(State(app.clone()), request().body(Body::empty()).unwrap()).await;
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_audit_refusal(app, 4, Some(503), "workstation_stopping");
+}
+
+#[tokio::test]
+async fn request_audit_records_worker_panic_with_returned_status_once() {
+    let mut fixture = Fixture::new();
+    Arc::get_mut(fixture.app.unified.as_mut().unwrap()).unwrap().manifest_guard =
+        Arc::new(|| panic!("synthetic MCP worker panic"));
+
+    assert_eq!(mcp(fixture.app.clone(), &fixture.unified_access, list()).await.0, 500);
+    let record = assert_audit_refusal(&fixture.app, 1, Some(500), "request_interrupted");
+    assert_eq!(record["method"], "tools/list");
+    assert_eq!(record["provider"], "gemini");
+}
+
+#[tokio::test]
+async fn request_audit_records_cancellation_while_worker_is_running_once() {
+    let mut fixture = Fixture::new();
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let (release, wait) = std::sync::mpsc::channel();
+    let wait = Mutex::new(wait);
+    let worker_entered = Arc::clone(&entered);
+    Arc::get_mut(fixture.app.unified.as_mut().unwrap()).unwrap().manifest_guard = Arc::new(move || {
+        worker_entered.notify_one();
+        wait.lock().unwrap().recv_timeout(Duration::from_secs(10)).unwrap();
+        Ok(())
+    });
+    let app = fixture.app.clone();
+    let token = fixture.unified_access.clone();
+    let task = tokio::spawn(async move { mcp(app, &token, list()).await });
+    tokio::time::timeout(Duration::from_secs(5), entered.notified()).await.unwrap();
+    let snapshot = serde_json::to_value(fixture.app.request_audit.snapshot()).unwrap();
+    assert_eq!(snapshot["in_flight"], 1);
+    assert_eq!(snapshot["records"], json!([]));
+
+    task.abort();
+    assert!(task.await.unwrap_err().is_cancelled());
+    let record = assert_audit_refusal(&fixture.app, 1, None, "request_interrupted");
+    assert_eq!(record["method"], "tools/list");
+    assert_eq!(record["provider"], "gemini");
+    assert_eq!(fixture.app.requests.available_permits(), 31, "worker retains its admission");
+
+    release.send(()).unwrap();
+    let _drained = tokio::time::timeout(Duration::from_secs(5), fixture.app.requests.acquire_many(32))
+        .await.unwrap().unwrap();
+    assert_audit_refusal(&fixture.app, 1, None, "request_interrupted");
+}
+
+#[tokio::test]
+async fn request_audit_correlates_status_with_discovery_and_verified_oauth_identity() {
+    let mut fixture = Fixture::new();
+    let db_path = fixture._root.0.join("audit-missions.sqlite");
+    drop(agent_bridge_core::CoreDatabase::initialize_new(&db_path).unwrap());
+    let router = runtime::missions(&db_path).unwrap();
+    fixture.app.legacy_catalogue_sha256 = router_catalogue_digest(&router).unwrap();
+    fixture.app.router = Arc::new(router);
+    // Reopen in Legacy mode so both providers use the catalogue under test.
+    // A fresh owner also clears the fixture's registration throttle.
+    drop(fixture.app.oauth);
+    fixture.app.oauth = Arc::new(Mutex::new(OAuthServer::open(
+        OAuthConfig { state_dir: fixture._root.0.clone(), public_origin: ORIGIN.into(),
+            audience: Audience::Workstation },
+    ).unwrap()));
+    let (chatgpt_access, gemini_id, chatgpt_id) = {
+        let mut oauth = fixture.app.oauth.lock().unwrap();
+        let (chatgpt_access, chatgpt_id) = issue_provider_access(
+            &mut oauth, &fixture._root.0, "chatgpt",
+            "https://chatgpt.com/connector_platform_oauth_redirect",
+        );
+        let client = |token| oauth.authorize_mcp(Some(&format!("Bearer {token}"))).unwrap().client_id;
+        let gemini_id = client(&fixture.legacy_access);
+        (chatgpt_access, gemini_id, chatgpt_id)
+    };
+    let initialize = json!({"jsonrpc":"2.0","id":1,"method":"initialize",
+        "params":{"protocolVersion":"2025-11-25","capabilities":{}}});
+    assert_eq!(mcp(fixture.app.clone(), &fixture.legacy_access, initialize).await.0, 200);
+    let (status, listing) = mcp(fixture.app.clone(), &fixture.legacy_access, list()).await;
+    assert_eq!(status, 200);
+    let definitions: Vec<ToolDefinition> = serde_json::from_value(listing["result"]["tools"].clone()).unwrap();
+    let digest = crate::capability_manifest::catalogue_digest(&definitions).unwrap();
+    for token in [&fixture.legacy_access, &chatgpt_access] {
+        let (status, response) = mcp(fixture.app.clone(), token, call("agent_bridge_status", json!({}))).await;
+        assert_eq!(status, 200);
+        assert_ne!(response["result"]["isError"], true);
+        let text = response["result"]["content"][0]["text"].as_str()
+            .unwrap_or_else(|| panic!("expected status text: {response}"));
+        let report: Value = serde_json::from_str(text).unwrap();
+        assert_eq!(report["ok"], true);
+    }
+    let snapshot = serde_json::to_value(fixture.app.request_audit.snapshot()).unwrap();
+    let records = snapshot["records"].as_array().unwrap();
+    assert_eq!(records.len(), 4);
+    let gemini_hash = format!("{:x}", Sha256::digest(gemini_id.as_bytes()));
+    let chatgpt_hash = format!("{:x}", Sha256::digest(chatgpt_id.as_bytes()));
+    for (index, (record, method)) in records.iter().zip(["initialize", "tools/list", "tools/call", "tools/call"]).enumerate() {
+        assert_eq!(record["sequence"], index + 1);
+        assert!(record["timestamp_unix_ms"].as_u64().unwrap() > 0);
+        assert!(record["duration_ms"].is_u64());
+        assert_eq!(record["boot_id"], snapshot["boot_id"]);
+        assert_eq!(record["method"], method);
+        assert_eq!(record["outcome"], "success");
+        assert_eq!(record["http_status"], 200);
+        assert_eq!(record["error_code"], Value::Null);
+        assert_eq!(record["catalogue_sha256"], digest);
+        if index == 3 {
+            assert_eq!(record["provider"], "chatgpt");
+            assert_eq!(record["client_id_sha256"], chatgpt_hash);
+        } else {
+            assert_eq!(record["provider"], "gemini");
+            assert_eq!(record["client_id_sha256"], gemini_hash);
+        }
+    }
+    assert_eq!(records[2]["tool_name"], "agent_bridge_status");
+    let serialized = snapshot.to_string();
+    for private in [&fixture.legacy_access, &chatgpt_access, &gemini_id, &chatgpt_id] {
+        assert!(!serialized.contains(private.as_str()));
+    }
+}
+
+#[tokio::test]
+async fn request_audit_records_early_oauth_protocol_and_tool_refusals_without_payloads() {
+    let mut fixture = Fixture::new();
+    let mut handlers = ToolMapHandler::new();
+    handlers.register("agent_bridge_status", |_| {
+        Ok(ToolCallResult::tool_error("private-result-marker"))
+    });
+    fixture.app.router = Arc::new(McpGateway::new(GatewayConfig::new("audit", "1"),
+        vec![ToolDefinition::new("agent_bridge_status", None, json!({"type":"object"}))], handlers));
+    let frame = call("agent_bridge_status", json!({"marker":"private-argument-marker"}));
+    let (status, response) = mcp(fixture.app.clone(), &fixture.legacy_access, frame.clone()).await;
+    assert_eq!(status, 200);
+    assert_eq!(response["result"]["isError"], true);
+    assert_eq!(response["result"]["content"][0]["text"], "private-result-marker");
+    assert_eq!(mcp(fixture.app.clone(), "invalid-token-marker", frame.clone()).await.0, 401);
+    let unknown = call("private-tool-marker", json!({}));
+    let (status, response) = mcp(fixture.app.clone(), &fixture.legacy_access, unknown).await;
+    assert_eq!(status, 200);
+    assert_eq!(response["error"]["code"], -32602);
+    let (status, response) = mcp(fixture.app.clone(), &fixture.legacy_access,
+        json!({"jsonrpc":"2.0","id":1,"method":"private-method-marker"})).await;
+    assert_eq!(status, 200);
+    assert_eq!(response["error"]["code"], -32601);
+
+    let early = Request::builder().method("POST").uri("/mcp")
+        .header("host", "untrusted.example.invalid").body(Body::empty()).unwrap();
+    assert_eq!(handle(State(fixture.app.clone()), early).await.status(), 403);
+    let metadata = Request::builder().uri("/health")
+        .header("host", "127.0.0.1:18856").body(Body::empty()).unwrap();
+    assert_eq!(handle(State(fixture.app.clone()), metadata).await.status(), 200);
+
+    // Fill the private budget, which already includes the token exchange and MCP calls.
+    // Health probes exercise the same limiter without adding MCP audit records.
+    {
+        let mut oauth = fixture.app.oauth.lock().unwrap();
+        let authorization = format!("Bearer {}", fixture.legacy_access);
+        for _ in 0..1000 {
+            let HttpAction::Reply(reply) = oauth.handle_http(HttpRequest {
+                method: "GET", target: "/health", authorization: Some(&authorization),
+                origin: None, content_type: None, body: b"",
+            }) else { panic!("health cannot dispatch MCP") };
+            if reply.status == 429 {
+                let response: Value = serde_json::from_slice(&reply.body).unwrap();
+                assert_eq!(response["error"], "request_limit");
+                break;
+            }
+            assert_eq!(reply.status, 200);
+        }
+    }
+    let (status, response) = mcp(fixture.app.clone(), &fixture.legacy_access, frame).await;
+    assert_eq!(status, 429);
+    assert_eq!(response["error"], "request_limit");
+
+    let snapshot = serde_json::to_value(fixture.app.request_audit.snapshot()).unwrap();
+    let records = snapshot["records"].as_array().unwrap();
+    assert_eq!(records.len(), 6);
+    assert_eq!(records[0]["outcome"], "tool_error");
+    assert_eq!(records[0]["http_status"], 200);
+    assert_eq!(records[0]["tool_name"], "agent_bridge_status");
+    assert_eq!(records[1]["outcome"], "http_refusal");
+    assert_eq!(records[1]["error_code"], "invalid_token");
+    assert_eq!(records[1]["provider"], Value::Null);
+    assert_eq!(records[1]["client_id_sha256"], Value::Null);
+    assert_eq!(records[1]["catalogue_sha256"], Value::Null);
+    assert_eq!(records[2]["outcome"], "jsonrpc_error");
+    assert_eq!(records[2]["error_code"], -32602);
+    assert_eq!(records[2]["tool_name"], "other");
+    assert_eq!(records[3]["method"], "other");
+    assert_eq!(records[4]["error_code"], "host_refused");
+    assert_eq!(records[4]["provider"], Value::Null);
+    assert_eq!(records[5]["outcome"], "http_refusal");
+    assert_eq!(records[5]["error_code"], "request_limit");
+    assert_eq!(records[5]["http_status"], 429);
+    assert_eq!(records[5]["provider"], "gemini");
+    assert_eq!(records[5]["client_id_sha256"], records[0]["client_id_sha256"]);
+    assert!(!snapshot.to_string().contains("private-"));
+    assert!(!snapshot.to_string().contains("invalid-token-marker"));
 }
 
 #[tokio::test(flavor="multi_thread",worker_threads=2)]
@@ -339,4 +588,137 @@ async fn capability_changed_extension_policy_refuses_old_grant_while_exact_new_v
     let (status,value)=mcp(fixture.app.clone(),&fixture.unified_access,list()).await;
     assert_eq!(status,200);
     assert_eq!(value["result"]["tools"].as_array().unwrap().len(),2);
+}
+
+async fn mcp_modern(app:Gateway,access:Option<&str>,frame:Value,headers:&[(&str,&str)])->(u16,Value) {
+    let mut request=Request::builder().method("POST").uri("/mcp")
+        .header("host","127.0.0.1:18856").header("content-type","application/json");
+    if let Some(access)=access { request=request.header("authorization",format!("Bearer {access}")); }
+    for (name,value) in headers { request=request.header(*name,*value); }
+    let response=handle(State(app),request.body(Body::from(frame.to_string())).unwrap()).await;
+    let status=response.status().as_u16();
+    let bytes=to_bytes(response.into_body(),50*1024*1024).await.unwrap();
+    (status,serde_json::from_slice(&bytes).unwrap_or_else(|_|json!({"transport_error":true})))
+}
+fn modern(method:&str,mut params:Value,version:&str)->Value {
+    params["_meta"]=json!({"io.modelcontextprotocol/protocolVersion":version,
+        "io.modelcontextprotocol/clientCapabilities":{}});
+    json!({"jsonrpc":"2.0","id":7,"method":method,"params":params})
+}
+
+#[tokio::test(flavor="multi_thread",worker_threads=2)]
+async fn modern_requests_keep_oauth_and_selected_catalogue_and_refuse_mismatched_headers() {
+    let fixture=Fixture::new();
+    const V:(&str,&str)=("mcp-protocol-version","2026-07-28");
+    let modern_list=modern("tools/list",json!({}),"2026-07-28");
+    let (status,_)=mcp_modern(fixture.app.clone(),None,modern_list.clone(),&[V,("mcp-method","tools/list")]).await;
+    assert_eq!(status,401,"modern metadata never bypasses OAuth");
+    let (status,listed)=mcp_modern(fixture.app.clone(),Some(&fixture.unified_access),modern_list,
+        &[V,("mcp-method","tools/list")]).await;
+    assert_eq!(status,200);
+    assert_eq!(listed["result"]["resultType"],"complete");
+    assert_eq!(listed["result"]["tools"].as_array().unwrap().len(),2,"modern list keeps the granted catalogue");
+    let call=modern("tools/call",json!({"name":"shared_contract","arguments":{"unified_arg":true}}),"2026-07-28");
+    let (status,reply)=mcp_modern(fixture.app.clone(),Some(&fixture.unified_access),call.clone(),
+        &[V,("mcp-method","tools/call"),("mcp-name","shared_contract")]).await;
+    assert_eq!(status,200);
+    assert_eq!(reply["result"]["content"][0]["text"],"unified");
+    for headers in [vec![V,("mcp-method","tools/call")], vec![V,("mcp-method","tools/call"),("mcp-name","unified_only")],
+        vec![("mcp-method","tools/call"),("mcp-name","shared_contract")]] {
+        let (status,reply)=mcp_modern(fixture.app.clone(),Some(&fixture.unified_access),call.clone(),&headers).await;
+        assert_eq!(status,400);
+        assert_eq!(reply["error"]["code"],-32020);
+    }
+    let (status,reply)=mcp_modern(fixture.app.clone(),Some(&fixture.legacy_access),
+        modern("server/discover",json!({}),"2099-01-01"),&[("mcp-protocol-version","2099-01-01"),("mcp-method","server/discover")]).await;
+    assert_eq!(status,400);
+    assert_eq!(reply["error"]["code"],-32022);
+    let (status,reply)=mcp_modern(fixture.app.clone(),Some(&fixture.legacy_access),
+        modern("initialize",json!({}),"2026-07-28"),&[V,("mcp-method","initialize")]).await;
+    assert_eq!(status,404);
+    assert_eq!(reply["error"]["code"],-32601);
+    let (status,legacy)=mcp(fixture.app.clone(),&fixture.legacy_access,list()).await;
+    assert_eq!(status,200);
+    assert!(legacy["result"].get("resultType").is_none(),"legacy responses are unchanged");
+
+    let definitions: Vec<ToolDefinition> = serde_json::from_value(listed["result"]["tools"].clone()).unwrap();
+    let digest = crate::capability_manifest::catalogue_digest(&definitions).unwrap();
+    let snapshot = serde_json::to_value(fixture.app.request_audit.snapshot()).unwrap();
+    let records = snapshot["records"].as_array().unwrap();
+    assert_eq!(records.len(), 9);
+    assert_eq!(records[0]["provider"], Value::Null);
+    let expected_client_hash = format!("{:x}", Sha256::digest(fixture.unified_client_id.as_bytes()));
+    for record in &records[1..6] {
+        assert_eq!(record["provider"], "gemini");
+        assert_eq!(record["client_id_sha256"], expected_client_hash);
+        assert_eq!(record["catalogue_sha256"], digest);
+    }
+    assert_eq!(records[1]["method"], "tools/list");
+    assert_eq!(records[2]["method"], "tools/call");
+    assert_eq!(records[3]["outcome"], "http_refusal");
+    assert_eq!(records[3]["error_code"], -32020);
+    assert_ne!(records[8]["client_id_sha256"], records[1]["client_id_sha256"]);
+    assert_ne!(records[8]["catalogue_sha256"], records[1]["catalogue_sha256"]);
+}
+
+#[cfg(all(windows, feature = "qualification"))]
+pub(crate) async fn assert_audited_unified_status(
+    state_dir: &Path,
+    settings: &Path,
+    extension_authority: &Value,
+    manifest: crate::capability_manifest::QualifiedManifest,
+    router: MissionRouter,
+    expected_digest: &str,
+) {
+    let identity = manifest.identity().unwrap();
+    let mut oauth = OAuthServer::open_with_capability(OAuthConfig {
+        state_dir: state_dir.to_owned(), public_origin: ORIGIN.into(), audience: Audience::Workstation,
+    }, identity.clone()).unwrap();
+    oauth.bind_capability_manifest(&manifest.authority_bytes().unwrap()).unwrap();
+    let (access, client_id) = issue_access(&mut oauth, state_dir, "real-unified-status");
+    let legacy = fixture_router(false);
+    let app = Gateway {
+        oauth: Arc::new(Mutex::new(oauth)),
+        legacy_catalogue_sha256: router_catalogue_digest(&legacy).unwrap(),
+        router: Arc::new(legacy),
+        request_audit: Arc::new(RequestAudit::new().unwrap()),
+        unified: Some(Arc::new(UnifiedRoute {
+            identity: identity.clone(),
+            router: Arc::new(router),
+            extension_guard: Some(ExtensionGuard {
+                settings: settings.to_owned(), authority: extension_authority.clone(),
+            }),
+            manifest_guard: Arc::new(move || manifest.verify()),
+            response_permits: Arc::new(Semaphore::new(2)),
+        })),
+        audience: Audience::Workstation,
+        expected_resource: Some(format!("{ORIGIN}/mcp")),
+        public_host: "router-capability.example.invalid".into(),
+        loopback_host: "127.0.0.1:18856".into(),
+        requests: Arc::new(Semaphore::new(32)),
+        effects: OperationAdmission::default(),
+        extension_guard: None,
+    };
+
+    let (status, response) = mcp(app.clone(), &access, call("agent_bridge_status", json!({}))).await;
+    assert_eq!(status, 200);
+    assert_ne!(response["result"]["isError"], true, "{response}");
+    let result: Value = serde_json::from_str(response["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(result["ok"], true);
+    assert_eq!(result["total_tools"], 46);
+    assert_eq!(result["capability"], serde_json::to_value(identity).unwrap());
+
+    let snapshot = serde_json::to_value(app.request_audit.snapshot()).unwrap();
+    assert_eq!(snapshot["in_flight"], 0);
+    let records = snapshot["records"].as_array().unwrap();
+    assert_eq!(records.len(), 1);
+    let record = &records[0];
+    assert_eq!(record["provider"], "gemini");
+    assert_eq!(record["client_id_sha256"], format!("{:x}", Sha256::digest(client_id.as_bytes())));
+    assert_eq!(record["catalogue_sha256"], expected_digest);
+    assert_eq!(record["method"], "tools/call");
+    assert_eq!(record["tool_name"], "agent_bridge_status");
+    assert_eq!(record["outcome"], "success");
+    assert_eq!(record["http_status"], 200);
+    assert_eq!(record["error_code"], Value::Null);
 }

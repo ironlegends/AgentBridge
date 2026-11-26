@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
+import gzip
 import hashlib
 import importlib.util
+import io
+import json
 import tempfile
 import unittest
+from unittest import mock
 import zipfile
 from pathlib import Path
 
@@ -89,11 +93,91 @@ class DesktopArchive(unittest.TestCase):
         if resolved.drive:
             spellings.append("/" + resolved.drive[0].lower() + resolved.as_posix()[2:] + "/c.rs")
         for spelling in spellings:
-            for encoding in ("utf-8", "utf-16-le"):
-                (self.stage / "agent-bridge-desktop-app.exe").write_bytes(b"\x00" + spelling.encode(encoding) + b"\x00")
+            for encoding in ("utf-8", "utf-16-le", "json"):
+                encoded = json.dumps(spelling)[1:-1].encode("ascii") if encoding == "json" else spelling.encode(encoding)
+                (self.stage / "agent-bridge-desktop-app.exe").write_bytes(b"\x00" + encoded + b"\x00")
                 with self.subTest(spelling=spelling, encoding=encoding):
                     with self.assertRaisesRegex(ValueError, "private build path found in staged file"):
                         PACKAGE.assert_no_private_paths(self.stage, PACKAGE.stage_records(self.stage), [private, accented])
+
+    def test_private_paths_inside_compressed_members_and_embedded_sources_are_refused(self):
+        private = self.root / "Private-Checkout"
+        leak = (str(private.resolve()) + "\\src\\main.rs").encode("utf-8")
+        def zipped(name, data, method=zipfile.ZIP_DEFLATED):
+            buffer = io.BytesIO()
+            with zipfile.ZipFile(buffer, "w", method) as archive:
+                archive.writestr(name, data)
+            return buffer.getvalue()
+        target = self.stage / "resources/automation/browser/bundle.bin"
+        half = len(leak) // 2
+        for label, data in (("zip", zipped("inner.txt", leak)), ("stored zip", zipped("inner.txt", leak, zipfile.ZIP_STORED)),
+                            ("gzip", gzip.compress(leak)), ("zip in gzip", gzip.compress(zipped("inner.txt", leak))),
+                            ("two gzip members", gzip.compress(b"clean") + gzip.compress(leak)),
+                            ("split across gzip members", gzip.compress(leak[:half]) + gzip.compress(leak[half:])),
+                            ("member after zero padding", gzip.compress(b"clean") + b"\x00" * 8 + gzip.compress(leak)),
+                            ("zip after a preamble", b"MZ executable stub" + zipped("inner.txt", leak)),
+                            ("zip after a preamble with trailing bytes", b"MZ stub" + zipped("inner.txt", leak) + b"trailing"),
+                            ("deflated zip in a stored zip", zipped("outer.zip", zipped("inner.txt", leak), zipfile.ZIP_STORED))):
+            target.write_bytes(data)
+            with self.subTest(label):
+                with self.assertRaisesRegex(ValueError, "private build path found in staged file: resources/automation/browser/bundle.bin"):
+                    PACKAGE.assert_no_private_paths(self.stage, PACKAGE.stage_records(self.stage), [private])
+        # Clean compressed members and incidental end-record signatures pass,
+        # also at the nesting limit.
+        incidental = b"MZ code PK\x05\x06 more code" + b"\x00" * 64
+        at_limit = incidental
+        for _ in range(PACKAGE.COMMON.PRIVATE_SCAN_DEPTH):
+            at_limit = gzip.compress(at_limit)
+        for data in (gzip.compress(zipped("inner.txt", b"clean")), incidental, at_limit):
+            target.write_bytes(data)
+            PACKAGE.assert_no_private_paths(self.stage, PACKAGE.stage_records(self.stage), [private])
+        # One decompression budget covers every staged file.
+        target.write_bytes(gzip.compress(b"x" * 600))
+        (self.stage / "resources/automation/browser/second.bin").write_bytes(gzip.compress(b"y" * 600))
+        with mock.patch.object(PACKAGE.COMMON, "PRIVATE_SCAN_MAX_BYTES", 1000):
+            with self.assertRaisesRegex(ValueError, "too large"):
+                PACKAGE.assert_no_private_paths(self.stage, PACKAGE.stage_records(self.stage), [private])
+        (self.stage / "resources/automation/browser/second.bin").unlink()
+        # Too deep, understated, unreadable or ambiguous members are refused.
+        nested = b"clean"
+        for _ in range(PACKAGE.COMMON.PRIVATE_SCAN_DEPTH + 1):
+            nested = gzip.compress(nested)
+        crc = bytearray(zipped("inner.txt", b"clean", zipfile.ZIP_STORED))
+        crc[30 + len("inner.txt")] ^= 1
+        understated = bytearray(zipped("inner.txt", b"clean" * 64))
+        central = understated.rfind(b"PK\x01\x02")
+        understated[central + 24:central + 28] = (10).to_bytes(4, "little")
+        commented = zipped("inner.txt", b"clean")
+        commented = b"stub" + commented[:-2] + (6).to_bytes(2, "little") + b"PK\x05\x06"[:4] + b"!!"
+        for label, data in (("too deep", nested), ("truncated", gzip.compress(b"clean" * 64)[:24]),
+                            ("gzip trailing data", gzip.compress(b"clean") + b"trailing"),
+                            ("bzip2 member", zipped("inner.txt", b"clean", zipfile.ZIP_BZIP2)), ("crc mismatch", bytes(crc)),
+                            ("understated size", bytes(understated)), ("signature in comment", commented)):
+            target.write_bytes(data)
+            with self.subTest(label):
+                with self.assertRaisesRegex(ValueError, "(nested too deeply|unreadable|unsupported)"):
+                    PACKAGE.assert_no_private_paths(self.stage, PACKAGE.stage_records(self.stage), [private])
+        target.unlink()
+        # The frontend that Tauri compresses into the executable is scanned from source.
+        frontend = self.root / "ui-source"
+        frontend.mkdir()
+        (frontend / "app.js").write_bytes(b"const path = '" + leak + b"';\n")
+        with self.assertRaisesRegex(ValueError, "private build path found in staged file: embedded app.js"):
+            PACKAGE.assert_no_private_paths(self.stage, PACKAGE.stage_records(self.stage), [private], [frontend / "app.js"])
+        repo = Path(__file__).resolve().parents[2]
+        self.assertIn(repo / "app/ui/index.html", PACKAGE.frontend_files(repo, {}))
+        # A merged configuration could embed another frontend than the scanned one.
+        with self.assertRaisesRegex(ValueError, "TAURI_CONFIG is not admitted"):
+            PACKAGE.frontend_files(repo, {"TAURI_CONFIG": "{}"})
+        fake = self.root / "repo"
+        (fake / "app/src-tauri").mkdir(parents=True)
+        (fake / "app/ui").mkdir()
+        (fake / "app/ui/index.html").write_bytes(b"<p></p>")
+        (fake / "app/src-tauri/tauri.conf.json").write_text('{"build": {"frontendDist": "../ui"}}', encoding="utf-8")
+        self.assertEqual(PACKAGE.frontend_files(fake, {}), [(fake / "app/ui/index.html").resolve()])
+        (fake / "app/src-tauri/tauri.windows.conf.json").write_text('{"build": {"frontendDist": "../other"}}', encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "only app/src-tauri/tauri.conf.json"):
+            PACKAGE.frontend_files(fake, {})
 
     def test_existing_archive_is_preserved(self):
         output = self.root / "application.zip"

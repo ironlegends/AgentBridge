@@ -69,7 +69,13 @@ struct Capabilities {
     screenshot:bool,
 }
 #[derive(Clone,Copy)]
-struct SnapshotOptions {tree:bool,screenshot:bool,interactive:bool,maximum:usize}
+struct SnapshotOptions {
+    tree:bool,
+    screenshot:bool,
+    #[cfg(target_os="macos")]
+    interactive:bool,
+    maximum:usize,
+}
 struct NativeSnapshot {
     elements:Vec<Value>,
     truncated:bool,
@@ -79,10 +85,26 @@ struct NativeSnapshot {
 #[derive(Clone,Debug)]
 enum Action {
     Wait{millis:u64},
-    Invoke{selector:String},
-    SetValue{selector:String,value:String},
-    Click{selector:String},
-    SendKeys{selector:String,keys:String},
+    Invoke {
+        #[cfg(target_os="macos")]
+        selector:String,
+    },
+    SetValue {
+        #[cfg(target_os="macos")]
+        selector:String,
+        #[cfg(any(target_os="macos",test))]
+        value:String,
+    },
+    Click {
+        #[cfg(target_os="linux")]
+        selector:String,
+    },
+    SendKeys {
+        #[cfg(target_os="linux")]
+        selector:String,
+        #[cfg(target_os="linux")]
+        keys:String,
+    },
 }
 impl Action {
     fn name(&self)->&'static str { match self {
@@ -92,6 +114,7 @@ impl Action {
 }
 trait Backend:Send {
     fn inspect(&mut self)->io::Result<NativeWindow>;
+    #[cfg(any(target_os="linux",target_os="macos"))]
     fn confirm(&mut self,selection:&DedicatedWindow)->io::Result<()>;
     fn capabilities(&self)->Capabilities;
     fn snapshot(&mut self,options:SnapshotOptions)->io::Result<NativeSnapshot>;
@@ -100,6 +123,7 @@ trait Backend:Send {
 
 pub struct LocalApproval {session:Session}
 
+#[cfg(not(windows))]
 pub fn confirm_local_selection(selection:DedicatedWindow)->io::Result<LocalApproval> {
     selection.validate()?;
     #[cfg(any(target_os="linux",target_os="macos"))]
@@ -177,10 +201,15 @@ impl Session {
         keys(&args,&["window_id","app","include_tree","include_screenshot","interactive_only","max_elements"])?;
         if string(&args,"window_id",36)?!=ticket.id||ticket.issued.elapsed()>TTL{return Err(error("WINDOW_TICKET_STALE"));}
         self.selection.accepts_app(&args)?;
+        let tree=bool_arg(&args,"include_tree",true)?;
+        let screenshot=bool_arg(&args,"include_screenshot",false)?;
+        // Validate the same request on every platform with a portable adapter.
+        let _interactive=bool_arg(&args,"interactive_only",true)?;
         let options=SnapshotOptions {
-            tree:bool_arg(&args,"include_tree",true)?,
-            screenshot:bool_arg(&args,"include_screenshot",false)?,
-            interactive:bool_arg(&args,"interactive_only",true)?,
+            tree,
+            screenshot,
+            #[cfg(target_os="macos")]
+            interactive:_interactive,
             maximum:number(&args,"max_elements",80,200)? as usize,
         };
         if options.maximum==0{return Err(invalid());}
@@ -203,17 +232,40 @@ impl Session {
             }
             "invoke"|"click"=>{
                 if args.contains_key("value")||args.contains_key("keys")||args.contains_key("wait_ms"){return Err(invalid());}
-                let selector=string(&args,"selector",128)?.to_owned();
-                if kind=="invoke"{Action::Invoke{selector}}else{Action::Click{selector}}
+                let _selector=string(&args,"selector",128)?;
+                if kind=="invoke" {
+                    Action::Invoke {
+                        #[cfg(target_os="macos")]
+                        selector:_selector.into(),
+                    }
+                } else {
+                    Action::Click {
+                        #[cfg(target_os="linux")]
+                        selector:_selector.into(),
+                    }
+                }
             }
             "set_value"=>{
                 if args.contains_key("keys")||args.contains_key("wait_ms"){return Err(invalid());}
-                let value=args.get("value").and_then(Value::as_str).filter(|v|v.len()<=65536&&!v.contains('\0')).ok_or_else(invalid)?;
-                Action::SetValue{selector:string(&args,"selector",128)?.into(),value:value.into()}
+                let _value=args.get("value").and_then(Value::as_str).filter(|v|v.len()<=65536&&!v.contains('\0')).ok_or_else(invalid)?;
+                let _selector=string(&args,"selector",128)?;
+                Action::SetValue {
+                    #[cfg(target_os="macos")]
+                    selector:_selector.into(),
+                    #[cfg(any(target_os="macos",test))]
+                    value:_value.into(),
+                }
             }
             "send_keys"=>{
                 if args.contains_key("value")||args.contains_key("wait_ms"){return Err(invalid());}
-                Action::SendKeys{selector:string(&args,"selector",128)?.into(),keys:string(&args,"keys",32)?.into()}
+                let _selector=string(&args,"selector",128)?;
+                let _keys=string(&args,"keys",32)?;
+                Action::SendKeys {
+                    #[cfg(target_os="linux")]
+                    selector:_selector.into(),
+                    #[cfg(target_os="linux")]
+                    keys:_keys.into(),
+                }
             }
             _=>return Err(unsupported()),
         };
@@ -239,7 +291,9 @@ impl Session {
         if after!="none" {
             match self.render(&previous.window,SnapshotOptions {
                 tree:matches!(after,"tree"|"both"),screenshot:matches!(after,"screenshot"|"both"),
-                interactive:true,maximum:80,
+                #[cfg(target_os="macos")]
+                interactive:true,
+                maximum:80,
             }) {
                 Ok(snapshot)=>result["snapshot"]=snapshot,
                 Err(_)=>result["snapshot_status"]=json!("target_unavailable_after_action"),

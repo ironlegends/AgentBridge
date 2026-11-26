@@ -308,8 +308,16 @@ fn cli_basics_and_window_consent_gap_regressions() {
         .output()
         .unwrap();
     assert!(!approve.status.success());
+    // Several ids reach the batch decision, which also fails closed.
+    let batch = Command::new(bin())
+        .args(["extensions", "approve", settings.to_str().unwrap(), &"0".repeat(64), &"1".repeat(64)])
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert!(!batch.status.success());
+    assert!(String::from_utf8_lossy(&batch.stderr).contains("Unknown local proposal"));
 
-    // Gap: extensions refresh-check refuses any server other than microsoft_learn
+    // Gap: extensions refresh-check refuses any server other than the public documentation servers
     let rc = Command::new(bin())
         .args(["extensions", "refresh-check", settings.to_str().unwrap(), "other_server"])
         .output()
@@ -366,7 +374,7 @@ fn stdio_extension_admin_and_outbound_oauth_gap_regressions() {
     // add queues inert proposal without altering registry directly
     let (err, add) = mcp.call_tool(
         "desktop_mcp_manage",
-        json!({"action": "add", "name": "microsoft_learn", "url": "https://learn.microsoft.com/api/mcp"}),
+        json!({"action": "add", "name": "mcp_docs", "url": "https://modelcontextprotocol.io/mcp"}),
     );
     assert!(
         !err && add["executed_by_web"] == false && add["operator_decision_required"] == true,
@@ -394,7 +402,7 @@ fn stdio_extension_admin_and_outbound_oauth_gap_regressions() {
             "local_oauth_config_change_after_approval",
             json!({
                 "action": "set_oauth",
-                "name": "microsoft_learn",
+                "name": "mcp_docs",
                 "oauth": true,
                 "oauth_client_id": "client-1",
                 "oauth_client_auth_method": "client_secret_basic",
@@ -404,17 +412,17 @@ fn stdio_extension_admin_and_outbound_oauth_gap_regressions() {
         (
             "auth_start",
             "outbound_oauth_pkce_flow_after_approval",
-            json!({"action": "auth_start", "name": "microsoft_learn", "force": true}),
+            json!({"action": "auth_start", "name": "mcp_docs", "force": true}),
         ),
         (
             "auth_disconnect",
             "local_oauth_token_disconnect_after_approval",
-            json!({"action": "auth_disconnect", "name": "microsoft_learn"}),
+            json!({"action": "auth_disconnect", "name": "mcp_docs"}),
         ),
         (
             "auth_status",
             "local_auth_and_dpapi_token_status_after_approval",
-            json!({"action": "auth_status", "name": "microsoft_learn"}),
+            json!({"action": "auth_status", "name": "mcp_docs"}),
         ),
     ] {
         let (err, resp) = mcp.call_tool("desktop_mcp_manage", payload);
@@ -429,7 +437,7 @@ fn stdio_extension_admin_and_outbound_oauth_gap_regressions() {
         "desktop_mcp_manage",
         json!({
             "action": "set_oauth",
-            "name": "microsoft_learn",
+            "name": "mcp_docs",
             "oauth": true,
             "oauth_client_secret_env": "RAW_SECRET_NOT_ALLOWED"
         }),
@@ -439,15 +447,118 @@ fn stdio_extension_admin_and_outbound_oauth_gap_regressions() {
     // refresh with ignored timeout_ms refused
     let (err, ref_bad) = mcp.call_tool(
         "desktop_mcp_manage",
-        json!({"action": "refresh", "name": "microsoft_learn", "timeout_ms": 5000}),
+        json!({"action": "refresh", "name": "mcp_docs", "timeout_ms": 5000}),
     );
     assert!(err, "refresh.timeout_ms must be refused: {ref_bad}");
 
     // Unknown tool inspect & call refused
-    let (err, _) = mcp.call_tool("desktop_mcp_tool_inspect", json!({"name": "microsoft_learn:unknown"}));
+    let (err, _) = mcp.call_tool("desktop_mcp_tool_inspect", json!({"name": "mcp_docs:unknown"}));
     assert!(err);
-    let (err, _) = mcp.call_tool("desktop_mcp_tool_call", json!({"name": "microsoft_learn:unknown"}));
+    let (err, _) = mcp.call_tool("desktop_mcp_tool_call", json!({"name": "mcp_docs:unknown"}));
     assert!(err);
+
+    // Web MCP manage must refuse add_stdio proposals
+    let (err, add_stdio_web) = mcp.call_tool(
+        "desktop_mcp_manage",
+        json!({
+            "action": "add_stdio",
+            "name": "web_stdio_attempt",
+            "executable": bin().to_str().unwrap(),
+            "executable_sha256": sha256_file(&bin()),
+            "args": ["stdio"]
+        }),
+    );
+    assert!(err, "add_stdio from Web MCP must be refused: {add_stdio_web}");
+
+    // CLI mcp.json import: invalid-only file exits non-zero without echoing secrets or URLs
+    let bad_import_path = sb.path().join("bad-mcp.json");
+    let bad_arg_secret = "secret_cli_inline_arg_998877";
+    let bad_sse_url = "https://sse-private.example.invalid/stream";
+    fs::write(
+        &bad_import_path,
+        serde_json::to_vec_pretty(&json!({
+            "mcpServers": {
+                "rel_srv": {
+                    "command": "npx",
+                    "args": ["-y", "example-mcp"]
+                },
+                "secret_arg_srv": {
+                    "command": bin().to_str().unwrap(),
+                    "args": [format!("--api-key={bad_arg_secret}")]
+                },
+                "sse_srv": {
+                    "type": "sse",
+                    "url": bad_sse_url
+                }
+            }
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let bad_import = Command::new(bin())
+        .args([
+            "extensions",
+            "import",
+            settings.to_str().unwrap(),
+            bad_import_path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("run extensions import bad");
+    assert!(!bad_import.status.success(), "import with nothing queued must exit non-zero");
+    let bad_stdout = String::from_utf8_lossy(&bad_import.stdout);
+    let bad_stderr = String::from_utf8_lossy(&bad_import.stderr);
+    assert!(!bad_stdout.contains(bad_arg_secret) && !bad_stderr.contains(bad_arg_secret));
+    assert!(!bad_stdout.contains(bad_sse_url) && !bad_stderr.contains(bad_sse_url));
+    let bad_report: Value = serde_json::from_str(&bad_stdout).expect("bad import json report");
+    assert_eq!(bad_report["proposals"].as_array().unwrap().len(), 0);
+    assert_eq!(bad_report["refused"].as_array().unwrap().len(), 3);
+
+    // CLI mcp.json import: valid URL entry queues inert add proposal and drops header secret value
+    let good_import_path = sb.path().join("good-mcp.json");
+    let raw_header_secret = "cli_imported_header_secret_554433";
+    let imported_url = "https://imported-upstream.example.invalid/mcp";
+    fs::write(
+        &good_import_path,
+        serde_json::to_vec_pretty(&json!({
+            "mcpServers": {
+                "imported_http": {
+                    "type": "streamable-http",
+                    "url": imported_url,
+                    "headers": {
+                        "X-Api-Key": raw_header_secret
+                    }
+                },
+                "skipped_disabled": {
+                    "disabled": true,
+                    "url": "https://disabled.example.invalid/mcp"
+                }
+            }
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let good_import = Command::new(bin())
+        .args([
+            "extensions",
+            "import",
+            settings.to_str().unwrap(),
+            good_import_path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("run extensions import good");
+    assert!(good_import.status.success(), "valid import failed: {:?}", good_import);
+    let good_stdout = String::from_utf8_lossy(&good_import.stdout);
+    assert!(!good_stdout.contains(raw_header_secret));
+    assert!(!good_stdout.contains(imported_url));
+    let good_report: Value = serde_json::from_str(&good_stdout).expect("good import json report");
+    assert_eq!(good_report["configuration_changed"], false);
+    assert_eq!(good_report["operator_decision_required"], true);
+    assert_eq!(good_report["proposals"].as_array().unwrap().len(), 1);
+    assert_eq!(good_report["proposals"][0]["name"], "imported_http");
+    assert_eq!(good_report["proposals"][0]["kind"], "add");
+    assert_eq!(good_report["proposals"][0]["literal_value_dropped"], true);
+    let admin_journal_raw = fs::read_to_string(settings.join(".extensions-admin.json")).unwrap();
+    assert!(!admin_journal_raw.contains(raw_header_secret));
 
     assert_eq!(mcp.close(), 0);
 }
@@ -609,6 +720,44 @@ fn stdio_process_tools_confinement_and_shell_gap_regressions() {
 #[cfg(windows)]
 fn has_installed_chrome() -> bool {
     Path::new(r"C:\Program Files\Google\Chrome\Application\chrome.exe").is_file()
+}
+
+/// `extensions import` options come in `--inherit-path <server>` pairs.
+#[test]
+fn extensions_import_refuses_malformed_inherit_path_options() {
+    let sb = TempSandbox::new("import-options");
+    let settings = sb.path().join("settings");
+    let mcp = sb.path().join("mcp.json");
+    for options in [&["--inherit-path"][..], &["--inherit"; 2][..], &["--inherit-path", "a", "--bogus"][..]] {
+        let out = Command::new(bin())
+            .args(["extensions", "import", settings.to_str().unwrap(), mcp.to_str().unwrap()])
+            .args(options)
+            .output()
+            .expect("extensions import");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(!out.status.success(), "{options:?}");
+        assert!(stderr.contains("[--inherit-path <stdio-server>]"), "{options:?}: {stderr}");
+    }
+    assert!(!settings.exists());
+}
+
+/// 2.0.0 documented `--local-learn-url`; 2.x keeps parsing it, warns that
+/// it is deprecated, and still admits only an exact Learn URL.
+#[test]
+fn deprecated_learn_reader_option_is_still_parsed() {
+    let sb = TempSandbox::new("learn-compat");
+    let (ws, db, _) = init_env(&sb);
+    let out = Command::new(bin())
+        .args(["stdio", db.to_str().unwrap(), "--workspace", ws.to_str().unwrap(),
+            "--local-learn-url", "https://example.com/"])
+        .stdin(std::process::Stdio::null())
+        .output()
+        .expect("stdio with --local-learn-url");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(), "a non-Learn URL must be refused: {stderr}");
+    assert!(stderr.contains("--local-learn-url is deprecated since 2.1.0"), "{stderr}");
+    assert!(stderr.contains("BRIDGE_LEARN_BROWSER_DENIED"), "{stderr}");
+    assert!(!stderr.contains("agent-bridge start ["), "the option must not fall back to usage: {stderr}");
 }
 
 #[cfg(windows)]

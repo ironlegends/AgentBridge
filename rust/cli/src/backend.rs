@@ -406,6 +406,7 @@ pub(crate) fn parse_cli(args: &[OsString]) -> Result<WorkstationConfig, BackendE
                     }
                     Some("--local-learn-url") if local_learn_url.is_none()
                         && local_doc_pages.is_empty() && local_chrome_pages.is_empty()=>{
+                        crate::warn_deprecated("--local-learn-url");
                         local_learn_url=Some(rest.next().and_then(|v|v.to_str())
                             .ok_or(USAGE)?.to_owned());
                     }
@@ -415,6 +416,7 @@ pub(crate) fn parse_cli(args: &[OsString]) -> Result<WorkstationConfig, BackendE
                             .ok_or(USAGE)?.to_owned());
                     }
                     Some("--local-chrome-origin") if local_chrome_origins.len()<4=>{
+                        crate::warn_deprecated("--local-chrome-origin");
                         local_chrome_origins.push(rest.next().and_then(|v|v.to_str())
                             .ok_or(USAGE)?.to_owned());
                     }

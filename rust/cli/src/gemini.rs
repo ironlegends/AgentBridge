@@ -1,9 +1,12 @@
 use crate::runtime::{self, Router as MissionRouter, RuntimeError, WebWorkstationCapabilities};
 use crate::session_profile::ProfileControl;
 use crate::operation_admission::OperationAdmission;
+use crate::request_audit::{ErrorCode, RequestAudit, RequestDetails, RequestObservation};
 use agent_bridge_desktop::DesktopProfile;
+use agent_bridge_http::modern::{response_status, ResponseMetadata};
 use agent_bridge_oauth_server::{
-    Audience, CapabilityIdentity, ConnectorClient, HttpAction, HttpRequest, OAuthConfig, OAuthServer,
+    Audience, AuthorizedIdentity, CapabilityIdentity, ConnectorClient, HttpAction, HttpRequest,
+    OAuthConfig, OAuthServer,
 };
 use axum::body::{to_bytes, Body};
 use axum::extract::{Request, State};
@@ -52,6 +55,8 @@ fn response_body(text:String,permit:Option<tokio::sync::OwnedSemaphorePermit>)->
 struct Gateway {
     oauth: Arc<Mutex<OAuthServer>>,
     router: Arc<MissionRouter>,
+    legacy_catalogue_sha256: Arc<str>,
+    request_audit: Arc<RequestAudit>,
     unified: Option<Arc<UnifiedRoute>>,
     audience: Audience,
     expected_resource: Option<String>,
@@ -60,6 +65,23 @@ struct Gateway {
     requests: Arc<Semaphore>,
     effects: OperationAdmission,
     extension_guard: Option<ExtensionGuard>,
+}
+
+impl Gateway {
+    fn observe_identity(&self, audit: &RequestDetails, identity: &AuthorizedIdentity) {
+        let digest = match &identity.capability {
+            CapabilityIdentity::Legacy => Some(self.legacy_catalogue_sha256.as_ref()),
+            CapabilityIdentity::UnifiedV1 { catalogue_sha256, .. } => self.unified.as_ref()
+                .filter(|route| route.identity == identity.capability)
+                .map(|_| catalogue_sha256.as_str()),
+        };
+        audit.observe_identity(identity, digest);
+    }
+}
+
+fn router_catalogue_digest(router: &MissionRouter) -> Result<Arc<str>, RuntimeError> {
+    let catalogue: Vec<_> = router.published_tools().into_iter().cloned().collect();
+    Ok(crate::capability_manifest::catalogue_digest(&catalogue)?.into())
 }
 
 /// Request admission owns the gateway clone until all its resources have
@@ -73,6 +95,25 @@ struct AdmittedRequest<T> {
 fn reply(status: StatusCode, text: &'static str) -> Response {
     Response::builder().status(status).header("cache-control", "no-store")
         .header("x-content-type-options","nosniff").body(Body::from(text)).expect("fixed HTTP response")
+}
+
+fn refuse(audit: &RequestDetails, status: StatusCode, code: &'static str, text: &'static str) -> Response {
+    audit.refuse(ErrorCode::Named(code));
+    reply(status, text)
+}
+
+fn oauth_refusal_code(body: &[u8]) -> &'static str {
+    let body = serde_json::from_slice::<Value>(body).ok();
+    match body.as_ref().and_then(|value| value.get("error")).and_then(Value::as_str) {
+        Some("invalid_token") => "invalid_token",
+        Some("request_limit") => "request_limit",
+        Some("invalid_request") => "invalid_request",
+        Some("origin_refused") => "origin_refused",
+        Some("not_found") => "not_found",
+        Some("connector_busy") => "connector_busy",
+        Some("oauth_state_uncertain") => "oauth_state_uncertain",
+        _ => "oauth_refused",
+    }
 }
 
 fn header<'a>(headers: &'a HeaderMap, name: &str) -> Result<Option<&'a str>, ()> {
@@ -121,55 +162,86 @@ fn adapt_chatgpt_file_read_result(frame: &str, routed: &str) -> Option<String> {
 }
 
 async fn handle(State(app): State<Gateway>, request: Request) -> Response {
-    let Ok(permit) = app.requests.clone().try_acquire_owned() else { return reply(StatusCode::SERVICE_UNAVAILABLE,"busy"); };
+    let is_mcp = request.uri().path() == "/mcp";
+    let observation = RequestObservation::new(is_mcp.then(|| Arc::clone(&app.request_audit)));
+    let response = handle_request(app, request, is_mcp, observation.details()).await;
+    observation.complete(response.status());
+    response
+}
+
+async fn handle_request(app: Gateway, request: Request, is_mcp: bool, audit: &RequestDetails) -> Response {
+    let Ok(permit) = app.requests.clone().try_acquire_owned() else {
+        return refuse(audit, StatusCode::SERVICE_UNAVAILABLE, "request_capacity_busy", "busy");
+    };
     let admitted = AdmittedRequest { state: app, _permit: permit };
     let app = &admitted.state;
     let (parts, body) = request.into_parts();
     let target = parts.uri.path_and_query().map(|p| p.as_str()).unwrap_or("/");
     if parts.uri.authority().is_some() || parts.uri.scheme().is_some() ||
         !matches!(header(&parts.headers,"host"),Ok(Some(h)) if h.eq_ignore_ascii_case(&app.public_host) || h == app.loopback_host) {
-        return reply(StatusCode::FORBIDDEN,"host refused");
+        return refuse(audit, StatusCode::FORBIDDEN, "host_refused", "host refused");
     }
     let limit = if target == "/mcp" { 1024 * 1024 } else { 64 * 1024 };
     let bytes = match tokio::time::timeout(Duration::from_secs(10),to_bytes(body,limit)).await {
         Ok(Ok(b)) => b,
-        Ok(Err(_)) => return reply(StatusCode::PAYLOAD_TOO_LARGE,"invalid or oversized body"),
-        Err(_) => return reply(StatusCode::REQUEST_TIMEOUT,"body timed out"),
+        Ok(Err(_)) => return refuse(audit, StatusCode::PAYLOAD_TOO_LARGE,
+            "invalid_or_oversized_body", "invalid or oversized body"),
+        Err(_) => return refuse(audit, StatusCode::REQUEST_TIMEOUT,
+            "body_timeout", "body timed out"),
     };
+    let worker_audit = audit.clone();
     tokio::task::spawn_blocking(move || {
         let admitted = admitted;
+        let audit = &worker_audit;
         let app = &admitted.state;
         let Ok(_effect)=app.effects.begin() else {
-            return reply(StatusCode::SERVICE_UNAVAILABLE,"workstation is stopping");
+            return refuse(audit, StatusCode::SERVICE_UNAVAILABLE, "workstation_stopping", "workstation is stopping");
         };
+        audit.observe_frame(&bytes);
         let (Ok(auth),Ok(origin),Ok(content_type)) = (header(&parts.headers,"authorization"),
             header(&parts.headers,"origin"),header(&parts.headers,"content-type")) else {
-            return reply(StatusCode::BAD_REQUEST,"invalid HTTP headers");
+            return refuse(audit, StatusCode::BAD_REQUEST, "invalid_http_headers", "invalid HTTP headers");
         };
-        let Ok(mut oauth) = app.oauth.lock() else { return reply(StatusCode::SERVICE_UNAVAILABLE,"OAuth unavailable"); };
+        let Ok(mut oauth) = app.oauth.lock() else {
+            return refuse(audit, StatusCode::SERVICE_UNAVAILABLE, "oauth_unavailable", "OAuth unavailable");
+        };
         let target = parts.uri.path_and_query().map(|p|p.as_str()).unwrap_or("/");
         let action = oauth.handle_http(HttpRequest {method:parts.method.as_str(),target,authorization:auth,
             origin,content_type,body:&bytes});
         match action {
             HttpAction::Reply(output) => {
+                if is_mcp {
+                    let code = oauth_refusal_code(&output.body);
+                    // The limiter can reject a valid client before returning McpAuthorized.
+                    if output.status == 429 && code == "request_limit" {
+                        if let Ok(identity) = oauth.authorize_mcp(auth) {
+                            app.observe_identity(audit, &identity);
+                        }
+                    }
+                    audit.refuse(ErrorCode::Named(code));
+                }
                 let mut response = Response::builder().status(output.status);
                 for (name,value) in output.headers {
                     let (Ok(name),Ok(value)) = (HeaderName::try_from(name),HeaderValue::try_from(value)) else {
-                        return reply(StatusCode::INTERNAL_SERVER_ERROR,"invalid OAuth response");
+                        return refuse(audit, StatusCode::INTERNAL_SERVER_ERROR, "invalid_oauth_response", "invalid OAuth response");
                     };
                     response = response.header(name,value);
                 }
-                response.body(Body::from(output.body)).unwrap_or_else(|_|reply(StatusCode::INTERNAL_SERVER_ERROR,"invalid OAuth response"))
+                response.body(Body::from(output.body)).unwrap_or_else(|_|refuse(
+                    audit, StatusCode::INTERNAL_SERVER_ERROR, "invalid_oauth_response", "invalid OAuth response"))
             }
             HttpAction::McpAuthorized(first) => {
+                app.observe_identity(audit, &first);
                 if parts.method != axum::http::Method::POST {
-                    return reply(StatusCode::METHOD_NOT_ALLOWED,"use POST for MCP requests");
+                    return refuse(audit, StatusCode::METHOD_NOT_ALLOWED, "post_required", "use POST for MCP requests");
                 }
                 if parts.headers.contains_key("last-event-id") || !content_type.is_some_and(|ct|
                     ct.split(';').next().is_some_and(|s|s.trim().eq_ignore_ascii_case("application/json"))) {
-                    return reply(StatusCode::BAD_REQUEST,"invalid MCP content or replay request");
+                    return refuse(audit, StatusCode::BAD_REQUEST, "invalid_mcp_content_or_replay", "invalid MCP content or replay request");
                 }
-                let Ok(frame) = std::str::from_utf8(&bytes) else { return reply(StatusCode::BAD_REQUEST,"invalid MCP payload"); };
+                let Ok(frame) = std::str::from_utf8(&bytes) else {
+                    return refuse(audit, StatusCode::BAD_REQUEST, "invalid_mcp_payload", "invalid MCP payload");
+                };
                 if first.audience != app.audience
                     || first.scope != "mcp"
                     || app.expected_resource.as_ref().is_some_and(|wanted| wanted != &first.resource)
@@ -177,7 +249,7 @@ async fn handle(State(app): State<Gateway>, request: Request) -> Response {
                         current == first && current.audience == app.audience
                         && app.expected_resource.as_ref().is_none_or(|wanted| wanted == &current.resource))
                 {
-                    return reply(StatusCode::UNAUTHORIZED,"authorization expired or revoked");
+                    return refuse(audit, StatusCode::UNAUTHORIZED, "authorization_expired_or_revoked", "authorization expired or revoked");
                 }
                 // Select the complete immutable view while authorization is
                 // still verified. A shared name never borrows another view's
@@ -185,7 +257,7 @@ async fn handle(State(app): State<Gateway>, request: Request) -> Response {
                 let unified = if first.capability.is_legacy() { None } else {
                     let Some(selected) = app.unified.as_ref().filter(|selected|
                         app.audience == Audience::Workstation && selected.identity == first.capability)
-                    else { return reply(StatusCode::UNAUTHORIZED,"capability unavailable"); };
+                    else { return refuse(audit, StatusCode::UNAUTHORIZED, "capability_unavailable", "capability unavailable"); };
                     Some(Arc::clone(selected))
                 };
                 // Authorization applies to this admitted request. No slow
@@ -194,9 +266,9 @@ async fn handle(State(app): State<Gateway>, request: Request) -> Response {
                 let (router, extension_guard, response_limit, response_permit) =
                     if let Some(selected) = unified.as_ref() {
                         let Ok(permit) = selected.response_permits.clone().try_acquire_owned()
-                        else { return reply(StatusCode::SERVICE_UNAVAILABLE,"unified response capacity busy"); };
+                        else { return refuse(audit, StatusCode::SERVICE_UNAVAILABLE, "response_capacity_busy", "unified response capacity busy"); };
                         if (selected.manifest_guard)().is_err() {
-                            return reply(StatusCode::FORBIDDEN,"unified capability authority changed");
+                            return refuse(audit, StatusCode::FORBIDDEN, "capability_authority_changed", "unified capability authority changed");
                         }
                         (&selected.router, &selected.extension_guard, 48 * 1024 * 1024, Some(permit))
                     } else {
@@ -210,9 +282,23 @@ async fn handle(State(app): State<Gateway>, request: Request) -> Response {
                         || !runtime::workstation_extension_authority(&guard.settings)
                             .is_ok_and(|current|current==guard.authority)
                     {
-                        return reply(StatusCode::FORBIDDEN,"workstation extension authority changed");
+                        return refuse(audit, StatusCode::FORBIDDEN, "extension_authority_changed", "workstation extension authority changed");
                     }
                 }
+                // Modern routing headers must agree with the authorized body
+                // before dispatch. Legacy requests keep their behavior.
+                let modern = match agent_bridge_http::modern::preflight(&parts.headers, frame) {
+                    agent_bridge_http::modern::Preflight::Legacy => false,
+                    agent_bridge_http::modern::Preflight::Modern => true,
+                    agent_bridge_http::modern::Preflight::Reject(status, body) => {
+                        let code = ResponseMetadata::read(&body).error_code.map(ErrorCode::Rpc)
+                            .unwrap_or(ErrorCode::Named("mcp_preflight_refused"));
+                        audit.refuse(code);
+                        return Response::builder()
+                            .status(status).header("content-type","application/json").header("cache-control","no-store")
+                            .body(Body::from(body)).expect("fixed MCP refusal");
+                    }
+                };
                 let routed = router.handle_str(frame);
                 let routed = if app.audience == Audience::Workstation
                     && first.provider == ConnectorClient::ChatGpt
@@ -224,15 +310,25 @@ async fn handle(State(app): State<Gateway>, request: Request) -> Response {
                     routed
                 };
                 match routed {
-                    Some(result) if result.len() <= response_limit => Response::builder().status(200)
-                        .header("content-type","application/json").header("cache-control","no-store")
-                        .body(response_body(result,response_permit)).expect("fixed MCP response"),
-                    Some(_) => reply(StatusCode::INTERNAL_SERVER_ERROR,"MCP response exceeds limit"),
-                    None => reply(StatusCode::ACCEPTED,""),
+                    Some(result) if result.len() <= response_limit => {
+                        let metadata = ResponseMetadata::read(&result);
+                        let status = if modern { response_status(&result) } else { StatusCode::OK };
+                        let response = Response::builder().status(status)
+                            .header("content-type","application/json").header("cache-control","no-store")
+                            .body(response_body(result,response_permit)).expect("fixed MCP response");
+                        audit.routed(metadata);
+                        response
+                    }
+                    Some(_) => refuse(audit, StatusCode::INTERNAL_SERVER_ERROR, "response_exceeds_limit", "MCP response exceeds limit"),
+                    None => {
+                        audit.routed(ResponseMetadata::default());
+                        reply(StatusCode::ACCEPTED,"")
+                    }
                 }
             }
         }
-    }).await.unwrap_or_else(|_|reply(StatusCode::INTERNAL_SERVER_ERROR,"request interrupted"))
+    }).await.unwrap_or_else(|_|refuse(audit, StatusCode::INTERNAL_SERVER_ERROR,
+        "request_interrupted", "request interrupted"))
 }
 
 pub fn serve(database: &Path, state: &Path, origin: &str, port: u16) -> Result<(),RuntimeError> {
@@ -243,7 +339,11 @@ pub fn serve(database: &Path, state: &Path, origin: &str, port: u16) -> Result<(
         let listener = agent_bridge_http::bind_loopback(port).await?;
         let oauth = OAuthServer::open(OAuthConfig {state_dir:state.to_owned(),public_origin:origin.to_owned(),audience:Audience::Missions})?;
         let missions = runtime::missions(database)?;
+        // This listener's audit ring is reserved for local diagnostics in issue #160.
+        let request_audit = Arc::new(RequestAudit::new()?);
+        let legacy_catalogue_sha256 = router_catalogue_digest(&missions)?;
         let app = Gateway { oauth:Arc::new(Mutex::new(oauth)),router:Arc::new(missions),
+            legacy_catalogue_sha256, request_audit,
             audience:Audience::Missions,expected_resource:None,
             public_host,loopback_host:format!("127.0.0.1:{port}"),requests:Arc::new(Semaphore::new(32)),
             effects:OperationAdmission::default(),
@@ -394,9 +494,13 @@ pub fn serve_project_reads(
         // Only the authorization boundary is strengthened; never bind a
         // public network adapter or advertise anonymous workspace tools.
         let listener=agent_bridge_http::bind_loopback(port).await?;
+        // This listener's audit ring is reserved for local diagnostics in issue #160.
+        let request_audit = Arc::new(RequestAudit::new()?);
+        let legacy_catalogue_sha256 = router_catalogue_digest(&reader)?;
         let app=Gateway{
             oauth:Arc::new(Mutex::new(oauth)),
             router:Arc::new(reader),
+            legacy_catalogue_sha256, request_audit,
             audience:Audience::Workstation,
             expected_resource:Some(resource),
             public_host:host,
@@ -1187,8 +1291,11 @@ pub(crate) async fn prepare_workstation(mut request: WorkstationStart<'_>) -> Re
     let listener=agent_bridge_http::bind_loopback(request.port).await?;
     let requests = Arc::new(Semaphore::new(32));
     let effects=OperationAdmission::default();
+    let request_audit = Arc::new(RequestAudit::new()?);
+    let legacy_catalogue_sha256 = router_catalogue_digest(&tools)?;
     let app=Gateway{
         oauth:Arc::clone(&oauth),router:Arc::new(tools), unified,
+        legacy_catalogue_sha256, request_audit: Arc::clone(&request_audit),
         audience:Audience::Workstation,expected_resource:Some(resource),
         public_host,loopback_host:format!("127.0.0.1:{}",request.port),
         requests:Arc::clone(&requests),
@@ -1208,6 +1315,7 @@ pub(crate) async fn prepare_workstation(mut request: WorkstationStart<'_>) -> Re
         project: Some(qualified),
         open_browser: request.ui_open,
         capability_selection: Some(capability_selection),
+        request_audit: Some(request_audit),
     };
     Ok(PreparedWorkstation {
         listener: Some(listener), requests, effects, service, profile: active_profile, database,
@@ -1366,3 +1474,5 @@ mod tests {
 #[cfg(test)]
 #[path = "capability_route_tests.rs"]
 mod capability_route_tests;
+#[cfg(all(test, windows, feature = "qualification"))]
+pub(crate) use capability_route_tests::assert_audited_unified_status;

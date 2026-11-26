@@ -1,6 +1,9 @@
-# Windows RC Attribution and Toolchain Record
+# Windows 2.0 Attribution and Toolchain Record
 
-This record covers the `2.0.0-rc.1` Rust CLI candidate for `x86_64-pc-windows-msvc`. It records the files retained and the explicit packaging review decisions. It does not relicense third-party code or replace the terms shipped with each dependency.
+This historical record covers the `2.0.0-rc.1` Rust CLI candidate and the
+`2.0.0` desktop release for `x86_64-pc-windows-msvc`. The counted inventories
+below belong to those builds. The `2.1.0` inventory is regenerated at release.
+This record documents the files retained and the explicit packaging review decisions. It does not relicense third-party code or replace the terms shipped with each dependency.
 
 ## Compiler and standard-library provenance
 
@@ -20,7 +23,7 @@ The installed minimal sysroot omits that document, so packaging uses the existin
 
 ## Dependency notice inventory
 
-The final locked, offline Windows metadata closure contains 192 packages, including 179 third-party packages. The corrected collector retains **343 notice files**, and the packaging verifier checked all 343 file hashes. It reports zero automatic blocking anomalies and the 12 explicit review items below.
+The locked, offline Windows CLI metadata closure for `2.0.0-rc.1` contains 192 packages, including 179 third-party packages. The corrected collector retains **343 notice files**, and the packaging verifier checked all 343 file hashes. It reports zero automatic blocking anomalies and the 12 explicit review items below.
 
 The inventory includes the normal and build dependency closure. It is not a claim that every package contributes executable bytes to the final binary.
 
@@ -87,7 +90,7 @@ The source archive includes the collector and its regression tests. CI runs both
 
 ## Windows desktop dependency notices
 
-The independent desktop workspace is resolved with locked, offline Cargo metadata
+The `2.0.0` desktop workspace was resolved with locked, offline Cargo metadata
 for `x86_64-pc-windows-msvc`. Its reviewed inventory contains 366 packages and
 685 notice records. The inventory is a normal/build dependency closure, not a
 claim that every dependency contributes bytes to the executable.
@@ -132,7 +135,7 @@ the corresponding crates contain no prebuilt executable or library members.
 The WebView2 binding additionally requires the verified SDK notices described above.
 
 The packager must acknowledge only the exact reviewed keys emitted by the
-collector. The Windows desktop inventory currently has 17 such keys:
+collector. The reviewed Windows desktop inventory has 17 such keys:
 the twelve original CLI review keys, the four Tauri and plugin native-link
 keys (`tauri@2.12.7`, `tauri-plugin-dialog@2.8.4`,
 `tauri-plugin-fs@2.7.1`, `tauri-plugin-opener@2.7.3`), and

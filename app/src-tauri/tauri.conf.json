@@ -1,7 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Agent Bridge",
-  "version": "2.0.0",
   "identifier": "io.github.ironlegends.agentbridge",
   "build": {
     "frontendDist": "../ui"

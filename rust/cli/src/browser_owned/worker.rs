@@ -1,16 +1,27 @@
+#[cfg(windows)]
 use super::wire::FrameDecoder;
+#[cfg(windows)]
 use crate::owned_children::{ChildExit, ChildSpec, OwnedChild};
+#[cfg(windows)]
 use crate::runtime::RuntimeError;
 use serde_json::{json, Value};
+#[cfg(windows)]
 use std::fs::{File, OpenOptions};
+#[cfg(windows)]
 use std::io::{self, Write};
+#[cfg(windows)]
 use std::path::Path;
+#[cfg(windows)]
 use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(windows)]
 use std::sync::Arc;
+#[cfg(windows)]
 use std::time::{Duration, Instant};
 
+#[cfg(windows)]
 pub(super) const REQUEST_LIMIT: usize = 1024 * 1024;
 pub(super) const RESPONSE_LIMIT: usize = 48 * 1024 * 1024;
+#[cfg(windows)]
 const DIAGNOSTIC_LIMIT: u64 = 256 * 1024;
 
 #[derive(Debug)]
@@ -66,6 +77,7 @@ fn admitted_mutation(params: &Value) -> Option<Option<Mutation>> {
     Some(mutation)
 }
 
+#[cfg(windows)]
 pub(super) struct Worker {
     child: OwnedChild,
     next: u64,
@@ -80,6 +92,7 @@ pub(super) struct Worker {
     pub exit: Option<ChildExit>,
 }
 
+#[cfg(windows)]
 impl Worker {
     pub(super) fn spawn(spec: &ChildSpec, directory: &Path, cancel: Arc<AtomicBool>) -> Result<Self, RuntimeError> {
         let diagnostics = OpenOptions::new().create_new(true).write(true).open(directory.join("diagnostic.jsonl"))?;
@@ -453,6 +466,18 @@ mod tests {
         let reserved=round2_reservation();
         let reply=validate_reply(json!({"v":2,"id":"r7","ok":true,"result":round2_view("p1"),"receipt":round2_receipt("act","p1")}),"r7","act",&json!({"reservation_id":reserved.id}),Some("s1"),Some(&reserved));
         assert!(reply.is_err(),"a completed admitted download without descriptor cannot be successful");
+
+        let descriptor = round2_download();
+        let result = round2_view("p1");
+        let mut receipt = round2_receipt("act", "p1");
+        receipt["download"] = descriptor.clone();
+        let reply = validate_reply(
+            json!({"v":2,"id":"r7","ok":true,"result":result,"receipt":receipt}),
+            "r7", "act", &json!({"reservation_id":reserved.id}), Some("s1"), Some(&reserved),
+        ).unwrap();
+        assert_eq!(reply.result, result);
+        assert_eq!(reply.receipt, receipt);
+        assert_eq!(reply.download.unwrap().into_value(), descriptor);
     }
     #[test]
     fn round2_snapshot_checks_the_requested_page_and_image_policy() {
