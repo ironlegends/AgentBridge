@@ -4,7 +4,7 @@
 
 [![Release](https://img.shields.io/github/v/release/ironlegends/AgentBridge)](https://github.com/ironlegends/AgentBridge/releases)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue)](LICENSE)
-[![Windows](https://img.shields.io/badge/Windows-x64%20stable-blue)](docs/RELEASE-v2.0.0.md)
+[![Windows](https://img.shields.io/badge/Windows-x64%20stable-blue)](docs/RELEASE-v2.1.0.md)
 
 Agent Bridge turns ChatGPT Web, Gemini Web, and other compatible AI chats into local coding and automation agents. Keep using the chat you already know while your AI works directly on your computer.
 
@@ -79,7 +79,7 @@ Permissions are controlled locally and cannot be escalated through MCP. Fully Un
 
 Built with Rust and Tauri, Agent Bridge offers a native desktop app and a headless CLI (build from source). The Windows unified catalogue exposes up to 46 MCP tools. The core runtime does not require a separately installed Node.js, Python or Electron runtime; the qualified Windows browser bundle includes its own pinned dependencies.
 
-Some desktop automation features are experimental. Restricted Low-IL processes are unsupported. The portable release is not Authenticode-signed and has no installer or automatic updater. See [release notes](docs/RELEASE-v2.0.0.md) for the supported scope.
+Some desktop automation features are experimental. Restricted Low-IL processes are unsupported. The portable release is not Authenticode-signed and has no installer or automatic updater. See [release notes](docs/RELEASE-v2.1.0.md) for the supported scope.
 
 ## Documentation
 

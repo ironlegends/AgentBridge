@@ -159,7 +159,7 @@ The legacy workstation file provider remains workspace-scoped. The unified 46-to
 Field rules:
 
 - `version` and `policy_version` must be `1`. Every digest is exactly 64 lowercase hexadecimal characters.
-- `catalogue_sha256` must match the executable catalogue. For the Windows unified catalogue in `2.0.0` and the `2.1.0` pre-releases it is `7603bc547b696a3c45e4cd3f5b0b98bbf0f51c9cad66bc31f5a75ae5259c349c`; any other value refuses startup with `UNIFIED_CATALOGUE_CHANGED`.
+- `catalogue_sha256` must match the executable catalogue. For the Windows unified catalogue in `2.0.0` and `2.1.0` it is `7603bc547b696a3c45e4cd3f5b0b98bbf0f51c9cad66bc31f5a75ae5259c349c`; any other value refuses startup with `UNIFIED_CATALOGUE_CHANGED`.
 - `file_scope` is one of `{"kind": "workspace"}`, `{"kind": "allowed-roots", "roots": ["<absolute directory>", ...]}` (1 to 32 distinct directories, none inside `private_root`, a protected root or a bundle) or `{"kind": "os-user"}`.
 - `allow_import` enables the historical `agent_bridge_task_import` tool; keep it `false` unless you need it. Import still requires an active write-capable mode.
 - Each `manifest_sha256` comes from the `release-manifest.json` at the root of the extracted desktop ZIP: `components.browser.manifest_sha256` for `browser`, and `components.native.manifest_sha256` for `windows` and `agent_desktop`.

@@ -103,4 +103,4 @@ The Linux preparation uses fresh root-private staging and APT configuration; it 
 
 The private executable is selected only by a scoped, thread-local guard compiled with `cfg(test)` on Unix. The production CLI and release binary contain no environment override. A requested invalid fixture fails instead of falling back, and separate tests keep checking the original system qualification and guard isolation. This qualifies the native transport against a real private Chrome installation; it does not claim the hosted image's unsafe system path is acceptable.
 
-CI sets `AGENT_BRIDGE_REQUIRE_NATIVE_CHROME=1` for Unix workspace tests. Missing or refused Chrome is then a failure, ensuring that an apparently green matrix cannot hide two locally skipped browser tests. See the current evidence and remaining release gates in [RELEASE-v2.0.0.md](RELEASE-v2.0.0.md).
+CI sets `AGENT_BRIDGE_REQUIRE_NATIVE_CHROME=1` for Unix workspace tests. Missing or refused Chrome is then a failure, ensuring that an apparently green matrix cannot hide two locally skipped browser tests. See the current evidence and remaining release gates in [RELEASE-v2.1.0.md](RELEASE-v2.1.0.md).
