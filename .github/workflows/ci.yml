@@ -36,7 +36,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
@@ -59,7 +59,7 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
 
       - name: Install Rust stable toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -160,6 +160,7 @@ jobs:
           $ciPass = [Convert]::ToHexString([System.Security.Cryptography.RandomNumberGenerator]::GetBytes(16)) + 'a9!'
           Write-Output "::add-mask::$ciPass"
           $ws = (Get-Location).Path
+          $debugDir = Join-Path $ws 'target\debug'
           $logFile = Join-Path $env:RUNNER_TEMP 'ab-win-tests.log'
           $runnerCmd = Join-Path $env:RUNNER_TEMP 'ab-run-tests.cmd'
 
@@ -186,9 +187,12 @@ jobs:
           set "RUSTUP_HOME=$rustupHome"
           set "PATH=$cargoHome\bin;%PATH%"
           set "CARGO_TERM_COLOR=never"
+          set "AGENT_BRIDGE_TEST_DEBUG_DIR=$debugDir"
           cd /d "$ws"
+          cargo build --locked -p agent-bridge --bin agent-bridge --example agent_bridge_process_fixture > "$logFile" 2>&1
+          if errorlevel 1 exit /b %ERRORLEVEL%
           rem Native Chrome fixtures share the Windows runner; their harness parallelism is not an assertion.
-          cargo test --locked --workspace -- --test-threads=1 > "$logFile" 2>&1
+          cargo test --locked --workspace -- --test-threads=1 >> "$logFile" 2>&1
           if errorlevel 1 exit /b %ERRORLEVEL%
           cargo test --locked --offline --manifest-path app/src-tauri/Cargo.toml >> "$logFile" 2>&1
           exit /b %ERRORLEVEL%
@@ -295,7 +299,7 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
 

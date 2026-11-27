@@ -315,8 +315,7 @@ mod windows_live_tests {
     /// `cargo test` builds the binary for the integration tests first.
     #[test]
     fn contained_stdio_extension_lists_the_real_bridge_catalog() {
-        let test = std::env::current_exe().unwrap();
-        let exe = test.parent().unwrap().parent().unwrap().join("agent-bridge.exe");
+        let exe = crate::test_process_fixture::debug_artifact("agent-bridge.exe");
         assert!(exe.is_file(), "missing {}", exe.display());
         let root = std::env::temp_dir().join(format!("ab-stdio-live-{}", std::process::id()));
         std::fs::create_dir_all(root.join("workspace")).unwrap();

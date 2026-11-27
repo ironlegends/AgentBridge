@@ -15,6 +15,9 @@ pub(super) fn after_copy_block(destination: &File) {
 fn task5_growing_source_never_writes_beyond_its_reserved_length() {
     let root = std::env::temp_dir().join(format!("bridge-growing-source-{}", Uuid::new_v4()));
     std::fs::create_dir(&root).unwrap();
+    // macOS can return /var as an alias of /private/var. Use the physical fixture path.
+    #[cfg(unix)]
+    let root = root.canonicalize().unwrap();
     let source_path = root.join("source.bin");
     std::fs::File::create(&source_path).unwrap().set_len(1024 * 1024).unwrap();
     let directory = open_filesystem_root(&root, false).unwrap();

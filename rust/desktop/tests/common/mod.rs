@@ -8,7 +8,11 @@ pub mod windows;
 pub struct Fixture { pub root: PathBuf, pub workspace: PathBuf, pub external: PathBuf, pub private: PathBuf }
 impl Fixture {
     pub fn new() -> Self {
-        let root = std::env::temp_dir().join(format!("bridge-unified-files-{}", uuid::Uuid::new_v4()));
+        let temp = std::env::temp_dir();
+        // macOS can supply /var through TMPDIR; qualify the physical fixture root.
+        #[cfg(unix)]
+        let temp = temp.canonicalize().unwrap();
+        let root = temp.join(format!("bridge-unified-files-{}", uuid::Uuid::new_v4()));
         let workspace = root.join("workspace");
         let external = root.join("external");
         let private = root.join("private");
