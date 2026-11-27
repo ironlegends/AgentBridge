@@ -395,7 +395,7 @@ impl Provider {
         let result = (|| {
             let reply = session.worker.rpc("init", init, Duration::from_millis(limit + 15_000))?;
             let value = &reply.result;
-            if value["protocol_version"] != 2 || value["playwright_version"] != "1.63.0" || value["node_version"] != "24.14.0"
+            if value["protocol_version"] != 2 || value["playwright_version"] != "1.65.1" || value["node_version"] != "24.14.0"
                 || value["worker_pid"].as_u64() != Some(u64::from(session.worker.child().root_pid())) || value["session_id"] != id {
                 return Err(Failure { error:json!({"code":"BROWSER_WORKER_HANDSHAKE_MISMATCH","message":"Owned browser handshake failed"}), transport:true,receipt:Some(reply.receipt),download:reply.download });
             }
@@ -747,7 +747,7 @@ const summary={session_id:cfg.id,headless:true,active:true,page_id:'p1',url:'abo
 for await(const req of readFrames(process.stdin)) {
  const receipt={operation:req.method,session_id:cfg.id,phase:'complete',completed_actions:0,failed_action_index:null,effect_uncertain:false,session_usable:true,upload_effect_started:false};
  let result,ok=true,error;
- if(req.method==='init')result={...summary,protocol_version:2,playwright_version:'1.63.0',node_version:process.versions.node,worker_pid:process.pid,session_usable:true};
+ if(req.method==='init')result={...summary,protocol_version:2,playwright_version:'1.65.1',node_version:process.versions.node,worker_pid:process.pid,session_usable:true};
  if(req.method==='reserve_act'){result={session_id:cfg.id,page_id:'p1',reservation_id:reservation,action_count:req.params.actions.length,upload_file_count:0};receipt.page_id='p1';receipt.reservation_id=reservation;}
  if(req.method==='snapshot'||req.method==='act'){
    Object.assign(receipt,{page_id:'p1',observation_page_id:'p1',browser_observation_id:observation});

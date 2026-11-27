@@ -45,7 +45,7 @@ test('real worker pipe dispatch controls only its own context and answers matchi
   const worker = await peer(t);
   const initialized = await worker.call('init', worker.init);
   assert.equal(initialized.ok, true);
-  assert.equal(initialized.result.playwright_version, '1.63.0');
+  assert.equal(initialized.result.playwright_version, '1.65.1');
   assert.equal(initialized.result.worker_pid, worker.child.pid);
   assert.equal((await worker.call('start', { url: `http://127.0.0.1:${server.address().port}` })).ok, true);
   const snapshot = await worker.call('snapshot', { screenshot: false });

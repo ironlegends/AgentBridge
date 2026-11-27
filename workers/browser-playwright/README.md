@@ -12,8 +12,8 @@ profile, auxiliary web service or installation step at application startup.
 | Component | Release | Provenance and verification |
 | --- | --- | --- |
 | Node.js | 24.14.0 win-x64 | Official nodejs.org ZIP and node.exe SHA-256 from SHASUMS256.txt |
-| playwright-core | 1.63.0 | Exact npm archive SHA-512 integrity in package-lock.json |
-| Chromium for Testing | 153.0.8010.12, Playwright revision 1243 | Distribution URL from this Playwright package's browsers.json/installer, exact archive SHA-256 |
+| playwright-core | 1.65.1 | Exact npm archive SHA-512 integrity in package-lock.json |
+| Chromium for Testing | 159.0.8154.6, Playwright revision 1255 | Distribution URL from this Playwright package's browsers.json/installer, exact archive SHA-256 |
 
 The fixed hashes are constants in `scripts/rust/package-browser-worker.py`.
 The build only accepts offline archives. It rejects traversal, case aliases,
@@ -25,8 +25,8 @@ The output must be a fresh directory; it never replaces an installed runtime.
 Obtain the three official archives at build time:
 
 * https://nodejs.org/dist/v24.14.0/node-v24.14.0-win-x64.zip
-* https://registry.npmjs.org/playwright-core/-/playwright-core-1.63.0.tgz
-* https://cdn.playwright.dev/builds/cft/153.0.8010.12/win64/chrome-win64.zip
+* https://registry.npmjs.org/playwright-core/-/playwright-core-1.65.1.tgz
+* https://cdn.playwright.dev/builds/cft/159.0.8154.6/win64/chrome-win64.zip
 
 Keep the Node release SHASUMS256.txt with build evidence. `npm ci --omit=dev
 --ignore-scripts --no-audit --no-fund` installs only the locked Playwright package

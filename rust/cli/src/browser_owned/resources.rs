@@ -138,9 +138,9 @@ impl Resources {
         let manifest: Manifest = serde_json::from_slice(&bytes)?;
         if manifest.schema_version != 1 || manifest.protocol_version != 2 || manifest.node.version != "24.14.0"
             || manifest.node.sha256 != "63c259c81e5d472b5f11c8d506070130cb04a1ecf84b80377a34ed6ec9048088"
-            || manifest.playwright.version != "1.63.0"
-            || manifest.playwright.sri != "sha512-rYCsBF/M5HjUch52bbtVONEFjv6Xu8sm8h72dNlR5bzIE1fvC/bxgspzkjSfU+MweEMmPM8KJebG6nnyxo5mCg=="
-            || manifest.browser.version != "153.0.8010.12" || manifest.browser.revision != "1243" {
+            || manifest.playwright.version != "1.65.1"
+            || manifest.playwright.sri != "sha512-hqPpz7blSMPxWVdoeE1yiBSzXsKiVOd2k+kjCvmUywD2GPO2Dd9HfcWnq9NN0GHbNZDFgZ9JfBFr+X5/BLo0qw=="
+            || manifest.browser.version != "159.0.8154.6" || manifest.browser.revision != "1255" {
             return Err("BROWSER_DEPENDENCY_PIN_MISMATCH".into());
         }
         if manifest.files.is_empty() || manifest.files.len() > 50_000 { return Err("BROWSER_MANIFEST_ENTRY_LIMIT".into()); }

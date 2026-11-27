@@ -40,7 +40,7 @@ async function dispatch(method, params) {
 }
 
 async function main() {
-  if (version !== '1.63.0' || !process.versions.node.startsWith('24.')) throw new BrowserError('DEPENDENCY_MISMATCH', 'Pinned Playwright and Node24 runtime are required');
+  if (version !== '1.65.1' || !process.versions.node.startsWith('24.')) throw new BrowserError('DEPENDENCY_MISMATCH', 'Pinned Playwright and Node24 runtime are required');
   process.stdin.once('end', () => { void revoke().catch(error => diagnostic('EOF_CLEANUP_FAILED', { type: error?.name ?? 'Error' })); });
   process.stdin.once('error', () => { void revoke().catch(() => undefined); });
   process.stdout.once('error', () => { void revoke().catch(() => undefined); });
