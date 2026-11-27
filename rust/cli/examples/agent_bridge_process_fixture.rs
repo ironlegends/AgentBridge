@@ -18,6 +18,7 @@ fn main() {
         "owned-protocol"=>protocol_fixture,
         "owned-heartbeat"=>owned_heartbeat_fixture,
         "owned-job-idle"=>owned_job_child_fixture,
+        "mcp-stall-fixture"=>mcp_stall_fixture,
         _=>{eprintln!("unknown subprocess fixture role");std::process::exit(2);}
     };
     std::thread::spawn(|| {
@@ -174,6 +175,87 @@ pub(super) fn owned_heartbeat_fixture() {
 
 pub(super) fn owned_job_child_fixture() {
     loop {thread::sleep(Duration::from_secs(1));}
+}
+
+pub(super) fn mcp_stall_fixture() {
+    let state_dir = std::env::args().nth(2).unwrap_or_else(|| {
+        eprintln!("missing state_dir");
+        std::process::exit(2);
+    });
+    let state_dir = Path::new(&state_dir);
+    let mut lines = std::io::stdin().lock().lines();
+    let mut stdout = std::io::stdout().lock();
+    while let Some(Ok(line)) = lines.next() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let Ok(req) = serde_json::from_str::<Value>(trimmed) else {
+            continue;
+        };
+        let Some(id) = req.get("id").cloned() else {
+            // Notification: ignore without replying.
+            continue;
+        };
+        let method = req.get("method").and_then(Value::as_str).unwrap_or("");
+        let resp = match method {
+            "server/discover" => json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "result": {
+                    "resultType": "complete",
+                    "supportedVersions": ["2026-07-28"],
+                    "capabilities": {"tools": {}},
+                    "ttlMs": 0,
+                    "cacheScope": "private"
+                }
+            }),
+            "tools/list" => {
+                if state_dir.join("stall-list").exists() {
+                    let _ = std::fs::write(state_dir.join("list-stalled.marker"), b"list-stalled\n");
+                    while let Some(Ok(_)) = lines.next() {}
+                    std::process::exit(0);
+                }
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "result": {
+                        "resultType": "complete",
+                        "ttlMs": 0,
+                        "cacheScope": "private",
+                        "tools": [{
+                            "name": "search_items",
+                            "description": "Simulated search",
+                            "inputSchema": {
+                                "type": "object",
+                                "properties": {"query": {"type": "string"}},
+                                "required": ["query"]
+                            }
+                        }]
+                    }
+                })
+            }
+            "tools/call" => {
+                if let Ok(mut f) = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(state_dir.join("calls.log"))
+                {
+                    let _ = writeln!(f, "call");
+                }
+                let _ = std::fs::write(state_dir.join("call-stalled.marker"), b"call-stalled\n");
+                while let Some(Ok(_)) = lines.next() {}
+                std::process::exit(0);
+            }
+            _ => json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "error": {"code": -32601, "message": "Method not found"}
+            }),
+        };
+        let _ = writeln!(stdout, "{resp}");
+        let _ = stdout.flush();
+    }
 }
 
 }

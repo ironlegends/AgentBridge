@@ -7,8 +7,9 @@
 //! thread runs only while the pool holds a session and closes each session
 //! idle longer than the bound. Dropping the pool closes every session.
 
-use crate::transport::Session;
-use std::collections::BTreeSet;
+use crate::transport::{CancellationToken, Session};
+use serde::Serialize;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use std::time::{Duration, Instant};
 
@@ -58,6 +59,15 @@ struct State {
     reaper: bool,
 }
 
+/// Redacted summary of pooled idle extension sessions (counts only).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+pub struct PoolSummary {
+    pub idle_sessions: usize,
+    pub stdio_idle_sessions: usize,
+    pub http_idle_sessions: usize,
+    pub per_server: BTreeMap<String, usize>,
+}
+
 /// Process-local reusable sessions. Attach one to a [`crate::Registry`] with
 /// `with_session_pool`; a registry without a pool opens one session per call.
 pub struct SessionPool {
@@ -84,6 +94,27 @@ impl SessionPool {
     /// Number of idle sessions held now.
     pub fn idle_sessions(&self) -> usize { self.state().entries.len() }
 
+    /// Redacted counts of currently pooled idle sessions by transport and server.
+    pub fn summary(&self) -> PoolSummary {
+        let state = self.state();
+        let mut summary = PoolSummary {
+            idle_sessions: state.entries.len(),
+            stdio_idle_sessions: 0,
+            http_idle_sessions: 0,
+            per_server: BTreeMap::new(),
+        };
+        for entry in &state.entries {
+            if entry.stdio {
+                summary.stdio_idle_sessions += 1;
+            } else {
+                summary.http_idle_sessions += 1;
+            }
+            let server = entry.key.split_once(':').map(|(name, _)| name).unwrap_or(&entry.key);
+            *summary.per_server.entry(server.to_owned()).or_insert(0) += 1;
+        }
+        summary
+    }
+
     /// Closes every idle session now. Closing waits outside the lock.
     pub fn close_all(&self) {
         let closed = Mutex::new(std::mem::take(&mut self.state().entries));
@@ -99,9 +130,11 @@ impl SessionPool {
     }
 
     /// Takes the idle session for `key`, if it has not expired.
-    pub(crate) fn take(&self, key: &str) -> Option<Session> {
+    pub(crate) fn take(&self, key: &str, cancel: Option<&CancellationToken>) -> Option<Session> {
         let (found, expired) = {
             let mut state = self.state();
+            // Check cancellation under the same lock that transfers ownership.
+            if cancel.is_some_and(CancellationToken::is_cancelled) { return None; }
             let expired = self.expire(&mut state);
             let found = state.entries.iter().position(|entry| entry.key == key)
                 .map(|index| state.entries.swap_remove(index).session);
@@ -113,10 +146,15 @@ impl SessionPool {
 
     /// Returns a healthy session after a confirmed reply. A second idle
     /// session for the same key is closed instead of kept.
-    pub(crate) fn put(self: &Arc<Self>, key: String, stdio: bool, session: Session) {
+    pub(crate) fn put(self: &Arc<Self>, key: String, stdio: bool, session: Session, cancel: Option<&CancellationToken>) {
         let spare = {
             let mut state = self.state();
-            if state.entries.iter().any(|entry| entry.key == key) {
+            // Reload cancels before evicting idle entries. A return before
+            // cancellation is evicted; a return after cancellation is refused.
+            // Never separate this check from insertion, including when a
+            // later generation reuses the exact same fingerprint.
+            if cancel.is_some_and(CancellationToken::is_cancelled)
+                || state.entries.iter().any(|entry| entry.key == key) {
                 Some(session)
             } else {
                 state.entries.push(Pooled { key, stdio, session, since: Instant::now() });
@@ -141,7 +179,7 @@ impl SessionPool {
     }
 
     /// Closes idle sessions whose server was removed, disabled or changed.
-    pub(crate) fn retain(&self, current: &BTreeSet<String>) {
+    pub(crate) fn retain(&self, current: &BTreeSet<String>) -> usize {
         let closed: Vec<Pooled> = {
             let mut state = self.state();
             let (keep, closed) = std::mem::take(&mut state.entries).into_iter()
@@ -149,7 +187,42 @@ impl SessionPool {
             state.entries = keep;
             closed
         };
-        drop(closed);
+        let count = closed.len();
+        if count > 0 {
+            let slot = Mutex::new(closed);
+            std::thread::scope(|scope| {
+                let _ = std::thread::Builder::new().name("extension-session-retain".into())
+                    .spawn_scoped(scope, || close_each(&slot));
+            });
+            close_each(&slot);
+        }
+        count
+    }
+
+    /// Closes all currently pooled idle sessions belonging to any server in `servers`.
+    pub fn close_servers(&self, servers: &BTreeSet<String>) -> usize {
+        if servers.is_empty() {
+            return 0;
+        }
+        let closed: Vec<Pooled> = {
+            let mut state = self.state();
+            let (drop_now, keep) = std::mem::take(&mut state.entries).into_iter().partition(|entry| {
+                let server = entry.key.split_once(':').map(|(name, _)| name).unwrap_or(&entry.key);
+                servers.contains(server)
+            });
+            state.entries = keep;
+            drop_now
+        };
+        let count = closed.len();
+        if count > 0 {
+            let slot = Mutex::new(closed);
+            std::thread::scope(|scope| {
+                let _ = std::thread::Builder::new().name("extension-server-close".into())
+                    .spawn_scoped(scope, || close_each(&slot));
+            });
+            close_each(&slot);
+        }
+        count
     }
 
     /// Removes the longest idle stdio session, which frees its slot once dropped.

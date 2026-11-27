@@ -24,9 +24,14 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 mod zip_import;
+mod operator_import;
 
 pub const TOOL_NAME: &str = "desktop_skill_manage";
 const REGISTRY_SCHEMA_VERSION: u64 = 1;
+// V2 is published only after an explicit operator import. Old readers must
+// refuse rather than silently ignore its source ownership or revocation.
+const OPERATOR_REGISTRY_SCHEMA_VERSION: u64 = 2;
+const OPERATOR_SOURCE: &str = "operator_approved_directory";
 const REGISTRY_FILE_NAME: &str = "registry.json";
 const LOCK_FILE_NAME: &str = ".skills.lock";
 const STAGING_DIR_NAME: &str = "staging";
@@ -415,6 +420,7 @@ impl SkillManager {
         let mut skills_out = Vec::new();
 
         for (skill_name, record) in &registry.skills {
+            if record.revoked { continue; }
             if let Some(target) = &filter_name {
                 if skill_name != target {
                     continue;
@@ -476,7 +482,7 @@ impl SkillManager {
         let name = require_skill_name(obj)?;
         let requested_version = optional_version(obj)?;
         let registry = self.load_registry()?;
-        let record = registry.skills.get(&name).ok_or_else(|| {
+        let record = registry.skills.get(&name).filter(|record| !record.revoked).ok_or_else(|| {
             SkillError::new(
                 SkillErrorCode::NotFound,
                 format!("skill '{}' is not installed", name),
@@ -521,7 +527,7 @@ impl SkillManager {
         let normalized_resource = resource_segments.join("/");
 
         let registry = self.load_registry()?;
-        let record = registry.skills.get(&name).ok_or_else(|| {
+        let record = registry.skills.get(&name).filter(|record| !record.revoked).ok_or_else(|| {
             SkillError::new(
                 SkillErrorCode::NotFound,
                 format!("skill '{}' is not installed", name),
@@ -641,7 +647,7 @@ impl SkillManager {
             )
         })?;
         let registry = self.load_registry()?;
-        let record = registry.skills.get(&name).ok_or_else(|| {
+        let record = registry.skills.get(&name).filter(|record| !record.revoked).ok_or_else(|| {
             SkillError::new(
                 SkillErrorCode::NotFound,
                 format!("skill '{}' is not installed", name),
@@ -714,6 +720,12 @@ impl SkillManager {
             }
         };
 
+        self.commit_loaded(loaded, activate)
+    }
+
+    // Shared publication path: the local-only importer supplies a validated
+    // in-memory package, never a second registry or an execution mechanism.
+    fn commit_loaded(&self, loaded: LoadedPackage, activate: bool) -> Result<Value, SkillError> {
         let _in_proc = self.in_process_lock.lock().map_err(|_| {
             SkillError::new(SkillErrorCode::LockTimeout, "in-process store mutex poisoned")
         })?;
@@ -721,6 +733,21 @@ impl SkillManager {
 
         let mut registry = self.load_registry()?;
         let now = now_epoch_s();
+        let approved_source = (loaded.source_kind == OPERATOR_SOURCE).then_some(loaded.source_ref.clone());
+        if let Some(record) = registry.skills.get(&loaded.name) {
+            if record.revoked || record.import_source != approved_source {
+                return Err(SkillError::new(SkillErrorCode::ValidationFailed,
+                    "Skill name is revoked or belongs to a different import source"));
+            }
+        }
+        if let Some(source) = &approved_source {
+            if registry.skills.iter().any(|(name, record)| name != &loaded.name
+                && record.import_source.as_ref() == Some(source)) {
+                return Err(SkillError::new(SkillErrorCode::ValidationFailed,
+                    "Approved import source already belongs to another skill name"));
+            }
+            registry.schema_version = OPERATOR_REGISTRY_SCHEMA_VERSION;
+        }
 
         let already_in_registry = registry
             .skills
@@ -742,7 +769,20 @@ impl SkillManager {
             }
         }
 
-        let manifest = loaded.to_manifest(now);
+        // Keep immutable provenance and the original installation timestamp
+        // even for an idempotent reimport or an orphan recovered after a crash.
+        let manifest = if already_in_registry ||
+            self.open_revision_dir(&loaded.name, &loaded.version).is_ok() {
+            let existing = self.verify_installed_revision(&loaded.name, &loaded.version)?;
+            if (existing.source_kind == OPERATOR_SOURCE) != approved_source.is_some()
+                || (approved_source.is_some() && existing.source_ref != loaded.source_ref) {
+                return Err(SkillError::new(SkillErrorCode::ValidationFailed,
+                    "Existing revision belongs to a different import source"));
+            }
+            existing
+        } else {
+            loaded.to_manifest(now)
+        };
 
         let entry = registry
             .skills
@@ -752,7 +792,22 @@ impl SkillManager {
                 activation_history: Vec::new(),
                 updated_at_epoch_s: now,
                 revisions: BTreeMap::new(),
+                import_source: approved_source,
+                revoked: false,
             });
+
+        // A replay of identical approved content is a no-op, not a new
+        // revision or activation-history entry.
+        if already_in_registry && (!activate || entry.active_version.as_deref() == Some(loaded.version.as_str())) {
+            return Ok(json!({
+                "ok":true,"action":"install","documentary_only":true,"execution_policy":"never_executed",
+                "name":loaded.name,"version":loaded.version,"declared_version":manifest.declared_version,
+                "already_installed":true,"activated":false,"active_version":entry.active_version,
+                "previous_version":entry.active_version,"file_count":manifest.file_count,
+                "total_bytes":manifest.total_bytes,"bundled_scripts":manifest.bundled_scripts,
+                "warnings":manifest.warnings
+            }));
+        }
 
         entry.revisions.insert(
             loaded.version.clone(),
@@ -819,7 +874,7 @@ impl SkillManager {
         let _store_lock = self.acquire_store_lock()?;
 
         let mut registry = self.load_registry()?;
-        let record = registry.skills.get(&name).ok_or_else(|| {
+        let record = registry.skills.get(&name).filter(|record| !record.revoked).ok_or_else(|| {
             SkillError::new(
                 SkillErrorCode::NotFound,
                 format!("skill '{}' is not installed", name),
@@ -876,7 +931,7 @@ impl SkillManager {
 
         let mut registry = self.load_registry()?;
         let (target_version, rolled_back_from, new_history) = {
-            let record = registry.skills.get(&name).ok_or_else(|| {
+            let record = registry.skills.get(&name).filter(|record| !record.revoked).ok_or_else(|| {
                 SkillError::new(
                     SkillErrorCode::NotFound,
                     format!("skill '{}' is not installed", name),
@@ -999,6 +1054,7 @@ impl SkillManager {
         let mut raw_files = Vec::new();
         let mut total_bytes: u64 = 0;
         let mut prefix_segments = Vec::new();
+        let mut remaining = directory_entry_budget(&self.config.limits);
         collect_dir_files_recursive(
             &current,
             &mut prefix_segments,
@@ -1006,6 +1062,8 @@ impl SkillManager {
             &self.config.limits,
             &mut total_bytes,
             &mut raw_files,
+            &mut remaining,
+            false,
         )?;
 
         let inferred_basename = segments.last().map(String::as_str);
@@ -1254,6 +1312,7 @@ impl SkillManager {
         let mut disk_entries = Vec::new();
         let mut total_bytes: u64 = 0;
         let mut prefix = Vec::new();
+        let mut remaining = directory_entry_budget(&self.config.limits);
         collect_dir_files_recursive(
             &files_dir,
             &mut prefix,
@@ -1261,6 +1320,8 @@ impl SkillManager {
             &self.config.limits,
             &mut total_bytes,
             &mut disk_entries,
+            &mut remaining,
+            false,
         )?;
 
         disk_entries.sort_by(|a, b| a.relative_path.cmp(&b.relative_path));
@@ -1512,6 +1573,7 @@ impl RevisionManifest {
             "declared_version": self.declared_version,
             "description": self.description,
             "frontmatter": Value::Object(fm),
+            "license": self.frontmatter.get("license").filter(|value| !value.trim().is_empty()),
             "source_kind": self.source_kind,
             "source_ref": self.source_ref,
             "source_archive_sha256": self.source_archive_sha256,
@@ -1629,6 +1691,10 @@ struct RevisionSummary {
 }
 
 struct SkillRecord {
+    // V2 registry-only authorization state. The package manifests remain
+    // content-addressed V1 documents.
+    import_source: Option<String>,
+    revoked: bool,
     active_version: Option<String>,
     activation_history: Vec<String>,
     updated_at_epoch_s: u64,
@@ -1670,15 +1736,17 @@ impl Registry {
                     }),
                 );
             }
-            skills_map.insert(
-                name.clone(),
-                json!({
-                    "active_version": rec.active_version,
-                    "activation_history": rec.activation_history,
-                    "updated_at_epoch_s": rec.updated_at_epoch_s,
-                    "revisions": Value::Object(rev_map)
-                }),
-            );
+            let mut record = json!({
+                "active_version": rec.active_version,
+                "activation_history": rec.activation_history,
+                "updated_at_epoch_s": rec.updated_at_epoch_s,
+                "revisions": Value::Object(rev_map)
+            });
+            if self.schema_version == OPERATOR_REGISTRY_SCHEMA_VERSION {
+                record["import_source"] = json!(rec.import_source);
+                record["revoked"] = json!(rec.revoked);
+            }
+            skills_map.insert(name.clone(), record);
         }
 
         json!({
@@ -1700,7 +1768,7 @@ impl Registry {
             .ok_or_else(|| {
                 SkillError::new(SkillErrorCode::CorruptStore, "registry missing schema_version")
             })?;
-        if schema_version != REGISTRY_SCHEMA_VERSION {
+        if !matches!(schema_version, REGISTRY_SCHEMA_VERSION | OPERATOR_REGISTRY_SCHEMA_VERSION) {
             return Err(SkillError::new(
                 SkillErrorCode::CorruptStore,
                 format!("unsupported registry schema_version {}", schema_version),
@@ -1778,9 +1846,30 @@ impl Registry {
                     }
                 }
 
+                let (import_source, revoked) = if schema_version == OPERATOR_REGISTRY_SCHEMA_VERSION {
+                    let source = match sobj.get("import_source") {
+                        Some(Value::Null) => None,
+                        Some(Value::String(value)) if operator_import::valid_source_ref(value) => Some(value.clone()),
+                        _ => return Err(SkillError::new(SkillErrorCode::CorruptStore, "Invalid operator source")),
+                    };
+                    let revoked = sobj.get("revoked").and_then(Value::as_bool).ok_or_else(||
+                        SkillError::new(SkillErrorCode::CorruptStore, "Missing revocation state"))?;
+                    if (revoked && (source.is_none() || active_version.is_some() || !activation_history.is_empty()))
+                        || revisions.values().any(|rev| (rev.source_kind == OPERATOR_SOURCE) != source.is_some()) {
+                        return Err(SkillError::new(SkillErrorCode::CorruptStore, "Inconsistent operator import state"));
+                    }
+                    (source, revoked)
+                } else {
+                    if sobj.contains_key("import_source") || sobj.contains_key("revoked")
+                        || revisions.values().any(|rev| rev.source_kind == OPERATOR_SOURCE) {
+                        return Err(SkillError::new(SkillErrorCode::CorruptStore, "Operator imports require registry V2"));
+                    }
+                    (None, false)
+                };
                 skills.insert(
                     skill_name.clone(),
                     SkillRecord {
+                        import_source, revoked,
                         active_version,
                         activation_history,
                         updated_at_epoch_s: rec_updated,
@@ -1961,7 +2050,7 @@ fn assemble_and_validate_package(
         ));
     }
 
-    let parsed_fm = parse_skill_frontmatter(skill_md_text)?;
+    let parsed_fm = parse_skill_frontmatter(skill_md_text, source_kind == OPERATOR_SOURCE)?;
     let mut warnings = parsed_fm.warnings;
 
     let fm_name = parsed_fm.fields.get("name").map(|s| s.trim()).filter(|s| !s.is_empty());
@@ -2058,7 +2147,7 @@ struct ParsedFrontmatter {
     warnings: Vec<String>,
 }
 
-fn parse_skill_frontmatter(content: &str) -> Result<ParsedFrontmatter, SkillError> {
+fn parse_skill_frontmatter(content: &str, strict_import: bool) -> Result<ParsedFrontmatter, SkillError> {
     let mut fields = BTreeMap::new();
     let mut warnings = Vec::new();
     let mut lines = content.lines();
@@ -2091,7 +2180,10 @@ fn parse_skill_frontmatter(content: &str) -> Result<ParsedFrontmatter, SkillErro
                 let key = k.trim().to_ascii_lowercase();
                 if !key.is_empty() && key.len() <= 64 {
                     let val = unquote_scalar(v.trim());
-                    fields.insert(key, val);
+                    if fields.insert(key, val).is_some() && strict_import {
+                        return Err(SkillError::new(SkillErrorCode::ValidationFailed,
+                            "Duplicate SKILL.md frontmatter key"));
+                    }
                 }
             }
         }
@@ -2135,6 +2227,10 @@ fn unquote_scalar(s: &str) -> String {
     s.to_string()
 }
 
+fn directory_entry_budget(limits: &PackageLimits) -> usize {
+    limits.max_files.saturating_mul(limits.max_depth.saturating_add(1)).max(1)
+}
+
 fn collect_dir_files_recursive(
     dir: &Dir,
     prefix: &mut Vec<String>,
@@ -2142,6 +2238,8 @@ fn collect_dir_files_recursive(
     limits: &PackageLimits,
     total_bytes: &mut u64,
     out: &mut Vec<RawPackageFile>,
+    remaining_entries: &mut usize,
+    operator_documentary: bool,
 ) -> Result<(), SkillError> {
     if depth > limits.max_depth {
         return Err(SkillError::new(
@@ -2163,12 +2261,21 @@ fn collect_dir_files_recursive(
                 "non-UTF-8 filename rejected",
             )
         })?;
+        // Bound empty directories as well as files. Never collect an
+        // unbounded directory listing before enforcing package limits.
+        *remaining_entries = remaining_entries.checked_sub(1).ok_or_else(||
+            SkillError::new(SkillErrorCode::LimitExceeded, "Package directory entry limit exceeded"))?;
         names.push(name.to_string());
     }
     names.sort();
 
     for name in names {
         validate_path_segment(&name)?;
+        if operator_documentary && (name.starts_with('.') ||
+            matches!(name.to_ascii_lowercase().as_str(), "node_modules" | "__pycache__")) {
+            return Err(SkillError::new(SkillErrorCode::PathPolicyViolation,
+                "Hidden or generated package entries are not documentary imports"));
+        }
         let meta = dir
             .symlink_metadata(&name)
             .map_err(|e| SkillError::io(format!("stat '{}'", name), e))?;
@@ -2183,7 +2290,8 @@ fn collect_dir_files_recursive(
         if ft.is_dir() {
             let sub = open_dir_nofollow(dir, &name)?;
             prefix.push(name);
-            let res = collect_dir_files_recursive(&sub, prefix, depth + 1, limits, total_bytes, out);
+            let res = collect_dir_files_recursive(&sub, prefix, depth + 1, limits,
+                total_bytes, out, remaining_entries, operator_documentary);
             prefix.pop();
             res?;
         } else if ft.is_file() {
@@ -2198,8 +2306,20 @@ fn collect_dir_files_recursive(
             } else {
                 format!("{}/{}", prefix.join("/"), name)
             };
+            if operator_documentary && name.rsplit('.').next().is_some_and(|ext|
+                matches!(ext.to_ascii_lowercase().as_str(), "exe"|"dll"|"so"|"dylib")) {
+                return Err(SkillError::new(SkillErrorCode::BinaryResourceNotReadable,
+                    "Executable images are not documentary import resources"));
+            }
             let mut file = open_file_nofollow(dir, &name)?;
-            let bytes = read_file_bounded(&mut file, limits.max_single_file_bytes, &rel_path)?;
+            let max_bytes = if rel_path == SKILL_ENTRYPOINT {
+                limits.max_single_file_bytes.min(limits.max_skill_md_bytes)
+            } else { limits.max_single_file_bytes };
+            let bytes = read_file_bounded(&mut file, max_bytes, &rel_path)?;
+            if operator_documentary && (bytes.contains(&0) || std::str::from_utf8(&bytes).is_err()) {
+                return Err(SkillError::new(SkillErrorCode::BinaryResourceNotReadable,
+                    "Operator directory imports require inert UTF-8 text resources"));
+            }
             *total_bytes = total_bytes.saturating_add(bytes.len() as u64);
             if *total_bytes > limits.max_total_bytes {
                 return Err(SkillError::new(

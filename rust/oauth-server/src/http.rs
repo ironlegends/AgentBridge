@@ -6,6 +6,20 @@ use crate::{
     AuthorizedIdentity, AuthorizationFlow, OAuthError, OAuthServer, Result,
 };
 use crate::model::{params, request_json, now_ms};
+use crate::ConnectorClient;
+use sha2::{Digest, Sha256};
+
+/// Audit metadata produced only after confidential client authentication.
+/// No raw client ID, credential, request parameter, or grant is exposed.
+pub struct VerifiedOAuthClient {
+    provider: ConnectorClient,
+    client_id_sha256: String,
+}
+
+impl VerifiedOAuthClient {
+    pub fn provider(&self) -> ConnectorClient { self.provider }
+    pub fn client_id_sha256(&self) -> &str { &self.client_id_sha256 }
+}
 use serde_json::{json, Value};
 
 /// Borrowed, already-framed HTTP request. The caller must validate Host,
@@ -71,12 +85,36 @@ impl OAuthServer {
     /// audience and the target service. Never turn this decision into a
     /// persistent session, capability, or implicit workstation permission.
     pub fn handle_http(&mut self,request:HttpRequest<'_>)->HttpAction{
-        match self.handle_checked(request){
+        self.handle_http_observed(request, |_| {})
+    }
+
+    /// The local audit observer receives only verified confidential-client
+    /// metadata from token/revoke, including later protocol refusals.
+    pub fn handle_http_observed(&mut self, request: HttpRequest<'_>,
+        mut observe: impl FnMut(VerifiedOAuthClient)) -> HttpAction
+    {
+        match self.handle_checked(request, &mut observe){
             Ok(answer)=>answer,
             Err(error)=>HttpAction::Reply(failure(error)),
         }
     }
-    fn handle_checked(&mut self,request:HttpRequest<'_>)->Result<HttpAction>{
+
+    fn observe_authenticated_client(&self, authorization: Option<&str>,
+        input: &std::collections::BTreeMap<String, String>,
+        observe: &mut impl FnMut(VerifiedOAuthClient)) -> bool
+    {
+        let Ok(id) = self.authenticate_client(authorization, input) else { return false; };
+        if let Some(client) = self.persisted_client(&id) {
+            observe(VerifiedOAuthClient {
+                provider: client.provider,
+                client_id_sha256: hex::encode(Sha256::digest(id.as_bytes())),
+            });
+        }
+        true
+    }
+
+    fn handle_checked(&mut self,request:HttpRequest<'_>,
+        observe: &mut impl FnMut(VerifiedOAuthClient))->Result<HttpAction>{
         let now=now_ms()?;
         self.ensure_healthy()?;
         if request.target.len()>16_384 || !request.target.starts_with('/')
@@ -141,7 +179,7 @@ impl OAuthServer {
                     .map_err(|_|OAuthError::bad("invalid_request",400))?,16_384)?;
                 // A public flood cannot exhaust the authenticated refresh
                 // and revocation budget (1000/min vs 240/min).
-                let authenticated=self.authenticate_client(request.authorization,&input).is_ok();
+                let authenticated=self.observe_authenticated_client(request.authorization,&input,observe);
                 self.count_request(authenticated,now)?;
                 let response=self.exchange(&input,request.authorization,now)?;
                 Ok(HttpAction::Reply(HttpResponse::json(200,response)))
@@ -153,7 +191,7 @@ impl OAuthServer {
                     .map_err(|_|OAuthError::bad("invalid_request",400))?,16_384)?;
                 // A public flood cannot exhaust the authenticated refresh
                 // and revocation budget (1000/min vs 240/min).
-                let authenticated=self.authenticate_client(request.authorization,&input).is_ok();
+                let authenticated=self.observe_authenticated_client(request.authorization,&input,observe);
                 self.count_request(authenticated,now)?;
                 let response=self.revoke(&input,request.authorization,now)?;
                 Ok(HttpAction::Reply(HttpResponse::json(200,response)))

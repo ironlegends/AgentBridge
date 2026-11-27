@@ -26,6 +26,11 @@
 //! A private local state directory is an explicit caller-supplied capability.
 
 mod platform;
+/// Internal owner-private file, directory, and OS-lock primitives shared with
+/// sibling workspace crates.
+#[doc(hidden)]
+pub mod private_store;
+pub mod rotating_log;
 pub mod workspace_access;
 #[cfg(unix)]
 pub mod unix_project_handle;
@@ -295,8 +300,14 @@ fn valid_root(raw: &Path, create: bool) -> Result<PathBuf> {
     let parent = raw.parent()
         .ok_or(LifecycleError::Invalid("state directory needs a parent"))?;
     check_real_ancestors(parent)?;
-    if create && !raw.exists() {
-        platform::create_private_directory(raw)?;
+    if create && matches!(fs::symlink_metadata(raw), Err(e) if e.kind() == std::io::ErrorKind::NotFound) {
+        match platform::create_private_directory(raw) {
+            Ok(()) => {}
+            // Another writer can create the root after our metadata check. The
+            // same no-follow and owner/ACL validation below applies to the winner.
+            Err(LifecycleError::Io(error)) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error),
+        }
     }
     check_real_ancestors(raw)?;
     platform::verify_private_directory(raw)?;

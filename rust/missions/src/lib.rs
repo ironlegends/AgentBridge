@@ -13,6 +13,8 @@
 //! after uncertain delivery; callers must inspect/reconcile first.
 
 pub mod mission;
+pub mod attempts;
+pub mod handoff;
 pub mod operator;
 pub mod subtask;
 pub mod task_room;
@@ -142,6 +144,20 @@ pub fn dispatch_rpc_envelope(conn: &mut Connection, envelope: &Value) -> RpcRepl
     }
 }
 
+/// Public identifiers confirmed by the mission engine after an authorized result.
+/// Private fields prevent transport callers from constructing this from a frame.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct ActivityAttribution {
+    context_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    mission_id: Option<String>,
+}
+
+impl ActivityAttribution {
+    pub fn context_id(&self) -> &str { &self.context_id }
+    pub fn mission_id(&self) -> Option<&str> { self.mission_id.as_deref() }
+}
+
 /// A registered mission actor authenticated without writing activity.
 pub struct AuthenticatedContext(String);
 
@@ -153,15 +169,33 @@ impl AuthenticatedContext {
 
     /// Record activity on the same Core connection after the caller's operation succeeds.
     pub fn observe_success(self, conn: &Connection, observe_context: impl FnOnce(&str)) {
-        if let Some(context_id) = store::note_context_use(conn, &self.0) {
-            observe_context(&context_id);
+        self.observe_activity_success(conn, |activity| observe_context(activity.context_id()));
+    }
+
+    /// Context-only operations (including authorized imports without mission membership).
+    pub fn observe_activity_success(self, conn: &Connection, observe: impl FnOnce(ActivityAttribution)) {
+        self.observe_mission_success(conn, None, false, observe);
+    }
+
+    /// Publish the server-confirmed mission after a successful assigned operation.
+    pub fn observe_attached_mission_success(self, conn: &Connection, mission_id: &str,
+        observe: impl FnOnce(ActivityAttribution)) {
+        self.observe_mission_success(conn, Some(mission_id), false, observe);
+    }
+
+    fn observe_mission_success(self, conn: &Connection, selector: Option<&str>,
+        invited: bool, observe: impl FnOnce(ActivityAttribution)) {
+        if let Some(context_id) = store::note_context_use(conn, &self.0)
+            .filter(|id| valid_id("ctx", id)) {
+            let mission_id = selector.and_then(|id| store::confirmed_activity_mission(conn, &self.0, id, invited));
+            observe(ActivityAttribution { context_id, mission_id });
         }
     }
 }
 
 fn dispatch_core(
     conn: &mut Connection, method: &str, payload: &Value,
-    actor_handle: Option<&str>, observe_context: impl FnOnce(&str),
+    actor_handle: Option<&str>, observe_activity: impl FnOnce(ActivityAttribution),
 ) -> Result<Value> {
     // Always check the source-owned v7 schema BEFORE authorization or mutation.
     // No implicit migration, DB creation, or permission escalation.
@@ -175,7 +209,8 @@ fn dispatch_core(
         }
         let context = create_context(conn)?;
         let result = to_value(&context)?;
-        observe_context(&context.context_id);
+        // The ID comes from the successful server-owned creation, never from the request.
+        observe_activity(ActivityAttribution { context_id: context.context_id, mission_id: None });
         return Ok(result);
     }
     let actor = actor_handle.ok_or_else(|| {
@@ -205,6 +240,7 @@ fn dispatch_core(
             conn, actor, required(payload, "mission_id")?,
             required(payload, "summary")?, maybe_int(payload, "if_revision", 0)?
         )?),
+        "Mission.Handoff" => handoff::mission_handoff(conn, actor, required(payload, "mission_id")?),
         "Mission.Checkpoints" => to_value(recent_checkpoints(
             conn, actor, required(payload, "mission_id")?,
             maybe_int(payload, "limit", 20)?
@@ -238,7 +274,19 @@ fn dispatch_core(
                 "This isolated missions crate does not provide the requested host capability.")),
         _ => Err(BridgeError::new("METHOD_NOT_FOUND", "Unsupported Agent Bridge RPC method.")),
     }?;
-    context.observe_success(conn, observe_context);
+    // A selector is only a lookup parameter. Return the public ID from a
+    // registered membership row, never the selector itself or free-form data.
+    // List operations have no unique mission target.
+    let selector = match method {
+        "Mission.Create" => result.get("mission_id").and_then(Value::as_str),
+        "Mission.Get" | "Mission.Handoff" | "Mission.Observe" | "Mission.Grant" | "Mission.Attach"
+        | "Mission.Transfer" | "Mission.Checkpoint" | "Mission.Checkpoints"
+        | "Mission.SetOrchestrator" | "Mission.Transition"
+        | "Mission.Subtask.Create" | "Mission.Subtask.Assign" | "Mission.Subtask.Update"
+        | "Mission.Subtask.List" => payload.get("mission_id").and_then(Value::as_str),
+        _ => None,
+    };
+    context.observe_mission_success(conn, selector, method == "Mission.Observe", observe_activity);
     Ok(result)
 }
 
@@ -262,6 +310,8 @@ fn tool_contract(name: &str) -> Result<(&'static str, &'static [&'static str])> 
             &["actor_context_handle","mission_id","if_revision"]),
         "agent_bridge_mission_transfer" => ("Mission.Transfer",
             &["actor_context_handle","mission_id","if_revision","target_context_id"]),
+        "agent_bridge_mission_handoff" => ("Mission.Handoff",
+            &["actor_context_handle","mission_id"]),
         "agent_bridge_mission_checkpoints" => ("Mission.Checkpoints",
             &["actor_context_handle","mission_id","limit"]),
         "agent_bridge_mission_checkpoint" => ("Mission.Checkpoint",
@@ -293,6 +343,13 @@ pub fn dispatch_tool(conn: &mut Connection, tool_name: &str, args: &Value) -> Re
 /// Observe only the public ID of an authenticated context after a successful operation.
 pub fn dispatch_tool_observed(
     conn: &mut Connection, tool_name: &str, args: &Value, observe_context: impl FnOnce(&str),
+) -> Result<Value> {
+    dispatch_tool_activity_observed(conn, tool_name, args, |activity| observe_context(activity.context_id()))
+}
+
+/// Observe an authorized public actor and, when confirmed, its mission target.
+pub fn dispatch_tool_activity_observed(
+    conn: &mut Connection, tool_name: &str, args: &Value, observe_activity: impl FnOnce(ActivityAttribution),
 ) -> Result<Value> {
     let (method, allowed) = tool_contract(tool_name)?;
     let object = args.as_object().ok_or_else(|| invalid("Tool arguments must be a JSON object."))?;
@@ -349,7 +406,7 @@ pub fn dispatch_tool_observed(
     }
     // Public context IDs used as target/assignee are validated within the
     // business APIs. Only the caller's raw registered handle authenticates.
-    dispatch_core(conn, method, &payload, actor, observe_context)
+    dispatch_core(conn, method, &payload, actor, observe_activity)
 }
 
 /// Convenience for JSON-only callers without allocating their own Value tree.

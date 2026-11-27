@@ -167,8 +167,9 @@ fn fixture_route(state: &mut MockState, method: &str, path: &str, body: Value) -
         })),
         ("GET", "/api/sessions") => (200, json!({
             "available": true, "boot_id": "example-boot", "live_window_seconds": 120,
+            "totals": { "live": 1, "connected": 1 },
             "sessions": [{
-                "session_id": "example-session", "terminal_session_ids": ["example-command"],
+                "session_id": "example-session", "live": true, "terminal_session_ids": ["example-command"],
                 "contexts": [{"missions": [{"mission_id": "example-mission", "subtasks": [
                     {"id": "example-subtask", "assigned_to_context": true}
                 ]}]}],
@@ -336,10 +337,17 @@ fn session_view_only_attachment_accepts_local_sessions_and_refuses_other_reads_a
     }).to_string()).unwrap();
     let runtime = AppRuntime::new(root.0.clone());
     let client = runtime.operator.client().unwrap();
-    assert_eq!(backend::get_sessions(&runtime).unwrap()["bootId"], "example-boot");
+    let sessions = backend::get_sessions(&runtime).unwrap();
+    assert_eq!(sessions["bootId"], "example-boot");
+    assert_eq!(sessions["totals"]["live"], 1);
     assert!(client.get("/api/diagnostics").is_err());
     assert!(client.post("/api/profile", json!({"profile":"fully-unlocked"})).is_err());
     assert!(!client.supports_shutdown());
+    service.state.lock().unwrap().failure =
+        Some((401, json!({ "error": "TOKEN_INVALID", "message": TEST_TOKEN })));
+    let unavailable = backend::get_sessions(&runtime).unwrap();
+    assert_eq!(unavailable["available"], false);
+    assert!(unavailable.get("totals").is_none());
 }
 
 #[test]

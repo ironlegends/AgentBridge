@@ -123,17 +123,17 @@ fn shutdown_after(attached: Attached, db: &Path, verify: impl FnOnce(Router)) {
     }
 }
 
-/// Lists the real catalogue, checks its 46 names, and returns its digest.
+/// Lists the real catalogue, checks all expected names, and returns its digest.
 fn listed_digest(attached: &Attached) -> String {
     let listed=mcp(&attached.runtime,"tools/list",json!({}));
     let tools=listed["result"]["tools"].as_array().unwrap();
     let names: BTreeSet<_>=tools.iter().map(|t|t["name"].as_str().unwrap()).collect();
-    let expected: BTreeSet<_>=COMPLETE_TOOL_NAMES.iter().copied().collect();
+    let expected: BTreeSet<_>=crate::capability_manifest::selected_tool_names(attached.manifest.selection.mission_handoff).collect();
     eprintln!("catalogue count={} missing={:?} extra={:?}",tools.len(),
         expected.difference(&names).collect::<Vec<_>>(),names.difference(&expected).collect::<Vec<_>>());
-    assert_eq!(tools.len(),46);
+    assert_eq!(tools.len(),expected.len());
     assert_eq!(names,expected);
-    // A 2026-07-28 client sees the same 46 schemas, in name order.
+    // A 2026-07-28 client sees the same schemas, in name order.
     let meta=json!({"io.modelcontextprotocol/protocolVersion":"2026-07-28",
         "io.modelcontextprotocol/clientCapabilities":{}});
     let modern:Value=serde_json::from_str(&attached.runtime.router.handle_str(&json!({"jsonrpc":"2.0","id":2,
@@ -146,8 +146,78 @@ fn listed_digest(attached: &Attached) -> String {
     assert_eq!(modern["result"]["tools"].as_array().unwrap(),&ordered);
     let catalogue:Vec<_>=attached.runtime.router.published_tools().into_iter().cloned().collect();
     let digest = catalogue_digest(&catalogue).unwrap();
-    assert_eq!(digest, "7603bc547b696a3c45e4cd3f5b0b98bbf0f51c9cad66bc31f5a75ae5259c349c");
+    let stable_digest = "7603bc547b696a3c45e4cd3f5b0b98bbf0f51c9cad66bc31f5a75ae5259c349c";
+    if attached.manifest.selection.mission_handoff {
+        assert_ne!(digest, stable_digest, "new catalogue cannot inherit the stable seal");
+    } else {
+        assert_eq!(digest, stable_digest, "stable catalogue must preserve its exact published seal");
+    }
     digest
+}
+
+/// Opt-in real-provider composition qualification for every startup preset.
+/// No provider prompts, real desktop leases, process calls or upstream
+/// extension effects are needed to prove the narrowing and live policy.
+#[test]
+fn integration_real_specialized_catalogues_preserve_schemas_and_profile_gates() {
+    use crate::catalogue_selection::CatalogueSelection;
+    let mut bench=bench(false,false,|_,workspace| {
+        std::fs::write(workspace.join("witness.txt"),"SPECIALIZED_CATALOGUE_FIXTURE").unwrap();
+    });
+    let full=attach(&bench);
+    let baseline=full.runtime.router.published_tools().into_iter().cloned().collect::<Vec<_>>();
+    assert_eq!(baseline.len(),46);
+    assert_eq!(catalogue_digest(&baseline).unwrap(),
+        "7603bc547b696a3c45e4cd3f5b0b98bbf0f51c9cad66bc31f5a75ae5259c349c");
+    shutdown(full,&bench.db);
+    let mut revisions=BTreeSet::new();
+    for (preset,count,mutation,args) in [
+        (CatalogueSelection::Core,19,"agent_bridge_context_create",json!({})),
+        (CatalogueSelection::Code,19,"desktop_task_manage",json!({"action":"context_create"})),
+        (CatalogueSelection::Desktop,10,"desktop_browser_session",json!({"action":"start","headless":true})),
+        (CatalogueSelection::Automation,18,"desktop_task_manage",json!({"action":"context_create"})),
+        (CatalogueSelection::Extensions,6,"desktop_mcp_tool_call",json!({"name":"no-fixture:read","arguments":{}})),
+    ] {
+        let expected=baseline.iter().filter(|tool|preset.allows(&tool.name)).cloned().collect::<Vec<_>>();
+        assert_eq!(expected.len(),count);
+        bench.selected["catalogue"]=json!(preset.name());
+        bench.selected["catalogue_sha256"]=json!(catalogue_digest(&expected).unwrap());
+        let attached=attach(&bench);
+        let actual=attached.runtime.router.published_tools().into_iter().cloned().collect::<Vec<_>>();
+        assert_eq!(actual,expected,"original schemas and order are preserved");
+        attached.manifest.verify_catalogue(&actual).unwrap();
+        assert!(attached.manifest.verify_catalogue(&baseline).is_err());
+        let status=text_result(call(&attached.runtime,"agent_bridge_status",json!({})));
+        assert_eq!(status["catalogue"],preset.name());
+        assert_eq!(status.get("extensions").is_some(), preset.allows("desktop_mcp_tool_search"));
+        assert_eq!(status["total_tools"],count);
+        assert_eq!(status["families"],attached.manifest.summary().unwrap()["families"]);
+        let listed:Value=serde_json::from_str(&attached.runtime.router.handle_str(
+            &json!({"jsonrpc":"2.0","id":2,"method":"tools/list","params":{"_meta":{
+                "io.modelcontextprotocol/protocolVersion":"2026-07-28",
+                "io.modelcontextprotocol/clientCapabilities":{}}}}).to_string()).unwrap()).unwrap();
+        assert_eq!(listed["result"]["cacheScope"],"private");
+        assert!(revisions.insert(listed["result"]["_meta"]["io.github.ironlegends/catalogRevision"].as_str().unwrap().to_owned()));
+        for tool in &baseline {
+            if !preset.allows(&tool.name){
+                assert_eq!(call(&attached.runtime,&tool.name,json!({}))["error"]["code"],-32602,
+                    "{}: {}",preset.name(),tool.name);
+            }
+        }
+        attached.profile.set(DesktopProfile::ReadOnly).unwrap();
+        let denied=call(&attached.runtime,mutation,args.clone());
+        assert_eq!(denied["result"]["isError"],true,"{}: {denied}",preset.name());
+        assert!(denied.to_string().contains("REFUSED") || denied.to_string().contains("REQUIRED") ||
+            denied.to_string().contains("PROFILE"),"expected a live profile refusal: {denied}");
+        assert_eq!(attached.runtime.router.published_tools().into_iter().cloned().collect::<Vec<_>>(),actual);
+        attached.profile.set(DesktopProfile::FullyUnlocked).unwrap();
+        for tool in &baseline {
+            if !preset.allows(&tool.name){
+                assert_eq!(call(&attached.runtime,&tool.name,json!({}))["error"]["code"],-32602);
+            }
+        }
+        shutdown(attached,&bench.db);
+    }
 }
 
 #[test]
@@ -187,6 +257,7 @@ fn qualify_catalogue(os_user: bool) {
         let (runtime,profile,manifest)=(&attached.runtime,&attached.profile,&attached.manifest);
         if pass==0 {
             digest=observed;
+            assert_eq!(digest,"7603bc547b696a3c45e4cd3f5b0b98bbf0f51c9cad66bc31f5a75ae5259c349c", "old pinned catalogue must be byte-compatible");
             assert!(manifest.verify_catalogue(&catalogue).is_err(),"wrong seal must fail");
             bench.selected["catalogue_sha256"]=json!(digest);
         } else {
@@ -354,6 +425,7 @@ fn exercise_every_tool(os_user: bool) {
     let path=|relative: &str| -> Value {
         if os_user { json!(workspace.join(relative)) } else { json!(relative) }
     };
+    bench.selected["mission_handoff"]=json!(true);
     // The first attachment observes the real schema digest; the second runs
     // every tool under the exact sealed catalogue.
     let first=attach(&bench);
@@ -365,7 +437,7 @@ fn exercise_every_tool(os_user: bool) {
     let mut run=Exercise {runtime:&attached.runtime,observed:BTreeSet::new()};
 
     let status=run.ok("agent_bridge_status",json!({}));
-    assert_eq!(status["total_tools"],46);
+    assert_eq!(status["total_tools"],47);
     assert_eq!(run.ok("desktop_policy_status",json!({}))["filesystem_scope"],if os_user {"os-user"} else {"workspace"});
 
     // Files: metadata, listing, search, then create, write, edit and move
@@ -489,6 +561,9 @@ version: 0.2.0
         "summary":"catalogue46 checkpoint"}));
     assert!(run.ok("agent_bridge_mission_checkpoints",json!({"actor_context_handle":h2,"mission_id":mid,"limit":10}))
         .to_string().contains("catalogue46 checkpoint"));
+    let handoff=run.ok("agent_bridge_mission_handoff",json!({"actor_context_handle":h2,"mission_id":mid}));
+    assert!(handoff["handoff"].as_str().unwrap().contains(mid.as_str().unwrap()));
+    assert!(handoff.to_string().len()<=agent_bridge_missions::handoff::MAX_HANDOFF_BYTES);
     let subtask=run.ok("agent_bridge_mission_subtask_create",json!({"actor_context_handle":h1,"mission_id":mid,
         "goal":"Catalogue46 subtask","idempotency_key":"catalogue46-sub"}));
     let sid=subtask.get("subtask").map(|s|s["subtask_id"].clone()).unwrap_or_else(||subtask["subtask_id"].clone());
@@ -613,8 +688,8 @@ version: 0.2.0
     let expected: BTreeSet<String>=COMPLETE_TOOL_NAMES.iter().map(|name|name.to_string()).collect();
     let missing: Vec<_>=expected.difference(&run.observed).collect();
     assert!(missing.is_empty(),"tools without an observed successful call: {missing:?}");
-    assert_eq!(run.observed.len(),46);
+    assert_eq!(run.observed.len(),COMPLETE_TOOL_NAMES.len());
     drop(run);
     shutdown(attached,&bench.db);
-    eprintln!("every_tool os_user={os_user}: 46/46 tools returned an observed successful result");
+    eprintln!("every_tool os_user={os_user}: {0}/{0} tools returned an observed successful result", COMPLETE_TOOL_NAMES.len());
 }

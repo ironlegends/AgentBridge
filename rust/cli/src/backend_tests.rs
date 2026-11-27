@@ -78,13 +78,14 @@ async fn disconnected_http_worker_must_drain_before_shutdown_releases_ownership(
     let mut runtime=start_backend(fixture.config()).await.unwrap();
     let oauth=Arc::clone(&runtime.owner.as_ref().unwrap()._oauth);
     let requests=Arc::clone(&runtime.owner.as_ref().unwrap().requests);
+    let effects=runtime.owner.as_ref().unwrap().effects.clone();
     let guard=oauth.lock().unwrap();
     let mut stream=TcpStream::connect((Ipv4Addr::LOCALHOST,fixture.port)).unwrap();
     write!(stream,"POST /mcp HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nContent-Type: application/json\r\nContent-Length: 2\r\n\r\n{{}}",fixture.port).unwrap();
-    tokio::time::timeout(Duration::from_secs(2),async {
-        while requests.available_permits()==32 { tokio::time::sleep(Duration::from_millis(5)).await; }
-    }).await.unwrap();
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    // The blocking worker acquires its effect before waiting on the OAuth lock.
+    tokio::time::timeout(Duration::from_secs(5),async {
+        while effects.is_drained() { tokio::time::sleep(Duration::from_millis(5)).await; }
+    }).await.expect("gateway worker entered the blocking section");
     drop(stream);
     runtime.request_shutdown().unwrap();
     tokio::time::timeout(Duration::from_secs(2),async {
@@ -291,6 +292,7 @@ async fn capability_fix_cli_failed_cleanup_retains_collective_authority() {
     let mut prepared=gemini::prepare_workstation(config.take_start()).await.unwrap();
     prepared.listener.take();
     let oauth=Arc::downgrade(&prepared._oauth);
+    let audit = prepared.ui_config.request_audit.as_ref().unwrap().clone();
     let release=Arc::new(AtomicBool::new(false)); let gate=Arc::clone(&release);
     prepared.providers.push(crate::provider_owner::ProviderOwner::new(Arc::new(||Ok(())),Arc::new(move || {
         if gate.load(Ordering::Acquire){Ok(())}else{Err("synthetic retryable CLI cleanup failure".into())}
@@ -309,6 +311,17 @@ async fn capability_fix_cli_failed_cleanup_retains_collective_authority() {
     crate::provider_owner::ProviderOwner::reconcile_rollbacks().unwrap();
     assert!(oauth.upgrade().is_none());
     assert!(pending && retained && exclusive,"CLI cleanup failure must retain providers and exclusive OAuth together");
+    let snapshot = serde_json::to_value(audit.snapshot()).unwrap();
+    let records = snapshot["records"].as_array().unwrap();
+    assert_eq!(records[0]["method"], "service/start");
+    assert_eq!(records[0]["outcome"], "success");
+    assert!(records.iter().any(|record| record["method"] == "service/stop"
+        && record["error_code"] == "service_stop_failed"));
+    let last = records.last().unwrap();
+    assert_eq!(last["method"], "service/stop");
+    assert_eq!(last["outcome"], "success");
+    assert!(last["http_status"].is_null());
+    assert!(!snapshot.to_string().contains("synthetic retryable CLI cleanup failure"));
 }
 
 fn backend_access(server:&mut agent_bridge_oauth_server::OAuthServer,state:&std::path::Path)->String {
@@ -390,9 +403,13 @@ async fn request_audit_public_listener_refuses_diagnostics_with_valid_mcp_bearer
     assert_eq!(ping_body["result"], serde_json::json!({}));
     assert_eq!(before.status, 200);
     let audit = &before.body["mcp_request_audit"];
-    assert_eq!(audit["records"].as_array().unwrap().len(), 1);
-    assert_eq!(audit["records"][0]["method"], "ping");
-    assert_eq!(audit["records"][0]["provider"], "gemini");
+    assert_eq!(audit["records"].as_array().unwrap().len(), 2);
+    assert_eq!(audit["records"][0]["method"], "service/start");
+    assert_eq!(audit["records"][0]["outcome"], "success");
+    assert!(audit["records"][0]["http_status"].is_null());
+    assert!(audit["records"][0]["provider"].is_null());
+    assert_eq!(audit["records"][1]["method"], "ping");
+    assert_eq!(audit["records"][1]["provider"], "gemini");
 
     assert!(public.starts_with("HTTP/1.1 404 "));
     let (_, body) = public.split_once("\r\n\r\n").unwrap();
@@ -408,6 +425,90 @@ async fn request_audit_public_listener_refuses_diagnostics_with_valid_mcp_bearer
     assert!(!sessions.body.to_string().contains(&token));
     assert_eq!(after.status, 200);
     assert_eq!(after.body["mcp_request_audit"], *audit);
+}
+
+#[tokio::test]
+async fn audit_history_persists_across_workstation_restart_with_opaque_session_id() {
+    use std::io::Read;
+
+    let _serial = BACKEND_TEST_OWNER.lock().unwrap_or_else(|p| p.into_inner());
+    let fixture = Fixture::new();
+    let (first_boot_id, first_session_id, token) = {
+        let mut running = start_backend(fixture.config()).await.unwrap();
+        let token = backend_access(
+            &mut running.owner.as_ref().unwrap()._oauth.lock().unwrap(),
+            &fixture.root.join("oauth-workstation"),
+        );
+        let operator = running.operator();
+        let port = fixture.port;
+        let host = ORIGIN.strip_prefix("https://").unwrap();
+        let body = r#"{"jsonrpc":"2.0","id":1,"method":"ping"}"#;
+        let request = format!(
+            "POST /mcp HTTP/1.1\r\nHost: {host}\r\nAuthorization: Bearer {token}\r\n\
+            Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        let reply = tokio::task::spawn_blocking(move || {
+            let timeout = Duration::from_secs(3);
+            let mut stream = TcpStream::connect_timeout(&(Ipv4Addr::LOCALHOST, port).into(), timeout).unwrap();
+            stream.set_read_timeout(Some(timeout)).unwrap();
+            stream.set_write_timeout(Some(timeout)).unwrap();
+            stream.write_all(request.as_bytes()).unwrap();
+            let mut response = String::new();
+            stream.read_to_string(&mut response).unwrap();
+            response
+        }).await.unwrap();
+        assert!(reply.starts_with("HTTP/1.1 200 "));
+
+        let sessions = operator.get(OperatorRead::Sessions).await.unwrap();
+        let session_id = sessions.body["sessions"][0]["session_id"].as_str().unwrap().to_owned();
+        assert!(crate::audit_history::is_valid_session_id(&session_id));
+
+        assert!(running.owner.as_ref().unwrap().ui_config.request_audit.as_ref().unwrap()
+            .flush_history(Duration::from_secs(2)));
+        let diagnostics = operator.get(OperatorRead::Diagnostics).await.unwrap();
+        let history = &diagnostics.body["audit_history"];
+        assert_eq!(history["available"], true);
+        assert_eq!(history["lost"], 0);
+        let records = history["records"].as_array().unwrap();
+        assert_eq!(records.iter().filter(|row| row["method"] == "service/start").count(), 1);
+        let pings: Vec<_> = records.iter().filter(|row| row["method"] == "ping").collect();
+        assert_eq!(pings.len(), 1);
+        assert_eq!(pings[0]["provider"], "gemini");
+        assert_eq!(pings[0]["session_id"], session_id);
+        let boot_id = pings[0]["boot_id"].as_str().unwrap().to_owned();
+        assert!(OperatorRead::session_history(&boot_id, "invalid").is_none());
+        for (boot, session, count) in [
+            (boot_id.clone(), session_id.clone(), 1),
+            ("e".repeat(32), session_id.clone(), 0),
+            (boot_id.clone(), "f".repeat(32), 0),
+        ] {
+            let operation = OperatorRead::session_history(&boot, &session).unwrap();
+            let selected = operator.get(operation).await.unwrap();
+            assert_eq!(selected.status, 200);
+            assert_eq!(selected.body["records"].as_array().unwrap().len(), count);
+        }
+        assert!(running.shutdown().await.unwrap().clean);
+        (boot_id, session_id, token)
+    };
+
+    let mut restarted = start_backend(fixture.config()).await.unwrap();
+    assert!(restarted.owner.as_ref().unwrap().ui_config.request_audit.as_ref().unwrap()
+        .flush_history(Duration::from_secs(2)));
+    let operator2 = restarted.operator();
+    let diagnostics2 = operator2.get(OperatorRead::Diagnostics).await.unwrap();
+    let history2 = &diagnostics2.body["audit_history"];
+    assert_eq!(history2["available"], true);
+    assert_eq!(history2["lost"], 0);
+    let records2 = history2["records"].as_array().unwrap();
+    let pings: Vec<_> = records2.iter().filter(|row| row["method"] == "ping").collect();
+    assert_eq!(pings.len(), 1);
+    assert_eq!(pings[0]["boot_id"], first_boot_id);
+    assert_eq!(pings[0]["session_id"], first_session_id);
+    assert!(records2.iter().any(|row| row["method"] == "service/stop" && row["boot_id"] == first_boot_id));
+    assert!(records2.iter().any(|row| row["method"] == "service/start" && row["boot_id"] != first_boot_id));
+    assert!(!diagnostics2.body.to_string().contains(&token));
+    assert!(restarted.shutdown().await.unwrap().clean);
 }
 
 #[tokio::test(flavor="multi_thread",worker_threads=2)]

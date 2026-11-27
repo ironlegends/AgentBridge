@@ -186,6 +186,148 @@ fn tunnel_retry_rechecks_image_and_stop_cancels_the_pending_generation() {
     assert!(!tunnel.tick());
 }
 
+#[test]
+fn rotating_log_child_fixture() {
+    let Some(root) = selected_fixture_root("native_windows::tests::rotating_log_child_fixture") else { return };
+    let tag = std::fs::read_to_string(root.join("tag.txt")).unwrap_or_else(|_| "run".to_owned());
+    for i in 0..48 {
+        println!("{tag}-stdout-{i:03}-0123456789abcdef0123456789abcdef0123456789abcdef");
+        eprintln!("{tag}-stderr-{i:03}-0123456789abcdef0123456789abcdef0123456789abcdef");
+    }
+    std::io::stdout().flush().unwrap();
+    std::io::stderr().flush().unwrap();
+}
+
+#[test]
+fn rotating_stdio_pipe_rotates_live_child_output_and_survives_restart() {
+    use agent_bridge_lifecycle::rotating_log::backup_path;
+
+    let root = Directory::new();
+    let selected = config(&root);
+    let stdout_path = root.0.join("state/logs/native-tunnel.stdout.log");
+    let stderr_path = root.0.join("state/logs/native-tunnel.stderr.log");
+    let policy = RotatingLogPolicy {
+        max_file_bytes: 512,
+        max_backups: 2,
+        max_age: Duration::from_secs(3600),
+    };
+
+    for tag in ["boot1", "boot2"] {
+        std::fs::write(root.0.join("tag.txt"), tag).unwrap();
+        let out_pipe = RotatingStdioPipe::open(&stdout_path, policy).unwrap();
+        let err_pipe = RotatingStdioPipe::open(&stderr_path, policy).unwrap();
+        let mut env = fixture_environment(&selected, &root.0);
+        let args: &[&OsStr] = &[
+            OsStr::new("--exact"),
+            OsStr::new("native_windows::tests::rotating_log_child_fixture"),
+            OsStr::new("--nocapture"),
+        ];
+        let child = OwnedProcess::spawn(
+            &std::env::current_exe().unwrap(),
+            args,
+            &root.0,
+            &mut env,
+            out_pipe.handle(),
+            err_pipe.handle(),
+        )
+        .unwrap();
+        let out_pump = out_pipe.into_pump();
+        let err_pump = err_pipe.into_pump();
+        await_exit(child.process.0);
+        drop(child);
+
+        let out_stats = out_pump.join().unwrap();
+        let err_stats = err_pump.join().unwrap();
+        assert_eq!(out_stats.bytes_dropped, 0);
+        assert_eq!(err_stats.bytes_dropped, 0);
+        assert!(out_stats.rotations >= 2, "expected live stdout rotations");
+        assert!(err_stats.rotations >= 2, "expected live stderr rotations");
+    }
+
+    for base in [&stdout_path, &stderr_path] {
+        assert!(base.is_file());
+        assert!(backup_path(base, 1).is_file());
+        assert!(backup_path(base, 2).is_file());
+        assert!(!backup_path(base, 3).exists());
+        for path in [base.clone(), backup_path(base, 1), backup_path(base, 2)] {
+            let file = OpenOptions::new().read(true).open(&path).unwrap();
+            private_file_acl(&file, false).unwrap();
+        }
+    }
+    for (path, channel) in [(&stdout_path, "stdout"), (&stderr_path, "stderr")] {
+        let mut retained = Vec::new();
+        for part in [backup_path(path, 2), backup_path(path, 1), path.clone()] {
+            let bytes = std::fs::read(part).unwrap();
+            assert!(bytes.len() <= policy.max_file_bytes as usize);
+            retained.extend(bytes);
+        }
+        let output = String::from_utf8(retained).unwrap();
+        assert!(output.contains(&format!("boot2-{channel}-047")));
+        assert!(!output.contains(KEY));
+    }
+}
+
+#[test]
+fn rotating_stdio_pipe_drains_without_deadlock_during_disk_outage() {
+    use agent_bridge_lifecycle::rotating_log::backup_path;
+
+    let root = Directory::new();
+    let selected = config(&root);
+    let stdout_path = root.0.join("state/logs/native-tunnel.stdout.log");
+    let stderr_path = root.0.join("state/logs/native-tunnel.stderr.log");
+    let policy = RotatingLogPolicy {
+        max_file_bytes: 128,
+        max_backups: 2,
+        max_age: Duration::from_secs(3600),
+    };
+
+    std::fs::write(root.0.join("tag.txt"), "outage").unwrap();
+    let out_pipe = RotatingStdioPipe::open(&stdout_path, policy).unwrap();
+    let err_pipe = RotatingStdioPipe::open(&stderr_path, policy).unwrap();
+
+    // Create a directory at `.1` so live rotation hits an I/O error while child writes.
+    std::fs::create_dir(backup_path(&stdout_path, 1)).unwrap();
+
+    let mut env = fixture_environment(&selected, &root.0);
+    let args: &[&OsStr] = &[
+        OsStr::new("--exact"),
+        OsStr::new("native_windows::tests::rotating_log_child_fixture"),
+        OsStr::new("--nocapture"),
+    ];
+    let child = OwnedProcess::spawn(
+        &std::env::current_exe().unwrap(),
+        args,
+        &root.0,
+        &mut env,
+        out_pipe.handle(),
+        err_pipe.handle(),
+    )
+    .unwrap();
+    let out_pump = out_pipe.into_pump();
+    let err_pump = err_pipe.into_pump();
+    await_exit(child.process.0);
+    drop(child);
+
+    let out_stats = out_pump.join().unwrap();
+    let err_stats = err_pump.join().unwrap();
+    assert!(out_stats.io_errors > 0, "outage must be accounted in io_errors");
+    assert!(out_stats.bytes_dropped > 0, "dropped bytes must be accounted");
+    assert_eq!(err_stats.bytes_dropped, 0);
+
+    // Clear the outage obstacle and confirm a subsequent open/write recovers cleanly.
+    std::fs::remove_dir(backup_path(&stdout_path, 1)).unwrap();
+    let recovery = RotatingStdioPipe::open(&stdout_path, policy).unwrap();
+    {
+        let mut output = recovery.handle().try_clone().unwrap();
+        output.write_all(b"after-recovery\n").unwrap();
+    }
+    let stats = recovery.into_pump().join().unwrap();
+    assert_eq!(stats.bytes_dropped, 0);
+    assert_eq!(stats.bytes_written, 15);
+    assert!(std::fs::read_to_string(&stdout_path).unwrap().contains("after-recovery"));
+    assert!(stdout_path.is_file());
+}
+
 /// The root of an owned process fixture, only when its parent selected it
 /// by exact name with a non-empty root. An ordinary run returns at once.
 fn selected_fixture_root(name: &str) -> Option<std::path::PathBuf> {

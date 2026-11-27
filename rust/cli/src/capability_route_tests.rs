@@ -128,7 +128,7 @@ impl Fixture {
             legacy_catalogue_sha256: router_catalogue_digest(&legacy_router).unwrap(),
             router:Arc::new(legacy_router),
             request_audit: Arc::new(RequestAudit::new().unwrap()),
-            unified:Some(Arc::new(UnifiedRoute {identity:identity(),router:Arc::new(fixture_router(true)),
+            unified:Some(Arc::new(UnifiedRoute {catalogue:crate::catalogue_selection::CatalogueSelection::Unified,identity:identity(),router:Arc::new(fixture_router(true)),
                 extension_guard:None,manifest_guard:Arc::new(||Ok(())),
                 response_permits:Arc::new(Semaphore::new(2))})),
             audience:Audience::Workstation,expected_resource:Some(format!("{ORIGIN}/mcp")),
@@ -320,7 +320,17 @@ async fn request_audit_correlates_status_with_discovery_and_verified_oauth_ident
         assert_eq!(session["request_count"], count);
         assert_eq!(session["transport"], "http");
         assert_eq!(session["tool_calls"][0]["tool_name"], "agent_bridge_status");
+        let session_id = session["session_id"].as_str().unwrap();
+        assert!(crate::audit_history::is_valid_session_id(session_id));
+        if provider == "gemini" {
+            for record in &records[..3] {
+                assert_eq!(record["session_id"], session_id);
+            }
+        } else {
+            assert_eq!(records[3]["session_id"], session_id);
+        }
     }
+    assert_ne!(records[0]["session_id"], records[3]["session_id"]);
     let serialized = sessions.to_string();
     for private in [&fixture.legacy_access, &chatgpt_access, &gemini_id, &chatgpt_id, &gemini_hash, &chatgpt_hash] {
         assert!(!serialized.contains(private.as_str()));
@@ -480,6 +490,122 @@ async fn request_audit_records_early_oauth_protocol_and_tool_refusals_without_pa
     assert!(!snapshot.to_string().contains("invalid-token-marker"));
 }
 
+#[tokio::test]
+async fn request_audit_records_oauth_endpoint_outcomes_without_credentials() {
+    let base = crate::test_state_base();
+    let root = TestRoot(base.join(format!("oauth-audit-{}-{}", std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed))));
+    agent_bridge_lifecycle::initialize_operator_settings(&root.0).unwrap();
+    for entry in std::fs::read_dir(&root.0).unwrap() {
+        let path = entry.unwrap().path();
+        if path.is_file() { std::fs::remove_file(path).unwrap(); }
+    }
+    let config = OAuthConfig { state_dir: root.0.clone(), public_origin: ORIGIN.into(),
+        audience: Audience::Workstation };
+    let oauth = OAuthServer::open(config.clone()).unwrap();
+    let owner = LocalOwner::open(config).unwrap();
+    owner.enable_enrollment(|| true).unwrap();
+    let router = fixture_router(false);
+    let app = Gateway {
+        oauth: Arc::new(Mutex::new(oauth)),
+        legacy_catalogue_sha256: router_catalogue_digest(&router).unwrap(),
+        router: Arc::new(router),
+        request_audit: Arc::new(RequestAudit::new().unwrap()),
+        unified: None,
+        audience: Audience::Workstation,
+        expected_resource: Some(format!("{ORIGIN}/mcp")),
+        public_host: "router-capability.example.invalid".into(),
+        loopback_host: "127.0.0.1:18856".into(),
+        requests: Arc::new(Semaphore::new(32)),
+        effects: OperationAdmission::default(),
+        extension_guard: None,
+    };
+    async fn send(app: &Gateway, method: &str, target: &str, ct: &str, body: &str) -> Response {
+        let request = Request::builder().method(method).uri(target)
+            .header("host", "127.0.0.1:18856").header("content-type", ct)
+            .body(Body::from(body.to_owned())).unwrap();
+        handle(State(app.clone()), request).await
+    }
+    assert_eq!(send(&app, "POST", "/oauth/register?marker=private-query", "text/plain",
+        r#"{"method":"tools/call","params":{"name":"agent_bridge_status","marker":"private-body"}}"#)
+        .await.status(), 415);
+    let registration = json!({"redirect_uris":[CALLBACK],
+        "token_endpoint_auth_method":"client_secret_post","client_name":"private-registration"});
+    let registered = send(&app, "POST", "/oauth/register", "application/json", &registration.to_string()).await;
+    assert_eq!(registered.status(), 201);
+    let client: Value = serde_json::from_slice(&to_bytes(registered.into_body(), 65536).await.unwrap()).unwrap();
+    let id = client["client_id"].as_str().unwrap();
+    let secret = client["client_secret"].as_str().unwrap();
+    assert_eq!(send(&app, "GET", "/oauth/authorize?client_id=private-invalid-client", "text/plain", "")
+        .await.status(), 400);
+    let verifier = "V".repeat(43);
+    let challenge = b64url(&Sha256::digest(verifier.as_bytes()));
+    let target = format!("/oauth/authorize?response_type=code&client_id={id}&redirect_uri={CALLBACK}&code_challenge_method=S256&code_challenge={challenge}&state=private-state");
+    assert_eq!(send(&app, "GET", &target, "text/plain", "").await.status(), 200);
+    let pending = owner.pending_requests().unwrap().into_iter()
+        .find(|request| request.client_id == id).unwrap();
+    owner.approve_request(&pending.id, |_| true).unwrap();
+    let approved = send(&app, "GET", &target, "text/plain", "").await;
+    assert_eq!(approved.status(), 302);
+    let code = approved.headers().get("location").unwrap().to_str().unwrap()
+        .split_once('?').unwrap().1.split('&')
+        .find_map(|part| part.strip_prefix("code=")).unwrap();
+    let form = format!("grant_type=authorization_code&client_id={id}&client_secret={secret}&redirect_uri={CALLBACK}&code={code}&code_verifier={verifier}");
+    let ct = "application/x-www-form-urlencoded";
+    assert_eq!(send(&app, "POST", "/oauth/token", ct,
+        &format!("client_id={id}&client_secret=private-wrong-secret")).await.status(), 401);
+    assert_eq!(send(&app, "POST", "/oauth/token", ct,
+        &format!("grant_type=refresh_token&client_id={id}&client_secret={secret}&refresh_token=private-invalid-grant")).await.status(), 400);
+    let issued = send(&app, "POST", "/oauth/token", ct, &form).await;
+    assert_eq!(issued.status(), 200);
+    let tokens: Value = serde_json::from_slice(&to_bytes(issued.into_body(), 65536).await.unwrap()).unwrap();
+    let access = tokens["access_token"].as_str().unwrap();
+    let refresh = tokens["refresh_token"].as_str().unwrap();
+    assert_eq!(send(&app, "POST", "/oauth/revoke", ct,
+        &format!("client_id={id}&client_secret=private-wrong-secret&token={access}")).await.status(), 401);
+    assert_eq!(send(&app, "POST", "/oauth/revoke", ct,
+        &format!("client_id={id}&client_secret={secret}&token={access}")).await.status(), 200);
+    assert_eq!(mcp(app.clone(), access, list()).await.0, 401);
+
+    let snapshot = serde_json::to_value(app.request_audit.snapshot()).unwrap();
+    let records = snapshot["records"].as_array().unwrap();
+    let expected = [
+        ("oauth/register", 415, "http_refusal", Some("unsupported_content_type"), false),
+        ("oauth/register", 201, "success", None, false),
+        ("oauth/authorize", 400, "http_refusal", Some("invalid_client_or_redirect"), false),
+        ("oauth/authorize", 200, "success", None, false),
+        ("oauth/authorize", 302, "success", None, false),
+        ("oauth/token", 401, "http_refusal", Some("invalid_client"), false),
+        ("oauth/token", 400, "http_refusal", Some("invalid_grant"), true),
+        ("oauth/token", 200, "success", None, true),
+        ("oauth/revoke", 401, "http_refusal", Some("invalid_client"), false),
+        ("oauth/revoke", 200, "success", None, true),
+        ("tools/list", 401, "http_refusal", Some("invalid_token"), false),
+    ];
+    assert_eq!(records.len(), expected.len());
+    let digest = hex::encode(Sha256::digest(id.as_bytes()));
+    for (index, (record, (method, status, outcome, error, verified))) in
+        records.iter().zip(expected).enumerate()
+    {
+        assert_eq!(record["sequence"], json!(index + 1));
+        assert_eq!(record["method"], method);
+        assert_eq!(record["http_status"], status);
+        assert_eq!(record["outcome"], outcome);
+        assert_eq!(record["error_code"], json!(error));
+        assert_eq!(record["provider"], if verified { json!("gemini") } else { Value::Null });
+        assert_eq!(record["client_id_sha256"], if verified { json!(digest) } else { Value::Null });
+        assert!(record["catalogue_sha256"].is_null());
+        assert!(record["tool_name"].is_null());
+        assert!(record["timestamp_unix_ms"].as_u64().is_some());
+        assert!(record["duration_ms"].as_u64().is_some());
+    }
+    assert_eq!(snapshot["in_flight"], 0);
+    let encoded = snapshot.to_string();
+    for secret_value in [id, secret, code, &verifier, &challenge, access, refresh, CALLBACK, "private-"] {
+        assert!(!encoded.contains(secret_value));
+    }
+}
+
 #[tokio::test(flavor="multi_thread",worker_threads=2)]
 async fn capability_route_selects_whole_catalogue_schema_and_dispatch_for_each_grant() {
     let fixture=Fixture::new();
@@ -514,9 +640,68 @@ async fn capability_route_selects_whole_catalogue_schema_and_dispatch_for_each_g
 }
 
 #[tokio::test]
+async fn specialized_catalogue_http_refuses_legacy_grant_and_excluded_direct_calls() {
+    use crate::catalogue_selection::CatalogueSelection;
+    let Fixture{mut app,_root,legacy_access,unified_access,..}=Fixture::new();
+    let selected=CatalogueSelection::Extensions;
+    let mut handlers=ToolMapHandler::new();
+    for name in ["agent_bridge_status","desktop_mcp_tool_search","desktop_start_process"] {
+        handlers.register(name,move |_|Ok(ToolCallResult::text(name)));
+    }
+    let mut definitions=["agent_bridge_status","desktop_mcp_tool_search","desktop_start_process"]
+        .into_iter().map(|name|ToolDefinition::new(name,None,json!({"type":"object"}))).collect::<Vec<_>>();
+    selected.restrict(&mut definitions,&mut handlers);
+    let digest=crate::capability_manifest::catalogue_digest(&definitions).unwrap();
+    let router=McpGateway::new(selected.configure(GatewayConfig::new("fixture","1"),&digest),
+        definitions,handlers);
+    // Issue two real synthetic grants for the exact selected manifest.
+    // Deliberately retain earlier legacy/full tokens to test defense in
+    // depth beyond the separate startup-marker refusal.
+    let mut manifest=json!({"policy_version":1,"catalogue_sha256":digest,"catalogue":"extensions"});
+    manifest.sort_all_objects();
+    let capability=CapabilityIdentity::UnifiedV1{
+        manifest_sha256:crate::capability_manifest::canonical_digest(&manifest).unwrap(),
+        catalogue_sha256:digest,policy_version:1,
+    };
+    drop(app.oauth);
+    let mut oauth=OAuthServer::open_with_capability(OAuthConfig{
+        state_dir:_root.0.clone(),public_origin:ORIGIN.into(),audience:Audience::Workstation,
+    },capability.clone()).unwrap();
+    oauth.bind_capability_manifest(&serde_json::to_vec(&manifest).unwrap()).unwrap();
+    let (gemini_access,_)=issue_access(&mut oauth,&_root.0,"narrow-gemini");
+    // The running OAuth server spaces registrations by one second.
+    tokio::time::sleep(std::time::Duration::from_millis(1001)).await;
+    let (chatgpt_access,_)=issue_provider_access(&mut oauth,&_root.0,"narrow-chatgpt",
+        "https://chatgpt.com/connector_platform_oauth_redirect");
+    app.oauth=Arc::new(Mutex::new(oauth));
+    app.unified=Some(Arc::new(UnifiedRoute{
+        catalogue:selected,identity:capability,router:Arc::new(router),
+        extension_guard:None,manifest_guard:Arc::new(||Ok(())),
+        response_permits:Arc::new(Semaphore::new(2)),
+    }));
+    assert_eq!(mcp(app.clone(),&legacy_access,list()).await.0,401);
+    assert_eq!(mcp(app.clone(),&unified_access,list()).await.0,401);
+    for access in [&gemini_access,&chatgpt_access] {
+        let (status,listed)=mcp(app.clone(),access,list()).await;
+        assert_eq!(status,200);
+        assert_eq!(listed["result"]["tools"].as_array().unwrap().len(),2);
+        let (_,denied)=mcp(app.clone(),access,call("desktop_start_process",json!({}))).await;
+        assert_eq!(denied["error"]["code"],-32602);
+        let (_,allowed)=mcp(app.clone(),access,call("desktop_mcp_tool_search",json!({}))).await;
+        assert_eq!(allowed["result"]["content"][0]["text"],"desktop_mcp_tool_search");
+        let (status,modern_list)=mcp_modern(app.clone(),Some(access),
+            modern("tools/list",json!({}),"2026-07-28"),
+            &[("mcp-protocol-version","2026-07-28"),("mcp-method","tools/list")]).await;
+        assert_eq!(status,200);
+        assert_eq!(modern_list["result"]["cacheScope"],"private");
+        assert_eq!(modern_list["result"]["tools"].as_array().unwrap().len(),2);
+    }
+}
+
+#[tokio::test]
 async fn capability_route_refuses_exact_manifest_drift() {
     let mut fixture=Fixture::new();
-    fixture.app.unified=Some(Arc::new(UnifiedRoute {identity:identity(),
+    fixture.app.unified=Some(Arc::new(UnifiedRoute {catalogue:crate::catalogue_selection::CatalogueSelection::Unified,identity:identity(),
         router:Arc::new(fixture_router(true)),extension_guard:None,
         manifest_guard:Arc::new(||Err("synthetic manifest drift".into())),
         response_permits:Arc::new(Semaphore::new(2))}));
@@ -544,10 +729,10 @@ async fn capability_fix_http_uses_selected_commands_after_successful_hash_check(
         fixture._root.0.join("commands-core.sqlite")).unwrap()));
     let mut catalogue=Vec::new();let mut handlers=ToolMapHandler::new();
     crate::unified_core::attach(database,&std::fs::canonicalize(&project).unwrap(),selected,
-        ProfileControl::new(DesktopProfile::FullControl),false,&mut catalogue,&mut handlers).unwrap();
+        ProfileControl::new(DesktopProfile::FullControl),false,false,&mut catalogue,&mut handlers).unwrap();
     let checked=Arc::new(AtomicBool::new(false));
     let observed=Arc::clone(&checked);
-    fixture.app.unified=Some(Arc::new(UnifiedRoute {identity:identity(),
+    fixture.app.unified=Some(Arc::new(UnifiedRoute {catalogue:crate::catalogue_selection::CatalogueSelection::Unified,identity:identity(),
         router:Arc::new(McpGateway::new(GatewayConfig::new("bound-commands","1"),catalogue,handlers)),
         extension_guard:None,response_permits:Arc::new(Semaphore::new(2)),
         manifest_guard:Arc::new(move || {
@@ -662,17 +847,33 @@ fn capability_unified_preserves_historical_extension_base_but_not_other_scope_dr
     assert!(legacy_base_for_unified(&fixture._root.0,false,&current).is_err());
 }
 
+#[test]
+fn specialized_catalogue_startup_marker_refuses_preset_change_or_legacy_reuse() {
+    let fixture=Fixture::new();
+    let base=json!({"schema":2,"purpose":"synthetic exact scope","settings_tools":false,
+        "effective_extension_authority":null,"catalogue_selection":"core"});
+    let sealed=workstation_scope(&base,&fixture.app.router).unwrap();
+    let path=fixture._root.0.join(WORKSTATION_SCOPE_FILE);
+    std::fs::write(&path,serde_json::to_vec(&sealed).unwrap()).unwrap();
+    assert_eq!(legacy_base_for_unified(&fixture._root.0,false,&base).unwrap(),base);
+    let mut changed=base.clone();changed["catalogue_selection"]=json!("code");
+    assert!(legacy_base_for_unified(&fixture._root.0,false,&changed).is_err());
+    changed.as_object_mut().unwrap().remove("catalogue_selection");
+    assert!(preflight_workstation_scope(&fixture._root.0,false,&changed).is_err());
+    assert!(legacy_base_for_unified(&fixture._root.0,false,&changed).is_err());
+}
+
 #[tokio::test]
 async fn capability_changed_extension_policy_refuses_old_grant_while_exact_new_view_works() {
     let mut fixture=Fixture::new();
     let settings=fixture._root.0.join("synthetic-extension-settings");
     agent_bridge_lifecycle::initialize_operator_settings(&settings).unwrap();
     let current=runtime::workstation_extension_authority(&settings).unwrap();
-    fixture.app.extension_guard=Some(ExtensionGuard{settings:settings.clone(),
+    fixture.app.extension_guard=Some(ExtensionGuard{settings:settings.clone(),scope:None,
         authority:json!({"synthetic_historical_authority":"different"})});
-    fixture.app.unified=Some(Arc::new(UnifiedRoute {
+    fixture.app.unified=Some(Arc::new(UnifiedRoute {catalogue:crate::catalogue_selection::CatalogueSelection::Unified,
         identity:identity(),router:Arc::new(fixture_router(true)),
-        extension_guard:Some(ExtensionGuard{settings,authority:current}),
+        extension_guard:Some(ExtensionGuard{settings,authority:current,scope:None}),
         manifest_guard:Arc::new(||Ok(())),response_permits:Arc::new(Semaphore::new(2)),
     }));
     assert_eq!(mcp(fixture.app.clone(),&fixture.legacy_access,list()).await.0,403);
@@ -773,11 +974,11 @@ pub(crate) async fn assert_audited_unified_status(
         legacy_catalogue_sha256: router_catalogue_digest(&legacy).unwrap(),
         router: Arc::new(legacy),
         request_audit: Arc::new(RequestAudit::new().unwrap()),
-        unified: Some(Arc::new(UnifiedRoute {
+        unified: Some(Arc::new(UnifiedRoute {catalogue:crate::catalogue_selection::CatalogueSelection::Unified,
             identity: identity.clone(),
             router: Arc::new(router),
             extension_guard: Some(ExtensionGuard {
-                settings: settings.to_owned(), authority: extension_authority.clone(),
+                settings: settings.to_owned(), authority: extension_authority.clone(),scope:None,
             }),
             manifest_guard: Arc::new(move || manifest.verify()),
             response_permits: Arc::new(Semaphore::new(2)),
@@ -812,4 +1013,98 @@ pub(crate) async fn assert_audited_unified_status(
     assert_eq!(record["outcome"], "success");
     assert_eq!(record["http_status"], 200);
     assert_eq!(record["error_code"], Value::Null);
+}
+
+
+#[tokio::test]
+async fn attached_extension_route_keeps_valid_base_and_revokes_before_next_admission() {
+    let mut fixture=Fixture::new();
+    let settings=fixture._root.0.join("extension-reload-route");
+    agent_bridge_lifecycle::initialize_operator_settings(&settings).unwrap();
+    let raw=serde_json::to_vec(&json!({"version":1,"servers":{
+        "mcp_docs":{"endpoint":"https://modelcontextprotocol.io/mcp","tools":{
+            "search_model_context_protocol":{"descriptor_sha256":"a".repeat(64),
+                "parameters":{"query":{"type":"search_terms"}}}
+        }}
+    }})).unwrap();
+    crate::write_private(settings.join("extensions.json"),&raw);
+    let profile=crate::session_profile::ProfileControl::new(agent_bridge_desktop::DesktopProfile::FullControl);
+    let scope=crate::extensions::ExtensionScope::live(&profile).unwrap();
+    let mut definitions=Vec::new();
+    let mut handlers=ToolMapHandler::new();
+    crate::extensions::attach(&settings,&mut definitions,&mut handlers,scope.clone()).unwrap();
+    let live=scope.bind_live(&settings).unwrap();
+    let bound=runtime::workstation_extension_authority(&settings).unwrap();
+    let router=Arc::new(McpGateway::new(GatewayConfig::new("extension-route-fixture","1"),definitions,handlers));
+    fixture.app.router=router;
+    fixture.app.extension_guard=Some(ExtensionGuard{settings:settings.clone(),authority:bound.clone(),scope:Some(scope.clone())});
+    // This exact invalid argument fails locally, before network access.
+    let request=call("desktop_mcp_tool_call",json!({"name":"mcp_docs:search_model_context_protocol",
+        "arguments":{"query":"not allowed!"}}));
+    let (status,before)=mcp(fixture.app.clone(),&fixture.legacy_access,request.clone()).await;
+    assert_eq!(status,200);
+    assert_eq!(before["result"]["isError"],true);
+    assert!(before.to_string().contains("Arguments outside the operator-approved contract"));
+    crate::write_private(settings.join("extensions.json"),b"{invalid");
+    assert!(scope.reload_from_disk(&settings).is_err());
+    let (status,after)=mcp(fixture.app.clone(),&fixture.legacy_access,request.clone()).await;
+    assert_eq!(status,200,"sealed old configuration remains usable");
+    assert_eq!(after,before);
+    assert_eq!(live.generation(),1);
+    assert!(live.audit_snapshot()["records"][0]["ok"]==false);
+
+    // A real native journal decision must cancel old registered receipts
+    // immediately, not wait for the next MCP call or configuration reload.
+    crate::write_private(settings.join("extensions.json"),&raw);
+    let receipt=live.admit("mcp_docs:search_model_context_protocol",
+        agent_bridge_extensions::ToolScope::DataOperations, |_|Ok(())).unwrap();
+    let (status,proposed)=mcp(fixture.app.clone(),&fixture.legacy_access,
+        call("desktop_mcp_manage",json!({"action":"disable","name":"mcp_docs"}))).await;
+    assert_eq!(status,200);
+    let proposal:Value=serde_json::from_str(proposed["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+    let id=proposal["request_id"].as_str().unwrap();
+    let decided=crate::extensions::decide_from_operator_ui(
+        &crate::extensions::UiOAuthOwner::default(),&settings,id,true).unwrap();
+    assert_eq!(decided["effect_now"],"disabled_and_pinned");
+    assert!(!live.current().is_server_enabled("mcp_docs"));
+    assert_eq!(live.audit_snapshot()["records"][1]["cancelled_in_flight"],1);
+    // The old bearer remains sealed to the old exact extension authority.
+    crate::write_private(settings.join("extensions.json"),b"{invalid again");
+    assert_eq!(mcp(fixture.app.clone(),&fixture.legacy_access,request).await.0,403);
+    assert!(receipt.execute(json!({"query":"safe"}).as_object().unwrap()).is_err());
+    assert_eq!(live.in_flight().active_count(),0);
+}
+
+#[tokio::test]
+async fn result_cache_scope_requires_authenticated_http_and_ignores_caller_metadata() {
+    let mut fixture=Fixture::new();
+    let settings=fixture._root.0.join("result-cache-http-route");
+    agent_bridge_lifecycle::initialize_operator_settings(&settings).unwrap();
+    let profile=crate::session_profile::ProfileControl::new(agent_bridge_desktop::DesktopProfile::FullControl);
+    let scope=crate::extensions::ExtensionScope::live(&profile).unwrap();
+    scope.bind_live(&settings).unwrap();
+    let bound=runtime::workstation_extension_authority(&settings).unwrap();
+    let calls=Arc::new(AtomicU64::new(0));
+    let witness=calls.clone();
+    let mut handlers=ToolMapHandler::new();
+    handlers.register("cache_scope_witness",move |_|{
+        witness.fetch_add(1,Ordering::Relaxed);
+        Ok(ToolCallResult::text(if crate::extensions::test_cache_scope_present(){"authenticated"}else{"unscoped"}))
+    });
+    let router=Arc::new(McpGateway::new(GatewayConfig::new("cache-scope-fixture","1"),
+        vec![ToolDefinition::new("cache_scope_witness",None,json!({"type":"object"}))],handlers));
+    fixture.app.legacy_catalogue_sha256=router_catalogue_digest(&router).unwrap();
+    fixture.app.router=router.clone();
+    fixture.app.extension_guard=Some(ExtensionGuard{settings,authority:bound,scope:Some(scope)});
+    let mut request=call("cache_scope_witness",json!({}));
+    request["params"]["_meta"]=json!({"caller_id":"forged","profile":"read-only","token_hash":"forged"});
+    let (status,reply)=mcp(fixture.app.clone(),&fixture.legacy_access,request.clone()).await;
+    assert_eq!(status,200);
+    assert_eq!(reply["result"]["content"][0]["text"],"authenticated");
+    assert_eq!(mcp(fixture.app.clone(),"invalid-bearer",request.clone()).await.0,401);
+    assert_eq!(calls.load(Ordering::Relaxed),1);
+    let local=router.handle_str(&request.to_string()).unwrap();
+    let local:Value=serde_json::from_str(&local).unwrap();
+    assert_eq!(local["result"]["content"][0]["text"],"unscoped");
+    assert_eq!(calls.load(Ordering::Relaxed),2);
 }

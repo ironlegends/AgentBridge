@@ -180,6 +180,9 @@ pub struct GatewayConfig {
     /// value is safe only when the published catalog cannot change for the
     /// lifetime of this router; results stay `cacheScope: private`.
     pub catalog_ttl_ms: u64,
+    /// Optional host-selected cache identity for an immutable narrow view.
+    /// Never selected from client arguments or routing metadata.
+    pub catalog_partition: Option<String>,
     /// When `false` (default, standard MCP behavior), an unknown client version
     /// negotiates down to the server's preferred version. When `true`, an
     /// unsupported version returns a `-32602` Invalid Params protocol error.
@@ -196,6 +199,7 @@ impl GatewayConfig {
                 .collect(),
             instructions: None,
             catalog_ttl_ms: 0,
+            catalog_partition: None,
             strict_version_negotiation: false,
         }
     }
@@ -221,6 +225,11 @@ impl GatewayConfig {
     /// Sets the `ttlMs` freshness hint for discovery and catalog listings.
     pub fn with_catalog_ttl_ms(mut self, ttl_ms: u64) -> Self {
         self.catalog_ttl_ms = ttl_ms;
+        self
+    }
+
+    pub fn with_catalog_partition(mut self, partition: impl Into<String>) -> Self {
+        self.catalog_partition = Some(partition.into());
         self
     }
 
@@ -522,7 +531,7 @@ impl<H: ToolHandler> McpGateway<H> {
             }
         }
 
-        let modern_catalog = modern::Catalog::new(&filtered_catalog);
+        let modern_catalog = modern::Catalog::new(&filtered_catalog, config.catalog_partition.as_deref());
         Self {
             config,
             supported_versions,

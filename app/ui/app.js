@@ -55,10 +55,11 @@
   let missionsRead = 0;
   let missionsInFlight = 0;
   // Sessions are shaped and classified (live, bounds, redaction) by the Rust get_sessions command; the page only renders them.
-  let sessionsRead = 0;
-  let sessionsInFlight = 0;
+  let sessionsRequest = null;
   let sessionsSnapshot = null;
   let selectedSessionKey = null;
+  let sessionHistoryRead = null;
+  let sessionHistory = null;
   let diagnosticsRead = 0;
   let diagnosticsInFlight = 0;
   let diagnosticsMutation = false;
@@ -66,9 +67,12 @@
   let pageEpoch = 0;
   let recentFoldersKey = null;
   let extensionDecisionInFlight = false;
+  let extensionTestInFlight = false;
+  let extensionProbeEpoch = 0;
   let extensionPollTimer = null;
   let extensionPollRequest = null;
   let extensionPollDeadline = 0;
+  const extensionTestResults = new Map();
   const oauthCallbackDrafts = new Map();
 
   const $ = (id) => document.getElementById(id);
@@ -176,7 +180,7 @@
   }
 
   function mutationsBlocked() {
-    return !state || panelBusy || profileChanging || extensionDecisionInFlight
+    return !state || panelBusy || profileChanging || extensionDecisionInFlight || extensionTestInFlight
       || Boolean(stateError) || Boolean(gatewayControls().phase);
   }
 
@@ -246,26 +250,30 @@
     });
   }
 
-  function renderStatus(controls) {
-    const unavailable = Boolean(stateError) || (state && usesLiveWorkstation() && !isNativeStopped()
-      && (!state.liveProfile || !state.liveProfile.connected));
-    const live = Boolean(state) && !unavailable && Boolean(state.gateway && state.gateway.live);
-    const phaseLabel = { starting: "Starting…", stopping: "Stopping…", restarting: "Restarting…" }[controls.phase];
-    const label = controls.phase ? (phaseLabel || "Busy…")
-      : !state ? "Checking…" : live ? "Running" : (unavailable ? "Unavailable" : "Stopped");
-    const tone = controls.phase ? "busy" : live ? "on" : (unavailable ? "error" : "off");
-    $("gwStatus").textContent = label;
-    $("gwStatus").title = live ? "Local port " + state.gateway.port : "";
-    $("gwDot").className = "dot " + ({ on: "ok", busy: "warn", error: "danger", off: "" }[tone]);
+  function renderStatus(busy) {
+    const model = state?.statusCard;
+    const card = model?.pending?.[pendingLifecyclePhase] ?? (stateError ? model?.readError : model?.current);
+    // Before the first usable IPC reply, keep lifecycle actions unavailable.
+    const unavailable = Boolean(state || stateError);
+    const tone = card?.tone ?? (unavailable ? "error" : "off");
+    $("gwStatus").textContent = card?.title ?? (unavailable ? "Unavailable" : "Checking…");
+    $("gwStatus").title = card?.tooltip ?? "";
+    $("gwDot").className = "dot " + ({ on: "ok", busy: "warn", error: "danger" }[tone] ?? "");
     $("statusCard").setAttribute("data-tone", tone);
-    return live;
+    $("powerBtn").disabled = busy || card?.canPower !== true;
+    $("powerBtn").textContent = card?.powerLabel ?? "Start Bridge";
+    $("powerBtn").className = card?.powerSecondary ? "ghost-btn" : "action-btn";
+    $("stopBtn").disabled = busy || card?.canStop !== true;
+    $("stopBtn").classList.toggle("hidden", card?.showStop !== true);
+    $("gatewayActions").classList.toggle("hidden", card ? !card.showActions : unavailable);
+    $("externalGatewayNotice").classList.toggle("hidden", card?.showNotice !== true);
+    $("externalGatewayNotice").textContent = card?.detail ?? "";
+    $("quitAppBtn").textContent = card?.quitLabel ?? "Quit";
   }
 
   function renderControls() {
     const external = usesLiveWorkstation();
-    const controls = gatewayControls();
     const busy = mutationsBlocked();
-    const live = Boolean(state && state.gateway && state.gateway.live);
     const localControls = [
       "initStateBtn", "quickWorkspaceBtn", "chooseWorkspaceBtn",
       "pickOauthDirBtn", "savePathsBtn", "saveOauthBtn",
@@ -276,36 +284,7 @@
     document.querySelectorAll("[data-theme-choice]").forEach((btn) => { btn.disabled = busy; });
     document.querySelectorAll("[data-recent]").forEach((btn) => { btn.disabled = busy || external; });
     document.querySelectorAll("[data-skill-rb]").forEach((btn) => { btn.disabled = operatorMutationsBlocked() || diagnosticsMutation; });
-    renderStatus(controls);
-    $("powerBtn").disabled = busy || !(live ? controls.canRestart : controls.canStart);
-    $("stopBtn").disabled = busy || !controls.canStop;
-    $("powerBtn").textContent = controls.phase
-      ? ({ starting: "Starting Bridge…", stopping: "Stopping Bridge…", restarting: "Restarting Bridge…" }[controls.phase] || "Bridge is busy…")
-      : (live ? "Restart Bridge" : "Start Bridge");
-    // Restart is a maintenance action; only Start is the screen's primary call to action.
-    $("powerBtn").className = live || controls.phase ? "ghost-btn" : "action-btn";
-    $("gatewayActions").classList.toggle("hidden", external
-      && !controls.canStart && !controls.canStop && !controls.canRestart && !controls.phase);
-    $("stopBtn").classList.toggle("hidden", !controls.canStop
-      && controls.phase !== "stopping" && controls.phase !== "restarting");
-    $("externalGatewayNotice").classList.toggle("hidden", !external);
-    // The status heading already names the state; the notice adds only what it cannot say.
-    const notice = [];
-    if (controls.phase) notice.push("Bridge is " + controls.phase + "…");
-    else if (isNativeStopped() && !stateError) notice.push("Start it to connect your AI.");
-    else if (!state || !state.liveProfile || !state.liveProfile.connected || stateError) {
-      notice.push("The configured Bridge session is unavailable.");
-    } else if (!isNative()) notice.push("Run by an independent Bridge.");
-    if (isNative() && state.tunnel && state.tunnel.configured) {
-      if (state.tunnel.error) notice.push("Web tunnel unavailable: " + state.tunnel.error);
-      else if (state.tunnel.childRunning) notice.push("Web tunnel running (remote access not verified).");
-      else notice.push("Web tunnel stopped. Web chats cannot connect.");
-    }
-    $("quitAppBtn").textContent = isNative() ? "Quit and stop Bridge" : "Quit";
-    if (controls.reason) notice.push(controls.reason);
-    if (controls.canRestart && live) notice.push("Restart resets access to the startup profile.");
-    else if (controls.canStart) notice.push("Bridge starts with its startup profile.");
-    $("externalGatewayNotice").textContent = notice.join(" ");
+    renderStatus(busy);
     renderProfileControl();
     renderExtensionControls();
   }
@@ -410,11 +389,11 @@
       if (epoch !== pageEpoch) return;
       try {
         if (!document.hidden && !panelBusy && !profileChanging && !extensionDecisionInFlight) {
-          if (activePage === "pageMissions" && !missionsInFlight) {
-            if (!sessionsInFlight) loadSessions(true);
-            await loadMissionsDrawer(true);
-          } else if (activePage === "pageSession" && !sessionsInFlight) {
-            await loadSessions(true);
+          if (activePage === "pageMissions") {
+            loadSessions(true);
+            if (!missionsInFlight) loadMissionsDrawer(true);
+          } else if (activePage === "pageSession") {
+            loadSessions(true);
           } else if (activePage === "pageApprovals" && !approvalsInFlight
             && !refreshInFlight && !extensionPollTimer) {
             await loadApprovalsDrawer(true, true);
@@ -432,7 +411,6 @@
     activePage = pageId;
     pageEpoch++;
     missionsRead++;
-    sessionsRead++;
     diagnosticsRead++;
     schedulePageRefresh();
     if (pageId !== "pageApprovals") {
@@ -474,18 +452,27 @@
 
   function renderMain(data) {
     if (isStaleNativeSnapshot(data)) return;
+    const changedService = isNative(state) && isNative(data)
+      && state.gateway.generation !== data.gateway.generation;
     state = data;
+    if (changedService) {
+      extensionProbeEpoch++;
+      extensionTestResults.clear();
+      sessionsRequest = null;
+      sessionsSnapshot = null;
+      renderSessionsBadge();
+      renderSessionsView();
+      if (sessionsPageVisible()) loadSessions(true);
+    }
     const s = data.settings;
     applyTheme(s.theme);
 
-    const activeMissions = data.database && data.database.activeMissions ? data.database.activeMissions : 0;
     const pendingTotal = data.pendingApprovalsTotal || 0;
     const setBadge = (id, count, noun) => {
       $(id).textContent = String(count);
       $(id).classList.toggle("hidden", !(count > 0));
       $(id).setAttribute("aria-label", count + " " + noun + (count === 1 ? "" : "s"));
     };
-    setBadge("tasksBadge", activeMissions, "active task");
     setBadge("approvalsBadge", pendingTotal, "pending approval");
 
     $("scopePath").textContent = s.workspace || "No folder chosen";
@@ -574,6 +561,9 @@
   }
 
   async function refreshState() {
+    if (activePage === "pageMain" && !document.hidden && !profileChanging && !panelBusy && !extensionDecisionInFlight) {
+      loadSessions(true);
+    }
     if (refreshInFlight || profileChanging || panelBusy || extensionDecisionInFlight) return;
     refreshInFlight = true;
     try {
@@ -599,7 +589,13 @@
       && activePage === "pageMissions" && generation === stateGeneration;
     missionsInFlight++;
     if (!passive) body.innerHTML = '<div class="empty-note">Loading tasks…</div>';
-    const render = (html) => { if (body.innerHTML !== html) body.innerHTML = html; };
+    const render = (html, active) => {
+      if (body.innerHTML !== html) {
+        body.innerHTML = html;
+        bindHandoffButtons(body);
+      }
+      $("tasksHeading").textContent = Number.isSafeInteger(active) && active >= 0 ? "Tasks (" + active + " active)" : "Tasks";
+    };
     const initHint = "Open Settings, then Storage and web relay, and select Initialize.";
     try {
       const data = await invoke("get_missions_snapshot");
@@ -626,7 +622,7 @@
           return '<div class="set-card">' +
             '<div class="set-row"><span class="set-title">' + escapeHtml(m.mission_id) + '</span><span class="pill ' + pillCls + '">' + escapeHtml(m.status) + "</span></div>" +
             '<div class="item-meta">' + escapeHtml(m.goal) + "</div>" +
-            cps +
+            cps + handoffButton(m.mission_id, m.revision, m.copy_handoff) +
           "</div>";
         }).join("");
       }
@@ -646,7 +642,26 @@
           "</div>";
         }).join("");
       }
-      render(html);
+      if (data.attempts_unavailable === true) {
+        html += '<div class="item-meta notice-warn">Attempt ledger unavailable. Do not restart uncertain work.</div>';
+      } else if (Array.isArray(data.attempts) && data.attempts.length) {
+        html += '<h3 class="list-heading">Maintenance attempts</h3>' + data.attempts.map(row => {
+          const a = row.attempt || {};
+          const evidence = a.evidence;
+          const status = row.reconciliation_required === true ? "Reconcile — do not repeat" :
+            String(a.state || "unknown").replace(/_/g, " ");
+          const lease = row.lease_current === true ? "Lease current (not a live session)" : "No current lease";
+          return '<div class="set-card"><div class="set-row"><span class="set-title">Verify local Git HEAD</span>' +
+            '<span class="pill ' + (a.state === "reviewed_pass" ? "ok" : "warn") + '">' + escapeHtml(status) + '</span></div>' +
+            '<div class="item-meta">' + escapeHtml(a.attempt_id) + ' · ' + escapeHtml(lease) + '</div>' +
+            '<div class="item-meta">Subtask ' + escapeHtml(a.plan?.subtask_id) +
+            ' · Base ' + escapeHtml(a.plan?.base_commit) + '</div>' +
+            (evidence ? '<div class="item-meta">Receipt ' + escapeHtml(evidence.receipt_id) +
+              ' · ' + (evidence.verified === true ? "Base matched" : "Base mismatch") + '</div>' : "") +
+            '</div>';
+        }).join("");
+      }
+      render(html, data.mission_counts?.active);
     } catch (err) {
       if (current()) render('<div class="empty-state"><div class="set-title">Tasks could not load</div><div class="set-sub">' + escapeHtml(err) + "</div></div>");
     } finally {
@@ -656,6 +671,7 @@
 
   const SESSION_PROVIDERS = { chatgpt: "ChatGPT", gemini: "Gemini", local: "Local app" };
   const SESSION_TRANSPORTS = { http: "HTTP", stdio: "Terminal (stdio)" };
+  const SESSIONS_LOADING = '<div class="item-meta">Loading sessions…</div>';
 
   function sessionName(session) {
     return SESSION_PROVIDERS[session.provider] || "AI client";
@@ -693,11 +709,12 @@
   }
 
   function renderSessionsList(data) {
-    const sessions = listOf(data && data.sessions);
-    const earlier = listOf(data && data.earlier);
+    if (!data) return SESSIONS_LOADING;
+    const sessions = listOf(data.sessions);
+    const earlier = listOf(data.earlier);
     let html = "";
-    if (!data || data.available === false) {
-      html += '<div class="item-meta">' + escapeHtml((data && data.reason) || "Sessions appear while Bridge is running.") + "</div>";
+    if (data.available === false) {
+      html += '<div class="item-meta">' + escapeHtml(data.reason || "Sessions appear while Bridge is running.") + "</div>";
     } else if (sessions.length === 0) {
       html += '<div class="empty-state compact"><div class="set-title">No AI connected yet</div>' +
         '<div class="set-sub">Sessions appear when an AI calls Bridge.</div></div>';
@@ -720,6 +737,44 @@
     return html;
   }
 
+  function handoffButton(missionId, revision, permitted) {
+    if (typeof permitted !== "boolean" || typeof missionId !== "string" || !/^mis_[0-9a-f]{32}$/.test(missionId)
+        || !Number.isSafeInteger(revision) || revision < 1) return "";
+    if (!permitted) {
+      return '<button class="mini-btn sm" type="button" disabled>Copy handoff</button>' +
+        '<p class="set-sub">To enable copying, an attached mission member must record the checkpoint ' +
+        '<code>handoff: desktop-copy</code> for the current revision. The grant lasts five minutes.</p>';
+    }
+    return '<button class="mini-btn sm" type="button" data-copy-handoff="' + escapeHtml(missionId)
+      + '" data-handoff-revision="' + revision + '">Copy handoff</button>';
+  }
+
+  function bindHandoffButtons(body) {
+    for (const button of body.querySelectorAll("[data-copy-handoff]")) {
+      button.addEventListener("click", async () => {
+        const missionId = button.getAttribute("data-copy-handoff");
+        const revision = Number(button.getAttribute("data-handoff-revision"));
+        const epoch = pageEpoch, generation = stateGeneration;
+        const current = () => epoch === pageEpoch && generation === stateGeneration
+          && Array.from(body.querySelectorAll("[data-copy-handoff]")).includes(button);
+        if (!current()) return;
+        button.disabled = true;
+        try {
+          const result = await invoke("get_mission_handoff", { missionId, revision });
+          if (!current()) return;
+          if (typeof result?.handoff !== "string" || result.max_bytes !== 4096
+              || result.handoff.length > 4096) throw new Error("Invalid handoff");
+          await navigator.clipboard.writeText(result.handoff);
+          if (current()) showToast(result.truncated ? "Handoff copied (limited)." : "Handoff copied.");
+        } catch (_) {
+          if (current()) showToast("Copy unavailable. Ask an attached member to approve it again.");
+        } finally {
+          if (current()) button.disabled = false;
+        }
+      });
+    }
+  }
+
   function missionCard(mission) {
     const subtasks = listOf(mission.subtasks);
     const pillCls = mission.status === "blocked" ? "warn" : "ok";
@@ -730,7 +785,62 @@
         '<li><span class="subtask-title">' + escapeHtml(t.title) + (t.assignedToContext === true ? ' <span class="pill accent">this session</span>' : "") +
         '</span><span class="pill' + (t.status === "completed" ? " ok" : t.status === "blocked" ? " warn" : "") + '">' + escapeHtml(String(t.status).replace(/_/g, " ")) + "</span></li>"
       ).join("") + "</ul>") +
+      handoffButton(mission.missionId, mission.revision, mission.copyHandoff) +
     "</div>";
+  }
+
+  function selectedAuditSession() {
+    const session = selectedSessionKey?.startsWith("s:") ? selectedSessionKey.slice(2) : "";
+    const boot = sessionsSnapshot?.bootId;
+    if (activePage !== "pageSession" || sessionsSnapshot?.available !== true ||
+        !/^[a-f0-9]{32}$/.test(boot || "") || !/^[a-f0-9]{32}$/.test(session) ||
+        !listOf(sessionsSnapshot.sessions).some(row => row.sessionId === session)) return null;
+    return {bootId: boot, sessionId: session, key: boot + "/" + session};
+  }
+
+  async function loadSessionHistory() {
+    const selected = selectedAuditSession();
+    if (!selected) return;
+    const epoch = pageEpoch, generation = stateGeneration;
+    if (sessionHistoryRead?.key === selected.key && sessionHistoryRead.epoch === epoch
+        && sessionHistoryRead.generation === generation) return;
+    const read = {key: selected.key, epoch, generation};
+    sessionHistoryRead = read;
+    let value;
+    try {
+      value = await invoke("get_session_history", {bootId: selected.bootId, sessionId: selected.sessionId});
+    } catch (_) {
+      value = {available: false};
+    }
+    if (sessionHistoryRead !== read) return;
+    sessionHistoryRead = null;
+    if (pageEpoch !== epoch || stateGeneration !== generation || selectedAuditSession()?.key !== selected.key) return;
+    sessionHistory = {key: selected.key, epoch, generation, value};
+    renderSessionsView();
+  }
+
+  function renderAuditHistory(history, selected) {
+    const title = '<h3 class="set-title">Audit history</h3>';
+    const lost = Number.isSafeInteger(history?.lost) && history.lost > 0
+      ? '<p class="item-meta notice-warn">' + history.lost + ' audit record' + (history.lost === 1 ? '' : 's') + ' lost across the workstation.</p>' : '';
+    if (history?.available !== true || !Array.isArray(history.records)) {
+      return title + lost + '<p class="item-meta">Audit history unavailable.</p>';
+    }
+    const rows = history.records.filter(row => row && (!selected ||
+      (row.boot_id === selected.bootId && row.session_id === selected.sessionId))).slice(0, 50);
+    if (!rows.length) return title + lost + '<p class="item-meta">No retained audit records.</p>';
+    const label = value => typeof value === "string" && /^[a-z0-9_./-]{1,96}$/.test(value) ? value : "";
+    return title + lost + '<ol class="audit-list">' + rows.map(row => {
+      const when = Number.isSafeInteger(row.timestamp_unix_ms) ? new Date(row.timestamp_unix_ms).toJSON() : null;
+      const duration = Number.isSafeInteger(row.duration_ms) && row.duration_ms >= 0 ? row.duration_ms + " ms" : "";
+      const source = ["local", "chatgpt", "gemini"].includes(row.provider) ? row.provider : "";
+      const context = /^ctx_[0-9a-f]{32}$/.test(row.context_id || "") ? row.context_id : "";
+      const mission = /^mis_[0-9a-f]{32}$/.test(row.mission_id || "") ? row.mission_id : "";
+      const meta = [when, source, duration, context, mission].filter(Boolean).join(" · ");
+      return '<li class="audit-row"><div class="audit-main"><code>' + escapeHtml(label(row.tool_name) || label(row.method) || "other") +
+        '</code> <span class="pill' + (row.outcome === "success" ? " ok" : " warn") + '">' +
+        escapeHtml(label(row.outcome) || "unknown") + '</span></div><div class="audit-meta">' + escapeHtml(meta) + '</div></li>';
+    }).join("") + '</ol>';
   }
 
   function renderSessionDetail(key) {
@@ -740,6 +850,10 @@
     const context = key.startsWith("c:") ? listOf(data && data.earlier).find((c) => c.contextId === id) : null;
     if (!session && !context) {
       $("sessionTitle").textContent = "Session";
+      if (!data) return SESSIONS_LOADING;
+      if (data?.available === false) {
+        return '<div class="item-meta notice-warn">' + escapeHtml(data.reason || "Sessions unavailable.") + "</div>";
+      }
       return '<div class="empty-state"><div class="set-title">Session no longer listed</div><div class="set-sub">Go back to see current sessions.</div></div>';
     }
     if (context) {
@@ -774,40 +888,70 @@
         '<li class="audit-row"><div class="audit-main"><code>' + escapeHtml(t.toolName) + '</code> <span class="pill' + (t.outcome === "success" ? " ok" : " warn") + '">' + escapeHtml(t.outcome || "-") + "</span></div>" +
         '<div class="audit-meta">' + escapeHtml(t.time || "-") + "</div></li>"
       ).join("") + "</ol>" : '<div class="item-meta">No tool calls yet.</div>') + "</section>";
+    const selected = selectedAuditSession();
+    if (selected) {
+      const current = sessionHistory?.key === selected.key && sessionHistory.epoch === pageEpoch
+        && sessionHistory.generation === stateGeneration;
+      html += '<section class="set-card">' + (current ? renderAuditHistory(sessionHistory.value, selected)
+        : '<h3 class="set-title">Audit history</h3><p class="item-meta">Loading audit history…</p>') + '</section>';
+    }
     return html;
+  }
+
+  function sessionsPageVisible() {
+    return activePage === "pageMain" || activePage === "pageMissions" || activePage === "pageSession";
+  }
+
+  function renderSessionsBadge() {
+    const count = sessionsSnapshot?.available === true ? sessionsSnapshot.totals?.live : null;
+    const visible = Number.isSafeInteger(count) && count > 0;
+    const badge = $("sessionsBadge");
+    badge.classList.toggle("hidden", !visible);
+    badge.textContent = visible ? String(count) : "";
+    if (visible) badge.setAttribute("aria-label", count + " live sessions");
+    else badge.removeAttribute("aria-label");
   }
 
   function renderSessionsView() {
     if (activePage === "pageMissions") {
       const html = renderSessionsList(sessionsSnapshot);
-      if ($("sessionsBody").innerHTML !== html) $("sessionsBody").innerHTML = html;
+      const body = $("sessionsBody");
+      if (body.innerHTML === html) return;
+      const focused = document.activeElement?.getAttribute("data-session");
+      body.innerHTML = html;
+      if (focused) {
+        const row = Array.from(body.querySelectorAll("[data-session]")).find(el => el.getAttribute("data-session") === focused);
+        (row ?? $("refreshMissionsBtn")).focus({ preventScroll: true });
+      }
     } else if (activePage === "pageSession" && selectedSessionKey) {
       const html = renderSessionDetail(selectedSessionKey);
-      if ($("sessionBody").innerHTML !== html) $("sessionBody").innerHTML = html;
+      const body = $("sessionBody");
+      if (body.innerHTML !== html) {
+        body.innerHTML = html;
+        bindHandoffButtons(body);
+      }
     }
   }
 
   async function loadSessions(passive = false) {
-    const read = ++sessionsRead;
-    const epoch = pageEpoch;
-    const generation = stateGeneration;
-    const current = () => read === sessionsRead && epoch === pageEpoch && generation === stateGeneration
-      && (activePage === "pageMissions" || activePage === "pageSession");
-    sessionsInFlight++;
-    if (!passive && activePage === "pageMissions") $("sessionsBody").innerHTML = '<div class="item-meta">Loading sessions…</div>';
+    if (!passive) renderSessionsView();
+    if (sessionsRequest?.generation === stateGeneration) return;
+    const request = { generation: stateGeneration };
+    sessionsRequest = request;
+    const current = () => sessionsRequest === request && request.generation === stateGeneration;
     try {
       const data = await invoke("get_sessions");
       if (!current()) return;
-      sessionsSnapshot = data && typeof data === "object" ? data : null;
-      renderSessionsView();
+      sessionsSnapshot = data && typeof data === "object" ? data : { available: false, reason: "Sessions unavailable." };
     } catch (err) {
       if (!current()) return;
-      const html = '<div class="item-meta notice-warn">Sessions could not load: ' + escapeHtml(err) + "</div>";
-      if (activePage === "pageMissions") $("sessionsBody").innerHTML = html;
-      else $("sessionBody").innerHTML = html;
+      sessionsSnapshot = { available: false, reason: "Sessions could not load: " + String(err) };
     } finally {
-      sessionsInFlight--;
+      if (sessionsRequest === request) sessionsRequest = null;
     }
+    renderSessionsBadge();
+    renderSessionsView();
+    loadSessionHistory();
   }
 
   function extensionOperationActive(operation) {
@@ -844,6 +988,13 @@
     }
     const enroll = $("enrollBtn");
     if (enroll) enroll.disabled = operatorMutationsBlocked();
+    body.querySelectorAll("[data-ext-test]").forEach((button) => {
+      button.disabled = !canDecideExtensions() || mutationsBlocked()
+        || button.getAttribute("data-ext-enabled") !== "true";
+    });
+    body.querySelectorAll("[data-ext-reload]").forEach((button) => {
+      button.disabled = !canDecideExtensions() || mutationsBlocked();
+    });
     body.querySelectorAll("[data-ext-review]").forEach((input) => { input.disabled = disabled; });
     body.querySelectorAll("[data-ext-decide]").forEach((button) => {
       const id = button.getAttribute("data-ext-request");
@@ -912,6 +1063,109 @@
     return "Decision recorded: " + String(result.reason || result.decision || "review its status") + ".";
   }
 
+  function extensionServerAuthorityKey(panel, srv) {
+    if (!srv || srv.enabled !== true) return null;
+    const fp = (typeof srv.config_sha256 === "string" && srv.config_sha256) ? srv.config_sha256
+      : (typeof srv.configSha256 === "string" && srv.configSha256) ? srv.configSha256
+      : JSON.stringify([srv.transport || null, srv.endpoint || null, srv.executable || null, srv.executable_sha256 || null]);
+    return JSON.stringify([
+      Number(panel?.gateway?.generation ?? 0),
+      panel?.extensions?.generation ?? null,
+      srv.id,
+      fp,
+    ]);
+  }
+
+  function pruneExtensionTestResults(panel) {
+    const servers = new Map(((panel && panel.extensions && panel.extensions.servers) || []).map((srv) => [srv.id, srv]));
+    let changed = false;
+    for (const [id, entry] of extensionTestResults.entries()) {
+      const currentKey = extensionServerAuthorityKey(panel, servers.get(id));
+      if (!currentKey || !entry || entry.authorityKey !== currentKey) {
+        extensionTestResults.delete(id);
+        changed = true;
+      }
+    }
+    return changed;
+  }
+
+  async function testExtensionConnection(button) {
+    if (mutationsBlocked() || !canDecideExtensions()
+      || button.getAttribute("data-ext-enabled") !== "true") return;
+    const server = button.getAttribute("data-ext-test");
+    if (!server) return;
+    const startSrv = (state?.extensions?.servers || []).find((srv) => srv.id === server);
+    const startKey = extensionServerAuthorityKey(state, startSrv);
+    if (!startKey) return;
+    const startEpoch = extensionProbeEpoch;
+    const startGatewayGen = Number(state?.gateway?.generation ?? 0);
+    const startExtGen = state?.extensions?.generation ?? null;
+    const stillMatchesAuthority = (report) => {
+      if (startEpoch !== extensionProbeEpoch) return false;
+      if (Number(state?.gateway?.generation ?? 0) !== startGatewayGen) return false;
+      if ((state?.extensions?.generation ?? null) !== startExtGen) return false;
+      const currentSrv = (state?.extensions?.servers || []).find((srv) => srv.id === server);
+      const currentKey = extensionServerAuthorityKey(state, currentSrv);
+      if (!currentKey || currentKey !== startKey) return false;
+      if (report && typeof report.config_sha256 === "string" && typeof currentSrv?.config_sha256 === "string"
+        && report.config_sha256 !== currentSrv.config_sha256) {
+        return false;
+      }
+      if (report && Number.isFinite(report.generation) && Number.isFinite(state?.extensions?.generation)
+        && report.generation !== state.extensions.generation) {
+        return false;
+      }
+      return true;
+    };
+    extensionTestInFlight = true;
+    approvalsRead++;
+    renderExtensionControls();
+    try {
+      const report = await invoke("test_extension_connection", { server });
+      if (!stillMatchesAuthority(report)) return;
+      extensionTestResults.set(server, { authorityKey: startKey, report });
+      const latency = Number.isFinite(report?.latency_ms) ? " (" + report.latency_ms + " ms)" : "";
+      if (report?.ok === true) {
+        showToast("Extension " + server + " connected" + latency + ".");
+      } else {
+        showToast("Extension " + server + " check failed: " + String(report?.error_class || report?.status || "error") + latency + ".");
+      }
+    } catch (err) {
+      if (!stillMatchesAuthority(null)) return;
+      extensionTestResults.set(server, { authorityKey: startKey, report: { ok: false, status: "error", error_class: String(err) } });
+      showToast(String(err));
+    } finally {
+      extensionTestInFlight = false;
+      approvalsSnapshotKey = null;
+      if (activePage === "pageApprovals") await loadApprovalsDrawer();
+      renderExtensionControls();
+    }
+  }
+
+  async function reloadExtensions() {
+    if (mutationsBlocked() || !canDecideExtensions()) return;
+    extensionTestInFlight = true;
+    extensionProbeEpoch++;
+    extensionTestResults.clear();
+    approvalsRead++;
+    renderExtensionControls();
+    try {
+      const receipt = await invoke("reload_extensions");
+      extensionProbeEpoch++;
+      extensionTestResults.clear();
+      const count = Number.isFinite(receipt?.server_count) ? receipt.server_count : 0;
+      const gen = Number.isFinite(receipt?.generation) ? " · gen " + receipt.generation : "";
+      showToast("Extensions reloaded (" + count + " server(s)" + gen + ").");
+    } catch (err) {
+      showToast("Extension reload failed: " + String(err));
+    } finally {
+      extensionTestInFlight = false;
+      approvalsSnapshotKey = null;
+      if (activePage === "pageApprovals") await loadApprovalsDrawer();
+      renderExtensionControls();
+    }
+  }
+
   async function decideExtension(button) {
     if (mutationsBlocked() || !canDecideExtensions()
       || extensionOperationActive(state.extensions.oauthOperation)) return;
@@ -924,12 +1178,15 @@
       return;
     }
     extensionDecisionInFlight = true;
+    extensionProbeEpoch++;
     approvalsRead++;
     stateGeneration++;
     clearTimeout(extensionPollTimer);
     renderExtensionControls();
     try {
       const receipt = await invoke("decide_extension_request", { requestId: id, approve, reviewed });
+      extensionProbeEpoch++;
+      extensionTestResults.clear();
       showToast(extensionReceiptMessage(receipt));
     } catch (err) {
       showToast(String(err));
@@ -1011,7 +1268,13 @@
       }
 
       const ext = panel.extensions || {};
-      const snapshotKey = JSON.stringify([oauth, ext, canDecideExtensions(panel)]);
+      if (pruneExtensionTestResults(panel)) {
+        approvalsSnapshotKey = null;
+      }
+      const probeKey = Array.from(extensionTestResults.entries()).map(([id, entry]) => [
+        id, entry.authorityKey, entry.report?.ok, entry.report?.status, entry.report?.latency_ms, entry.report?.error_class,
+      ]);
+      const snapshotKey = JSON.stringify([oauth, ext, canDecideExtensions(panel), probeKey]);
       if (passive && !nativeApprovalsRefreshNeeded && snapshotKey === approvalsSnapshotKey) {
         scheduleExtensionPoll(ext.oauthOperation);
         return;
@@ -1019,7 +1282,8 @@
       if (ext.configured && ext.exists) {
         const servers = ext.servers || [];
         const requests = ext.requests || [];
-        html += '<div class="set-card"><div class="set-title">Extensions</div>';
+        html += '<div class="set-card"><div class="set-row"><span class="set-title">Extensions</span>' +
+          '<button class="mini-btn xs" data-ext-reload type="button">Reload</button></div>';
         if (servers.length === 0) {
           html += '<div class="set-sub">No extensions added.</div>';
         } else {
@@ -1036,8 +1300,19 @@
             const tokenClass = tokenExpired ? "warn" : (tokenStored ? "ok" : "");
             const badge = '<span class="pill-group"><span class="pill" title="Extension enabled">' + (srv.enabled ? "On" : "Off") +
               '</span><span class="pill ' + tokenClass + '" title="Local OAuth token status">' +
-              tokenLabel + "</span></span>";
-            return '<div class="set-row list-row"><span class="item-name">' + escapeHtml(srv.id) + "</span>" + badge + "</div>";
+              tokenLabel + '</span><button class="mini-btn xs" data-ext-test="' + escapeHtml(srv.id) +
+              '" data-ext-enabled="' + (srv.enabled ? "true" : "false") + '" type="button">Test</button></span>';
+            const currentKey = extensionServerAuthorityKey(panel, srv);
+            const probeEntry = extensionTestResults.get(srv.id);
+            const probe = currentKey && probeEntry && probeEntry.authorityKey === currentKey ? probeEntry.report : null;
+            const probeLine = probe
+              ? '<div class="item-meta">' + escapeHtml(
+                (probe.ok === true ? "Check OK" : "Check failed: " + (probe.error_class || probe.status || "error"))
+                + (Number.isFinite(probe.latency_ms) ? " · " + probe.latency_ms + " ms" : "")
+                + (probe.protocol_version ? " · " + probe.protocol_version : "")
+              ) + "</div>"
+              : "";
+            return '<div class="set-row list-row"><span class="item-name">' + escapeHtml(srv.id) + "</span>" + badge + "</div>" + probeLine;
           }).join("");
         }
         if (!canDecideExtensions(panel)) {
@@ -1097,6 +1372,12 @@
       });
       body.querySelectorAll("[data-ext-decide]").forEach((button) => {
         button.addEventListener("click", () => decideExtension(button));
+      });
+      body.querySelectorAll("[data-ext-test]").forEach((button) => {
+        button.addEventListener("click", () => testExtensionConnection(button));
+      });
+      body.querySelectorAll("[data-ext-reload]").forEach((button) => {
+        button.addEventListener("click", reloadExtensions);
       });
       const displayedOperation = ext.oauthOperation;
       const displayedUrl = displayedOperation && safeExtensionAuthorizationUrl(displayedOperation.auth_url);
@@ -1211,13 +1492,41 @@
       return heading + '<div class="item-meta">The request log snapshot is unreadable.</div>';
     }
   }
+  function renderExtensionStatus(ext) {
+    if (!ext || typeof ext !== "object") return "";
+    const servers = Array.isArray(ext.servers) ? ext.servers : [];
+    const heading = '<h3 class="list-heading">Extension servers</h3>';
+    if (!servers.length) {
+      return heading + '<div class="item-meta">No extension servers configured.</div>';
+    }
+    const items = servers.map((srv) => {
+      const state = srv.enabled === false || srv.state === "disabled" ? "disabled"
+        : (typeof srv.state === "string" ? srv.state : "idle");
+      const tone = state === "ready" ? " pill-ok"
+        : state === "error" ? " pill-warn"
+        : state === "slow" ? " pill-warn"
+        : "";
+      const parts = [];
+      if (state !== "disabled") {
+        if (Number.isFinite(srv.last_latency_ms)) parts.push(srv.last_latency_ms + " ms");
+        if (typeof srv.last_error_class === "string" && srv.last_error_class) parts.push("error " + srv.last_error_class);
+        if (Number.isFinite(srv.pool_idle_sessions)) parts.push("pool " + srv.pool_idle_sessions + " idle");
+      }
+      return '<li class="audit-row"><div class="audit-main"><code>' + escapeHtml(String(srv.server || "")) + "</code> " +
+        '<span class="pill' + tone + '">' + escapeHtml(state) + "</span></div>" +
+        (parts.length ? '<div class="audit-meta">' + escapeHtml(parts.join(" · ")) + "</div>" : "") + "</li>";
+    }).join("");
+    return heading + '<ol class="audit-list">' + items + "</ol>";
+  }
   async function loadSettingsDiagnostics() {
     const box = $("skillsAndDiagBox");
     const read = ++diagnosticsRead;
     const epoch = pageEpoch;
     const generation = stateGeneration;
+    const gatewayGen = Number(state?.gateway?.generation ?? 0);
     const current = () => read === diagnosticsRead && epoch === pageEpoch
-      && activePage === "pageSettings" && generation === stateGeneration;
+      && activePage === "pageSettings" && generation === stateGeneration
+      && Number(state?.gateway?.generation ?? 0) === gatewayGen;
     diagnosticsInFlight++;
     try {
       const [diag, skills] = await Promise.all([
@@ -1244,7 +1553,9 @@
           '</code><button class="mini-btn xs" data-skill-rb="' + escapeHtml(sk.name || sk.id) + '" type="button" title="Roll back this skill">Roll back</button></div>'
         ).join("")
         : '<div class="item-meta">No skills installed.</div>';
+      html += renderExtensionStatus(diag.extensionStatus);
       html += renderRequestAudit(diag.mcpRequestAudit);
+      html += '<section>' + renderAuditHistory(diag.auditHistory) + '</section>';
       if (box.innerHTML === html) return;
       box.innerHTML = html;
       renderControls();
@@ -1346,6 +1657,7 @@
     selectedSessionKey = row.getAttribute("data-session");
     showPage("pageSession");
     renderSessionsView();
+    loadSessionHistory();
     loadSessions(true);
   });
   $("sessionBackBtn").addEventListener("click", () => {
@@ -1545,6 +1857,7 @@
     };
     listen("workstation-state", ({ payload }) => {
       if (!payload || !payload.gateway || !payload.settings || isStaleNativeSnapshot(payload)) return;
+      extensionProbeEpoch++;
       stateGeneration++;
       approvalsRead++;
       if (isNative(payload)) {

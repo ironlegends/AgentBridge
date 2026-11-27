@@ -1,9 +1,9 @@
 const COMMANDS: &[&str] = &[
     "get_panel_state", "save_panel_settings", "set_permission_profile",
     "initialize_local_state", "start_or_restart_gateway", "stop_gateway",
-    "get_missions_snapshot", "get_oauth_pending", "enable_oauth_enrollment",
-    "approve_oauth_request", "decide_extension_request", "get_skills_overview",
-    "run_skill_action", "get_diagnostics", "get_sessions", "quit_app",
+    "get_missions_snapshot", "get_mission_handoff", "get_oauth_pending", "enable_oauth_enrollment",
+    "approve_oauth_request", "decide_extension_request", "test_extension_connection", "reload_extensions", "get_skills_overview",
+    "run_skill_action", "get_diagnostics", "get_sessions", "get_session_history", "quit_app",
 ];
 
 fn main() {

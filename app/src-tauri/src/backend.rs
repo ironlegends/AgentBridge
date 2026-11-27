@@ -1,6 +1,7 @@
 //! Native operator commands for an attached workstation or separately managed local state.
 
 use crate::state::{save_settings_to_disk, AppRuntime, PanelSettings};
+use crate::status_card::with_status_card;
 use crate::native_runtime::NativeView;
 use crate::supervisor::{self, Action, TaskState, Workstation};
 use agent_bridge_runtime::backend::{OperatorRead, OperatorWrite};
@@ -30,6 +31,9 @@ fn operator_read(runtime: &AppRuntime, operation: OperatorRead) -> Result<Value,
         OperatorRead::Extensions => "/api/extensions", OperatorRead::Skills => "/api/skills",
         OperatorRead::Diagnostics => "/api/diagnostics",
         OperatorRead::Sessions => "/api/sessions",
+        OperatorRead::SessionHistory { boot, session } => {
+            return runtime.operator.client()?.session_history(boot, session);
+        }
     };
     runtime.operator.client()?.get(path)
 }
@@ -42,7 +46,10 @@ fn operator_write(runtime: &AppRuntime, operation: OperatorWrite, payload: Value
     let path = match operation {
         OperatorWrite::SetProfile => "/api/profile", OperatorWrite::OAuthEnroll => "/api/oauth/enroll",
         OperatorWrite::OAuthApprove => "/api/oauth/approve", OperatorWrite::ExtensionsDecide => "/api/extensions/decide",
+        OperatorWrite::ExtensionsTest => "/api/extensions/test",
+        OperatorWrite::ExtensionsReload => "/api/extensions/reload",
         OperatorWrite::SkillsAction => "/api/skills/action",
+        OperatorWrite::CopyHandoff => "/api/missions/handoff",
     };
     runtime.operator.client()?.post(path, payload)
 }
@@ -266,7 +273,7 @@ fn attached_panel_state(
     let oauth_pending = overview.pointer("/oauth/pending_count").and_then(Value::as_u64).unwrap_or(0);
     let extension_pending = overview.pointer("/extensions/pending_count").and_then(Value::as_u64).unwrap_or(0);
 
-    Ok(json!({
+    Ok(with_status_card(json!({
         "version": env!("CARGO_PKG_VERSION"),
         "os": overview.get("os").cloned().unwrap_or_else(|| json!(std::env::consts::OS)),
         "arch": overview.get("arch").cloned().unwrap_or_else(|| json!(std::env::consts::ARCH)),
@@ -309,7 +316,7 @@ fn attached_panel_state(
             "stdioReadOnly": overview.pointer("/quickstart_commands/stdio_read_only").and_then(Value::as_str).unwrap_or(""),
             "stdioWorkspaceWrite": overview.pointer("/quickstart_commands/stdio_workspace_write").and_then(Value::as_str).unwrap_or(""),
         },
-    }))
+    })))
 }
 
 fn map_attached_extensions(value: Value) -> Value {
@@ -334,6 +341,8 @@ fn map_attached_extensions(value: Value) -> Value {
         "settingsDir": value["settings_dir"],
         "canDecide": value["configured"] == true,
         "oauthOperation": value["oauth_operation"],
+        "generation": value.get("generation").cloned().unwrap_or(Value::Null),
+        "journalRevision": value.get("journal_revision").cloned().unwrap_or(Value::Null),
         "pendingCount": value["pending_count"],
         "serverCount": value["servers"].as_array().map(Vec::len).unwrap_or(0),
         "servers": value.get("servers").cloned().unwrap_or_else(|| json!([])),
@@ -362,6 +371,39 @@ pub fn decide_extension_request(
     }))
 }
 
+pub fn test_extension_connection(runtime: &AppRuntime, server: &str) -> Result<Value, String> {
+    if server.is_empty()
+        || server.len() > 96
+        || !server
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"._-".contains(&byte))
+    {
+        return Err("Select an approved extension server before testing.".to_owned());
+    }
+    operator_write(
+        runtime,
+        OperatorWrite::ExtensionsTest,
+        json!({ "server": server }),
+    )
+}
+
+pub fn reload_extensions(runtime: &AppRuntime) -> Result<Value, String> {
+    if !runtime.is_live() {
+        let settings = runtime
+            .settings
+            .lock()
+            .map_err(|_| "Settings lock poisoned".to_owned())?
+            .settings_dir
+            .clone();
+        if settings.is_empty() {
+            return Err("Settings directory is not configured.".to_owned());
+        }
+        return agent_bridge_runtime::backend::validate_extension_reload(Path::new(&settings))
+            .map_err(|e| e.to_string());
+    }
+    operator_write(runtime, OperatorWrite::ExtensionsReload, json!({}))
+}
+
 fn map_attached_oauth(value: Value) -> Value {
     let pending = value["pending"].as_array().map(|rows| rows.iter().map(|row| json!({
         "id": row["id"], "clientId": row["client_id"], "provider": row["provider"],
@@ -388,6 +430,9 @@ fn map_attached_diagnostics(value: Value) -> Value {
         "capabilitySelection": value["capability_selection"],
         "providerCleanup": value["provider_cleanup"],
         "mcpRequestAudit": value["mcp_request_audit"],
+        "extensionStatus": value.get("extension_status").cloned().unwrap_or(Value::Null),
+        "extensionReloadAudit": value.get("extension_reload_audit").cloned().unwrap_or(Value::Null),
+        "auditHistory": value["audit_history"],
         "capabilities": {
             "missionsAndTaskRooms": value.pointer("/capabilities/missions_and_task_rooms").cloned().unwrap_or(Value::Null),
             "workspaceFilesAndArtifacts": value.pointer("/capabilities/workspace_files_and_artifacts").cloned().unwrap_or(Value::Null),
@@ -458,7 +503,7 @@ pub fn get_panel_state(runtime: &AppRuntime) -> Result<Value, String> {
         settings.settings_dir.clone()
     };
 
-    Ok(json!({
+    Ok(with_status_card(json!({
         "version": env!("CARGO_PKG_VERSION"),
         "os": std::env::consts::OS,
         "arch": std::env::consts::ARCH,
@@ -482,7 +527,7 @@ pub fn get_panel_state(runtime: &AppRuntime) -> Result<Value, String> {
             "stdioReadOnly": format!("agent-bridge stdio \"{db_display}\" --workspace \"{ws_display}\" --settings \"{set_display}\""),
             "stdioWorkspaceWrite": format!("agent-bridge stdio \"{db_display}\" --write-workspace \"{ws_display}\" --settings \"{set_display}\""),
         },
-    }))
+    })))
 }
 
 fn inspect_database_summary(db_path: &str) -> Value {
@@ -867,6 +912,32 @@ pub fn get_missions_snapshot(runtime: &AppRuntime) -> Result<Value, String> {
     Ok(snap)
 }
 
+pub fn get_mission_handoff(runtime: &AppRuntime, mission_id: &str, revision: i64) -> Result<Value, String> {
+    if !agent_bridge_missions::valid_id("mis", mission_id)
+        || !(1..=9_007_199_254_740_991).contains(&revision) {
+        return Err("Invalid handoff selection.".into());
+    }
+    let value = if runtime.is_live() {
+        operator_write(runtime, OperatorWrite::CopyHandoff, json!({
+            "mission_id": mission_id, "revision": revision
+        }))?
+    } else {
+        let path = runtime.settings.lock().map_err(|_| "Settings lock poisoned".to_owned())?
+            .database_path.clone();
+        if path.is_empty() { return Err("Mission storage unavailable.".into()); }
+        let db = CoreDatabase::open_existing_read_only(Path::new(&path))
+            .map_err(|_| "Mission storage unavailable.".to_owned())?;
+        agent_bridge_missions::handoff::desktop_copy_handoff(db.connection(), mission_id, revision)
+            .map_err(|_| "A current explicit member approval is required.".to_owned())?
+    };
+    if value["handoff"].as_str().is_none() || value["truncated"].as_bool().is_none()
+        || value["max_bytes"].as_u64() != Some(agent_bridge_missions::handoff::MAX_HANDOFF_BYTES as u64)
+        || value.to_string().len() > agent_bridge_missions::handoff::MAX_HANDOFF_BYTES {
+        return Err("Invalid handoff response.".into());
+    }
+    Ok(value)
+}
+
 pub fn get_oauth_pending(runtime: &AppRuntime) -> Result<Value, String> {
     if runtime.is_live() {
         return operator_read(runtime, OperatorRead::OAuth).map(map_attached_oauth);
@@ -1080,6 +1151,12 @@ fn map_sessions(value: Value) -> Value {
     }
 }
 
+pub fn get_session_history(runtime: &AppRuntime, boot_id: &str, session_id: &str) -> Result<Value, String> {
+    let operation = OperatorRead::session_history(boot_id, session_id)
+        .ok_or("Invalid session history key.")?;
+    operator_read(runtime, operation)
+}
+
 pub fn get_sessions(runtime: &AppRuntime) -> Result<Value, String> {
     if runtime.is_live() {
         return Ok(match operator_read(runtime, OperatorRead::Sessions) {
@@ -1146,6 +1223,21 @@ pub fn get_diagnostics(runtime: &AppRuntime) -> Result<Value, String> {
         "Linux Secret Service"
     };
 
+    let extension_status = if !settings.settings_dir.is_empty() {
+        let ext_path = Path::new(&settings.settings_dir).join("extensions.json");
+        if let Ok(bytes) = fs::read(&ext_path) {
+            if let Ok(reg) = Registry::parse(&bytes) {
+                agent_bridge_extensions::StatusTracker::new().snapshot_for_registry(&reg, None, None)
+            } else {
+                Value::Null
+            }
+        } else {
+            Value::Null
+        }
+    } else {
+        Value::Null
+    };
+
     Ok(json!({
         "os": std::env::consts::OS,
         "arch": std::env::consts::ARCH,
@@ -1153,6 +1245,7 @@ pub fn get_diagnostics(runtime: &AppRuntime) -> Result<Value, String> {
         "oauthKeystore": keystore,
         "mcpBrowserProfiles": mcp_profiles,
         "workspaceAccess": workspace_report,
+        "extensionStatus": extension_status,
         "capabilities": {
             "missionsAndTaskRooms": true,
             "workspaceFilesAndArtifacts": true,
@@ -1261,6 +1354,18 @@ mod tests {
         let diag = get_diagnostics(&runtime).expect("diagnostics");
         assert_eq!(diag["capabilities"]["missionsAndTaskRooms"], true);
 
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn standalone_panel_and_profile_reply_include_the_status_card() {
+        let root = temp_dir("status-card");
+        let runtime = AppRuntime::new(root.join("app-config"));
+        runtime.settings.lock().unwrap().gateway_port = 0;
+        let first = get_panel_state(&runtime).unwrap();
+        let updated = set_permission_profile(&runtime, "workspace-write", true).unwrap();
+        assert_eq!(first["statusCard"]["current"]["title"], "Stopped");
+        assert_eq!(updated["statusCard"], first["statusCard"]);
         let _ = fs::remove_dir_all(&root);
     }
 }

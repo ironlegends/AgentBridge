@@ -217,6 +217,28 @@
     }
   },
   {
+    "name": "agent_bridge_mission_handoff",
+    "description": "Read a compact, redacted mission handoff as an attached member. No transfer, replay or mission mutation.",
+    "inputSchema": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "actor_context_handle": {
+          "type": "string",
+          "pattern": "^ctx_[0-9a-f]{32}$"
+        },
+        "mission_id": {
+          "type": "string",
+          "pattern": "^mis_[0-9a-f]{32}$"
+        }
+      },
+      "required": [
+        "actor_context_handle",
+        "mission_id"
+      ]
+    }
+  },
+  {
     "name": "agent_bridge_mission_checkpoint",
     "description": "Persist a result summary at observed revision. Read before any retry after an uncertain reply.",
     "inputSchema": {

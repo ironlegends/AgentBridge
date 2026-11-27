@@ -135,9 +135,13 @@ pub(crate) fn create_private_directory(path: &Path) -> Result<()> {
         bInheritHandle: 0,
     };
     let name = wide(path.as_os_str());
-    let success = unsafe { CreateDirectoryW(name.as_ptr(), &attrs) } != 0;
+    let failure = (unsafe { CreateDirectoryW(name.as_ptr(), &attrs) } == 0)
+        .then(std::io::Error::last_os_error);
     unsafe { LocalFree(descriptor.cast()); }
-    if !success {
+    if let Some(error) = failure {
+        if error.kind() == std::io::ErrorKind::AlreadyExists {
+            return Err(error.into());
+        }
         return Err(LifecycleError::Uncertain("private Windows directory creation refused"));
     }
     verify_private_directory(path)

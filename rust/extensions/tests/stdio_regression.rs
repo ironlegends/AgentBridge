@@ -100,6 +100,7 @@ enum Mode { Modern, Legacy, LoseCall, Stall }
 
 #[derive(Default)]
 struct Shared {
+    result_override: Option<Value>,
     launches: usize,
     methods: Vec<String>,
     events: Vec<&'static str>,
@@ -109,6 +110,10 @@ struct Shared {
     release: bool,
     /// The launch number whose child exits at its next input.
     crash_launch: Option<usize>,
+    cache_fixture: bool,
+    descriptor_drift: bool,
+    tool_error: bool,
+    stall_list: bool,
 }
 
 struct Fake { mode: Mode, shared: Arc<Mutex<Shared>> }
@@ -157,7 +162,24 @@ impl Child {
         self.outbox.extend(line.bytes().chain([b'\n']));
     }
 
+    fn observed_descriptor(&self)->Value{
+        let state=self.state();
+        let mut tool=descriptor();
+        if state.cache_fixture {
+            tool["annotations"]=json!({"readOnlyHint":true,"destructiveHint":false});
+        }
+        if state.descriptor_drift { tool["description"]=json!("Changed live descriptor"); }
+        tool
+    }
+
     fn call_result(&self) -> Value {
+        if let Some(result) = self.state().result_override.clone() { return result; }
+        let state=self.state();
+        if state.cache_fixture {
+            return json!({"resultType":"complete","isError":state.tool_error,
+                "content":[{"type":"text","text":"RAW_FIXTURE_PRIVATE"}],
+                "structuredContent":{"visible":"filtered result","private":"RAW_FIXTURE_PRIVATE"}});
+        }
         let content = json!([{"type": "text", "text": "fixture"}]);
         if self.mode == Mode::Legacy { json!({"content": content}) }
         else { json!({"resultType": "complete", "content": content}) }
@@ -175,9 +197,18 @@ impl Child {
                 "_meta": {"io.modelcontextprotocol/serverInfo": {"name": "fixture", "version": "0"}}})),
             "initialize" => self.send(&id, json!({"protocolVersion": "2025-11-25", "capabilities": {"tools": {}},
                 "serverInfo": {"name": "legacy-fixture", "version": "0"}})),
-            "tools/list" if legacy => self.send(&id, json!({"tools": [descriptor()]})),
-            "tools/list" => self.send(&id, json!({"resultType": "complete", "ttlMs": 0, "cacheScope": "private",
-                "tools": [descriptor()]})),
+            "tools/list" if self.state().stall_list => {
+                self.pending = Some(id);
+                self.state().stalled += 1;
+            }
+            "tools/list" if legacy => {
+                let tool=self.observed_descriptor();
+                self.send(&id,json!({"tools":[tool]}));
+            },
+            "tools/list" => {
+                let tool=self.observed_descriptor();
+                self.send(&id,json!({"resultType":"complete","ttlMs":0,"cacheScope":"private","tools":[tool]}));
+            },
             "tools/call" => match self.mode {
                 // The tool may have run, but its reply is lost with the child.
                 Mode::LoseCall => { self.exited = true; self.outbox.clear(); }
@@ -501,6 +532,25 @@ fn executable_pin_mismatch_script_and_reparse_fail_before_launch() {
 }
 
 #[test]
+fn approved_result_policy_filters_completed_upstream_reply_before_it_leaves_registry() {
+    let _serial = serial();
+    let dir = scratch("result-filter");
+    let image = native_file(&dir, "filter-example", true);
+    let mut entry = server(&image, &file_sha256(&image));
+    entry["tools"]["search_items"]["result_filter"] = json!({"allow":["/public"],"max_bytes":160});
+    let fake = Fake::new(Mode::Modern);
+    fake.state().result_override = Some(json!({"resultType":"complete","content":[{"type":"text","text":"unfiltered"}],
+        "structuredContent":{"public":{"label":"visible","credential":"unfiltered"},"hidden":"unfiltered"}}));
+    let registry = enabled(&bytes_of(json!({"example":entry}))).with_stdio_launcher(fake.clone());
+    let result = registry.call("example:search_items", &query("alpha"), ToolScope::DataOperations).unwrap();
+    assert_eq!(result["structuredContent"]["public"]["label"], "visible");
+    assert_eq!(result["structuredContent"]["public"]["credential"], "[REDACTED]");
+    assert!(!result.to_string().contains("unfiltered"));
+    assert_eq!(fake.state().methods.iter().filter(|method| *method == "tools/call").count(), 1);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn stdio_session_modern_and_legacy_fallback_over_fake_child() {
     let _serial = serial();
     let dir = scratch("session");
@@ -796,5 +846,588 @@ fn pooled_idle_stdio_session_yields_its_slot_to_a_new_server() {
     drop(registry);
     drop(pool);
     assert_eq!(terminated(), 6);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn stdio_connection_test_covers_success_handshake_drift_and_unapproved_refusal() {
+    let _serial = serial();
+    let dir = scratch("conn-test");
+    let native = native_file(&dir, "example-mcp", true);
+    let sha = file_sha256(&native);
+    let raw = bytes_of(json!({"example": server(&native, &sha)}));
+
+    // 1. Unapproved / undecided / disabled server refuses with zero launches.
+    let fake_unapproved = Fake::new(Mode::Modern);
+    let undecided = Registry::parse(&raw).unwrap().with_stdio_launcher(fake_unapproved.clone());
+    assert!(undecided.test_connection("example").is_err());
+    assert!(undecided.test_connection("missing_srv").is_err());
+    assert_eq!(fake_unapproved.state().launches, 0);
+
+    // 2. Approved modern and legacy servers succeed without invoking any tool.
+    for mode in [Mode::Modern, Mode::Legacy] {
+        let fake = Fake::new(mode);
+        let reg = enabled(&raw).with_stdio_launcher(fake.clone());
+        let report = reg.test_connection("example").unwrap();
+        assert_eq!(report["ok"], true);
+        assert_eq!(report["status"], "ok");
+        assert!(report["error_class"].is_null());
+        assert_eq!(report["transport"], "stdio");
+        assert_eq!(report["tool_invoked"], false);
+        assert_eq!(report["approved_grants_changed"], false);
+        assert_eq!(report["registry_changed"], false);
+        assert!(report["latency_ms"].as_u64().is_some());
+        assert!(!fake.state().methods.iter().any(|m| m == "tools/call"));
+    }
+
+    // 3. Handshake failure (crashing child on first write) returns structured error_class.
+    let fake_crash = Fake::new(Mode::Modern);
+    fake_crash.state().crash_launch = Some(1);
+    let crash_reg = enabled(&raw).with_stdio_launcher(fake_crash.clone());
+    let crash_report = crash_reg.test_connection("example").unwrap();
+    assert_eq!(crash_report["ok"], false);
+    assert_eq!(crash_report["status"], "error");
+    assert_eq!(crash_report["error_class"], "handshake_failed");
+    assert_eq!(crash_report["tool_invoked"], false);
+    assert!(crash_report["latency_ms"].as_u64().is_some());
+
+    // 4. Descriptor hash drift returns descriptor_hash_drift without granting anything.
+    let drifted_descriptor = json!({
+        "name": "search_items",
+        "description": "Drifted description",
+        "inputSchema": {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]}
+    });
+    let drifted_raw = bytes_of(json!({
+        "example": {
+            "stdio": {"executable": native.to_str().unwrap(), "executable_sha256": sha, "args": ["stdio"]},
+            "tools": {
+                "search_items": {
+                    "descriptor_sha256": hash(&drifted_descriptor),
+                    "descriptor": drifted_descriptor,
+                    "parameters": {"query": {"type": "search_terms"}}
+                }
+            }
+        }
+    }));
+    let fake_drift = Fake::new(Mode::Modern);
+    let drift_reg = enabled(&drifted_raw).with_stdio_launcher(fake_drift);
+    let drift_report = drift_reg.test_connection("example").unwrap();
+    assert_eq!(drift_report["ok"], false);
+    assert_eq!(drift_report["status"], "descriptor_drift");
+    assert_eq!(drift_report["error_class"], "descriptor_hash_drift");
+    assert_eq!(drift_report["catalog_changes_detected"], true);
+    assert_eq!(drift_report["approved_tools"][0]["status"], "descriptor_changed");
+    assert_eq!(drift_report["approved_grants_changed"], false);
+    assert_eq!(drift_report["tool_invoked"], false);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn stdio_status_tracker_observes_transitions_pool_and_redacts_secrets() {
+    let _serial = serial();
+    let dir = scratch("status-tracker");
+    let native = native_file(&dir, "example-mcp", true);
+    let sha = file_sha256(&native);
+    let raw = bytes_of(json!({"example": server(&native, &sha)}));
+
+    let fake = Fake::new(Mode::Modern);
+    let pool = SessionPool::new();
+    let tracker = agent_bridge_extensions::StatusTracker::with_slow_threshold(std::time::Duration::from_millis(5));
+    let reg = enabled(&raw)
+        .with_stdio_launcher(fake.clone())
+        .with_session_pool(pool.clone())
+        .with_status_tracker(tracker.clone());
+
+    let names = reg.server_names();
+    let initial = tracker.snapshot(&names, Some(&pool));
+    assert_eq!(initial["servers"][0]["server"], "example");
+    assert_eq!(initial["servers"][0]["state"], "idle");
+    assert_eq!(initial["servers"][0]["pool_idle_sessions"], 0);
+
+    // Hold a starting guard while snapshotting to observe starting transition.
+    {
+        let _guard = tracker.begin_starting("example");
+        let during = tracker.snapshot(&names, Some(&pool));
+        assert_eq!(during["servers"][0]["state"], "starting");
+    }
+
+    // Successful call puts session into pool and transitions state to ready or slow.
+    let secret_arg = "SECRET_ARG_SHOULD_NOT_APPEAR";
+    let res = reg.call(
+        "example:search_items",
+        json!({"query": secret_arg}).as_object().unwrap(),
+        ToolScope::DataOperations,
+    );
+    assert!(res.is_ok(), "call failed: {res:?}");
+    let after_call = tracker.snapshot(&names, Some(&pool));
+    assert_eq!(after_call["servers"][0]["pool_idle_sessions"], 1);
+    assert!(matches!(
+        after_call["servers"][0]["state"].as_str(),
+        Some("ready" | "slow")
+    ));
+    assert!(after_call["servers"][0]["last_latency_ms"].as_u64().is_some());
+
+    // Force a slow completion explicitly and verify slow transition.
+    tracker.mark_ready("example", 15);
+    let slow = tracker.snapshot(&names, Some(&pool));
+    assert_eq!(slow["servers"][0]["state"], "slow");
+    assert_eq!(slow["slow_threshold_ms"], 5);
+
+    // Crashing next launch transitions to error with bounded error class, then recovers.
+    let next_launch = fake.state().launches + 1;
+    fake.state().crash_launch = Some(next_launch);
+    pool.close_all();
+    let err = reg.call(
+        "example:search_items",
+        json!({"query": "retry"}).as_object().unwrap(),
+        ToolScope::DataOperations,
+    );
+    assert!(err.is_err());
+    let errored = tracker.snapshot(&names, Some(&pool));
+    assert_eq!(errored["servers"][0]["state"], "error");
+    assert!(errored["servers"][0]["last_error_class"].as_str().is_some());
+    assert!(errored["servers"][0]["last_error_unix_ms"].as_u64().is_some());
+
+    fake.state().crash_launch = None;
+    let recovered = reg.call(
+        "example:search_items",
+        json!({"query": "ok"}).as_object().unwrap(),
+        ToolScope::DataOperations,
+    );
+    assert!(recovered.is_ok());
+    let final_snap = tracker.snapshot(&names, Some(&pool));
+    assert!(matches!(
+        final_snap["servers"][0]["state"].as_str(),
+        Some("ready" | "slow")
+    ));
+    assert_eq!(final_snap["servers"][0]["pool_idle_sessions"], 1);
+
+    let serialized = serde_json::to_string(&final_snap).unwrap();
+    assert!(!serialized.contains(secret_arg));
+    assert!(!serialized.contains("fixture"));
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn stdio_live_reload_validates_atomically_revokes_and_cancels_in_flight() {
+    let _serial = serial();
+    let dir = scratch("live-reload");
+    let native = native_file(&dir, "example-mcp", true);
+    let sha = file_sha256(&native);
+    let base_entry = server(&native, &sha);
+    let raw = bytes_of(json!({
+        "example": base_entry,
+        "keep": base_entry
+    }));
+
+    let fake = Fake::new(Mode::Modern);
+    let pool = SessionPool::new();
+    let tracker = agent_bridge_extensions::StatusTracker::new();
+    let initial = enabled_servers(&raw, &["example", "keep"]).with_stdio_launcher(fake.clone());
+    let live = agent_bridge_extensions::LiveExtensionRegistry::new(initial, pool.clone(), tracker.clone());
+
+    // Warm pooled idle sessions for both servers.
+    let res = live.call("example:search_items", &query("alpha"), ToolScope::DataOperations).unwrap();
+    assert_eq!(res["content"][0]["text"], "fixture");
+    let res_keep = live.call("keep:search_items", &query("beta"), ToolScope::DataOperations).unwrap();
+    assert_eq!(res_keep["content"][0]["text"], "fixture");
+    assert_eq!(pool.idle_sessions(), 2);
+
+    // 1. Invalid reload is refused and keeps previous active registry running.
+    let invalid = Registry::parse(b"{not-json");
+    assert!(live.reload(invalid, agent_bridge_extensions::ReloadMode::OperatorApproved).is_err());
+    assert_eq!(live.generation(), 1);
+    assert_eq!(pool.idle_sessions(), 2);
+    assert_eq!(
+        live.call("example:search_items", &query("alpha"), ToolScope::DataOperations).unwrap()["content"][0]["text"],
+        "fixture"
+    );
+
+    // 2. StrictNoWidening refuses widening parameters, adding enabled server, or adding a tool.
+    let widened_raw = bytes_of(json!({
+        "example": base_entry,
+        "keep": base_entry,
+        "extra": base_entry
+    }));
+    let widened_reg = enabled_servers(&widened_raw, &["example", "keep", "extra"]).with_stdio_launcher(fake.clone());
+    let wide_err = live.reload(Ok(widened_reg), agent_bridge_extensions::ReloadMode::StrictNoWidening).unwrap_err();
+    assert!(wide_err.to_string().contains("widen"), "{wide_err}");
+    assert_eq!(live.generation(), 1);
+
+    // 3. Valid narrowing/disabling reload swaps atomically and closes removed server's pooled session.
+    let narrowed = bytes_of(json!({ "example": base_entry }));
+    let next_reg = enabled(&narrowed).with_stdio_launcher(fake.clone());
+    let audit = live.reload(Ok(next_reg), agent_bridge_extensions::ReloadMode::StrictNoWidening).unwrap();
+    assert!(audit.ok);
+    assert_eq!(audit.generation, 2);
+    assert_eq!(audit.removed_or_disabled, 1);
+    assert_eq!(audit.closed_idle_sessions, 1);
+    assert_eq!(pool.idle_sessions(), 1);
+    assert!(live.call("keep:search_items", &query("beta"), ToolScope::DataOperations).is_err());
+
+    // 4. Stalled in-flight call cancels immediately on live revocation.
+    pool.close_all();
+    let stall_fake = Fake::new(Mode::Stall);
+    let stall_raw = bytes_of(json!({ "staller": server(&native, &sha) }));
+    let stall_pool = SessionPool::new();
+    let stall_tracker = agent_bridge_extensions::StatusTracker::new();
+    let stall_init = enabled_servers(&stall_raw, &["staller"]).with_stdio_launcher(stall_fake.clone());
+    let stall_live = agent_bridge_extensions::LiveExtensionRegistry::new(
+        stall_init,
+        stall_pool.clone(),
+        stall_tracker.clone(),
+    );
+
+    let call_started = Instant::now();
+    let handle = std::thread::scope(|s| {
+        let h = s.spawn(|| {
+            stall_live.call("staller:search_items", &query("alpha"), ToolScope::DataOperations)
+        });
+        wait_for("staller did not reach tools/call", || stall_fake.state().stalled >= 1);
+        let revoked = stall_live.revoke_server("staller").unwrap();
+        assert_eq!(revoked.cancelled_in_flight, 1);
+        assert_eq!(revoked.removed_or_disabled, 1);
+        let call_result = h.join().unwrap();
+        (call_result, call_started.elapsed())
+    });
+    let (call_result, elapsed) = handle;
+    let err = call_result.unwrap_err();
+    assert!(err.to_string().contains("cancelled due to revocation"), "{err}");
+    assert!(elapsed < Duration::from_secs(3), "cancellation took too long: {elapsed:?}");
+
+    let snap = stall_live.audit_snapshot();
+    assert_eq!(snap["generation"], 2);
+    assert_eq!(snap["records"][0]["ok"], true);
+    assert_eq!(snap["records"][0]["cancelled_in_flight"], 1);
+    assert_eq!(snap["in_flight"], 0);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+
+#[test]
+fn stdio_live_admission_cannot_cross_revocation_and_same_fingerprint_reenable() {
+    let _serial = serial();
+    let dir = scratch("admission-revocation");
+    let native = native_file(&dir, "example-mcp", true);
+    let raw = bytes_of(json!({"example":server(&native,&file_sha256(&native))}));
+    let fake = Fake::new(Mode::Modern);
+    let pool = SessionPool::new();
+    let initial = enabled(&raw).with_stdio_launcher(fake.clone());
+    let live = agent_bridge_extensions::LiveExtensionRegistry::new(
+        initial.clone(), pool.clone(), agent_bridge_extensions::StatusTracker::new());
+    // Deliberately pause after admission but before the old snapshot can
+    // touch the transport. No scheduler/sleep race is needed.
+    let old = live.admit("example:search_items", ToolScope::DataOperations, |_| Ok(())).unwrap();
+    assert_eq!(live.in_flight().active_count(),1);
+    let prepared = live.prepare_reload(Ok(initial.clone()),
+        agent_bridge_extensions::ReloadMode::OperatorApproved).unwrap();
+    let revoked = live.revoke_server("example").unwrap();
+    assert_eq!(revoked.cancelled_in_flight,1);
+    assert!(live.commit_reload(prepared).is_err(), "old validation cannot undo a revoke");
+    assert!(live.admit("example:search_items",ToolScope::DataOperations, |_| Ok(())).is_err());
+    live.reload(Ok(initial),agent_bridge_extensions::ReloadMode::OperatorApproved).unwrap();
+    // Re-enabling the same bytes is a new generation; qualification did
+    // discovery/list only. The old receipt may not take the new idle child.
+    assert!(!fake.state().methods.iter().any(|method|method=="tools/call"));
+    live.call("example:search_items",&query("new"),ToolScope::DataOperations).unwrap();
+    assert_eq!(pool.idle_sessions(),1);
+    let before=fake.state().methods.clone();
+    assert!(old.execute(&query("old")).is_err());
+    assert_eq!(fake.state().methods,before);
+    assert_eq!(pool.idle_sessions(),1);
+    assert_eq!(live.in_flight().active_count(),0);
+    pool.close_all();
+    let _=std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn stdio_reload_probes_real_pins_and_descriptors_before_swap_without_tool_calls() {
+    let _serial = serial();
+    let dir=scratch("reload-pins");
+    let native=native_file(&dir,"example-mcp",true);
+    let sha=file_sha256(&native);
+    let original=server(&native,&sha);
+    let raw=bytes_of(json!({"example":original.clone()}));
+    let fake=Fake::new(Mode::Modern);
+    let pool=SessionPool::new();
+    let live=agent_bridge_extensions::LiveExtensionRegistry::new(
+        enabled(&raw).with_stdio_launcher(fake.clone()),pool.clone(),
+        agent_bridge_extensions::StatusTracker::new());
+    let mut wrong=original.clone();
+    wrong["stdio"]["executable_sha256"]=json!("0".repeat(64));
+    let candidate=enabled(&bytes_of(json!({"example":wrong}))).with_stdio_launcher(fake.clone());
+    assert!(live.reload(Ok(candidate),agent_bridge_extensions::ReloadMode::OperatorApproved).is_err());
+    assert_eq!(fake.state().launches,0);
+    assert_eq!(live.generation(),1);
+    let mut drift=original.clone();
+    let mut changed=descriptor();
+    changed["description"]=json!("Different approved descriptor");
+    drift["tools"]["search_items"]["descriptor_sha256"]=json!(hash(&changed));
+    drift["tools"]["search_items"]["descriptor"]=changed;
+    let candidate=enabled(&bytes_of(json!({"example":drift}))).with_stdio_launcher(fake.clone());
+    assert!(live.reload(Ok(candidate),agent_bridge_extensions::ReloadMode::OperatorApproved).is_err());
+    assert_eq!(live.generation(),1);
+    assert!(fake.state().methods.iter().any(|method|method=="tools/list"));
+    assert!(!fake.state().methods.iter().any(|method|method=="tools/call"));
+    live.call("example:search_items",&query("old"),ToolScope::DataOperations).unwrap();
+    assert_eq!(pool.idle_sessions(),1);
+    let audit=live.audit_snapshot();
+    assert_eq!(audit["records"].as_array().unwrap().len(),2);
+    assert!(audit["records"].as_array().unwrap().iter().all(|record|record["ok"]==false));
+    pool.close_all();
+    let _=std::fs::remove_dir_all(dir);
+}
+
+fn cache_server(executable:&Path)->Value{
+    let mut entry=server(executable,&file_sha256(executable));
+    let mut pinned=descriptor();
+    pinned["annotations"]=json!({"readOnlyHint":true,"destructiveHint":false});
+    let grant=&mut entry["tools"]["search_items"];
+    grant["descriptor_sha256"]=json!(hash(&pinned));
+    grant["descriptor"]=pinned;
+    grant["result_cache"]=json!({"read_only":true,"ttl_seconds":60});
+    grant["result_filter"]=json!({"allow":["/visible"]});
+    entry
+}
+
+fn tool_calls(fake:&Fake)->usize{
+    fake.state().methods.iter().filter(|method|*method=="tools/call").count()
+}
+fn cached_call(
+    live:&agent_bridge_extensions::LiveExtensionRegistry, token:u8, profile:u8, params:&Map<String,Value>,
+)->io::Result<Value>{
+    let request=live.cache_request([token;32],profile).unwrap();
+    live.admit_with_cache("example:search_items",ToolScope::AnyGranted,
+        Some(&request),profile, |_|Ok(()))?.execute(params)
+}
+
+#[test]
+fn result_cache_normal_admission_checks_pins_filters_and_exact_grant_partitions(){
+    let _serial=serial();
+    let dir=scratch("result-cache-admission");
+    let native=native_file(&dir,"example-mcp",true);
+    let entry=cache_server(&native);
+    let raw=bytes_of(json!({"example":entry}));
+    let fake=Fake::new(Mode::Modern);
+    fake.state().cache_fixture=true;
+    let pool=SessionPool::new();
+    let initial=enabled(&raw).with_stdio_launcher(fake.clone());
+    let live=agent_bridge_extensions::LiveExtensionRegistry::new(initial.clone(),pool.clone(),
+        agent_bridge_extensions::StatusTracker::new());
+
+    let params=query("alpha");
+    let first=cached_call(&live,1,2,&params).unwrap();
+    assert_eq!(first["structuredContent"],json!({"visible":"filtered result"}));
+    assert_eq!(first["content"],json!([]));
+    assert!(!first.to_string().contains("RAW_FIXTURE_PRIVATE"));
+    assert_eq!(cached_call(&live,1,2,&params).unwrap(),first);
+    assert_eq!(tool_calls(&fake),1,"one miss then one hit");
+    assert!(fake.state().methods.iter().filter(|m|*m=="tools/list").count()>=2,
+        "a cache hit still revalidates the live descriptor");
+
+    // Two access tokens for the same client must not share cached results.
+    cached_call(&live,2,2,&params).unwrap();
+    cached_call(&live,1,3,&params).unwrap();
+    cached_call(&live,1,2,&query("beta")).unwrap();
+    assert_eq!(tool_calls(&fake),4);
+    // Neither a local call nor a scope with a mismatched effective profile
+    // can borrow a cache partition.
+    live.call("example:search_items",&params,ToolScope::AnyGranted).unwrap();
+    live.call("example:search_items",&params,ToolScope::AnyGranted).unwrap();
+    let wrong=live.cache_request([1;32],3).unwrap();
+    live.admit_with_cache("example:search_items",ToolScope::AnyGranted,Some(&wrong),2,|_|Ok(()))
+        .unwrap().execute(&params).unwrap();
+    assert_eq!(tool_calls(&fake),7);
+    let request=live.cache_request([1;32],2).unwrap();
+    assert!(live.admit_with_cache("example:search_items",ToolScope::AnyGranted,Some(&request),2,
+        |_|Err(io::Error::other("private journal refused"))).is_err());
+    for key in ["_meta","caller_id","profile","token_hash"] {
+        let mut forged=params.clone();
+        forged.insert(key.into(),json!("spoofed"));
+        assert!(cached_call(&live,1,2,&forged).is_err());
+    }
+    assert_eq!(tool_calls(&fake),7);
+    fake.state().descriptor_drift=true;
+    assert!(cached_call(&live,1,2,&params).is_err());
+    assert_eq!(tool_calls(&fake),7);
+    fake.state().descriptor_drift=false;
+
+    // The normal reload path must fence even identical fingerprints.
+    live.reload(Ok(initial.clone()),agent_bridge_extensions::ReloadMode::OperatorApproved).unwrap();
+    cached_call(&live,1,2,&params).unwrap();
+    assert_eq!(tool_calls(&fake),8);
+    // An actual error is never retained.
+    fake.state().tool_error=true;
+    let err_params=query("error-case");
+    assert_eq!(cached_call(&live,1,2,&err_params).unwrap()["isError"],true);
+    assert_eq!(cached_call(&live,1,2,&err_params).unwrap()["isError"],true);
+    assert_eq!(tool_calls(&fake),10);
+    fake.state().tool_error=false;
+
+    live.revoke_server("example").unwrap();
+    assert!(cached_call(&live,1,2,&params).is_err());
+    live.reload(Ok(initial),agent_bridge_extensions::ReloadMode::OperatorApproved).unwrap();
+    cached_call(&live,1,2,&params).unwrap();
+    assert_eq!(tool_calls(&fake),11);
+    pool.close_all();
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn result_cache_old_inflight_cannot_publish_after_invalidation(){
+    let _serial=serial();
+    let dir=scratch("result-cache-inflight");
+    let native=native_file(&dir,"example-mcp",true);
+    let raw=bytes_of(json!({"example":cache_server(&native)}));
+    let fake=Fake::new(Mode::Stall);
+    fake.state().cache_fixture=true;
+    let pool=SessionPool::new();
+    let live=agent_bridge_extensions::LiveExtensionRegistry::new(
+        enabled(&raw).with_stdio_launcher(fake.clone()),pool.clone(),agent_bridge_extensions::StatusTracker::new());
+    std::thread::scope(|scope|{
+        let old=scope.spawn(||cached_call(&live,9,2,&query("alpha")));
+        wait_for("cache miss reached actual tools/call",||fake.state().stalled==1);
+        // Model the profile/revoke fence without cancelling an already
+        // admitted read. The late successful reply must not repopulate.
+        live.invalidate_results();
+        fake.state().release=true;
+        assert!(old.join().unwrap().is_ok());
+    });
+    assert_eq!(tool_calls(&fake),1);
+    cached_call(&live,9,2,&query("alpha")).unwrap();
+    assert_eq!(tool_calls(&fake),2,"late old result was fenced");
+    cached_call(&live,9,2,&query("alpha")).unwrap();
+    assert_eq!(tool_calls(&fake),2);
+    pool.close_all();
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn result_cache_local_opt_in_and_descriptor_are_required(){
+    let dir=scratch("result-cache-policy");
+    let native=native_file(&dir,"example-mcp",true);
+    let good=cache_server(&native);
+    let parse=|entry:Value|Registry::parse(&bytes_of(json!({"example":entry})));
+    assert!(parse(good.clone()).is_ok());
+    for annotations in [json!({}),json!({"readOnlyHint":false}),
+        json!({"readOnlyHint":true,"destructiveHint":true})]{
+        let mut bad=good.clone();
+        let grant=&mut bad["tools"]["search_items"];
+        grant["descriptor"]["annotations"]=annotations;
+        let sha=hash(&grant["descriptor"]);
+        grant["descriptor_sha256"]=json!(sha);
+        assert!(parse(bad).is_err());
+    }
+    for policy in [json!({"read_only":false,"ttl_seconds":60}),
+        json!({"read_only":true,"ttl_seconds":0}),json!({"read_only":true,"ttl_seconds":301})]{
+        let mut bad=good.clone();
+        bad["tools"]["search_items"]["result_cache"]=policy;
+        assert!(parse(bad).is_err());
+    }
+    let mut bad=good.clone();
+    bad["tools"]["search_items"]["descriptor_sha256"]=json!("0".repeat(64));
+    assert!(parse(bad).is_err());
+    let mut bad=good.clone();
+    bad["tools"]["search_items"].as_object_mut().unwrap().remove("descriptor");
+    assert!(parse(bad).is_err());
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn stdio_probe_honors_revocation_and_status_transitions_ready_disabled_and_replaced() {
+    let _serial = serial();
+    let dir = scratch("probe-revoke-status");
+    let native = native_file(&dir, "example-mcp", true);
+    let sha = file_sha256(&native);
+    let orig = server(&native, &sha);
+    let raw = bytes_of(json!({ "example": orig }));
+
+    let fake = Fake::new(Mode::Modern);
+    let pool = SessionPool::new();
+    let status = agent_bridge_extensions::StatusTracker::new();
+    let initial = enabled(&raw).with_stdio_launcher(fake.clone());
+    let live = agent_bridge_extensions::LiveExtensionRegistry::new(
+        initial.clone(),
+        pool.clone(),
+        status.clone(),
+    );
+
+    // 1. Admitted probe transitions idle -> ready.
+    let report = live.test_connection("example").unwrap();
+    assert_eq!(report["ok"], true);
+    assert_eq!(report["tool_invoked"], false);
+    assert_eq!(report["approved_grants_changed"], false);
+    assert_eq!(report["generation"], 1);
+    let ready_snap = status.snapshot_for_registry(&live.current(), Some(&pool), Some(live.generation()));
+    assert_eq!(ready_snap["servers"][0]["state"], "ready");
+    assert!(ready_snap["servers"][0]["last_latency_ms"].as_u64().is_some());
+
+    // 2. Paused admitted probe cancelled on revocation & stays refused even after same-fingerprint re-enable.
+    let old_probe = live.admit_probe("example").unwrap();
+    let rev = live.revoke_server("example").unwrap();
+    assert_eq!(rev.removed_or_disabled, 1);
+    assert_eq!(rev.cancelled_in_flight, 1);
+
+    let disabled_snap = status.snapshot_for_registry(&live.current(), Some(&pool), Some(live.generation()));
+    assert_eq!(disabled_snap["servers"][0]["enabled"], false);
+    assert_eq!(disabled_snap["servers"][0]["state"], "disabled");
+    assert!(disabled_snap["servers"][0]["last_latency_ms"].is_null());
+    assert!(live.admit_probe("example").is_err());
+
+    live.reload(Ok(initial), agent_bridge_extensions::ReloadMode::OperatorApproved).unwrap();
+    assert_eq!(
+        status.snapshot_for_registry(&live.current(), Some(&pool), Some(live.generation()))["servers"][0]["state"],
+        "idle"
+    );
+    let launches_before = fake.state().launches;
+    let old_err = old_probe.execute().unwrap_err();
+    assert!(old_err.to_string().contains("cancelled due to revocation"), "{old_err}");
+    assert_eq!(fake.state().launches, launches_before);
+    assert_eq!(
+        status.snapshot_for_registry(&live.current(), Some(&pool), Some(live.generation()))["servers"][0]["state"],
+        "idle"
+    );
+
+    // 3. Successful probe then config replacement (same name, changed args) clears ready -> idle.
+    live.test_connection("example").unwrap();
+    assert_eq!(
+        status.snapshot_for_registry(&live.current(), Some(&pool), Some(live.generation()))["servers"][0]["state"],
+        "ready"
+    );
+    let mut replaced = server(&native, &sha);
+    replaced["stdio"]["args"] = json!(["stdio", "v2"]);
+    let replaced_raw = bytes_of(json!({ "example": replaced }));
+    let replaced_reg = enabled(&replaced_raw).with_stdio_launcher(fake.clone());
+    live.reload(Ok(replaced_reg.clone()), agent_bridge_extensions::ReloadMode::OperatorApproved).unwrap();
+    let replaced_snap = status.snapshot_for_registry(&live.current(), Some(&pool), Some(live.generation()));
+    assert_eq!(replaced_snap["servers"][0]["state"], "idle");
+    assert!(replaced_snap["servers"][0]["last_latency_ms"].is_null());
+    assert_eq!(
+        replaced_snap["servers"][0]["config_sha256"],
+        replaced_reg.server_sha256("example").unwrap().unwrap()
+    );
+
+    // 4. In-flight stalled stdio probe (tools/list) cancels immediately upon revocation.
+    fake.state().stall_list = true;
+    let admitted_stall = live.admit_probe("example").unwrap();
+    let started = Instant::now();
+    let stall_err = std::thread::scope(|scope| {
+        let h = scope.spawn(|| admitted_stall.execute());
+        wait_for("stdio probe did not stall on tools/list", || fake.state().stalled >= 1);
+        let rev = live.revoke_server("example").unwrap();
+        assert_eq!(rev.cancelled_in_flight, 1);
+        h.join().unwrap().unwrap_err()
+    });
+    assert!(started.elapsed() < Duration::from_secs(3), "stdio probe cancellation took {:?}", started.elapsed());
+    assert!(stall_err.to_string().contains("cancelled due to revocation"), "{stall_err}");
+    assert!(!fake.state().methods.iter().any(|m| m == "tools/call"));
+    assert_eq!(
+        status.snapshot_for_registry(&live.current(), Some(&pool), Some(live.generation()))["servers"][0]["state"],
+        "disabled"
+    );
+    pool.close_all();
     let _ = std::fs::remove_dir_all(&dir);
 }

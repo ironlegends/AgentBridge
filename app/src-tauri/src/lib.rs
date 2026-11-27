@@ -7,6 +7,7 @@ mod native_tunnel;
 mod native_windows;
 mod operator_connection;
 mod state;
+mod status_card;
 mod supervisor;
 #[cfg(test)]
 mod opener_permissions_tests;
@@ -133,6 +134,12 @@ async fn get_missions_snapshot(runtime: State<'_, Arc<AppRuntime>>) -> Result<Va
 }
 
 #[tauri::command]
+async fn get_mission_handoff(runtime: State<'_, Arc<AppRuntime>>, mission_id: String, revision: i64) -> Result<Value, String> {
+    let runtime = Arc::clone(runtime.inner());
+    run_backend(move || backend::get_mission_handoff(&runtime, &mission_id, revision)).await
+}
+
+#[tauri::command]
 async fn get_oauth_pending(runtime: State<'_, Arc<AppRuntime>>) -> Result<Value, String> {
     let runtime = Arc::clone(runtime.inner());
     run_backend(move || backend::get_oauth_pending(&runtime)).await
@@ -167,6 +174,21 @@ async fn decide_extension_request(
 }
 
 #[tauri::command]
+async fn test_extension_connection(
+    runtime: State<'_, Arc<AppRuntime>>,
+    server: String,
+) -> Result<Value, String> {
+    let runtime = Arc::clone(runtime.inner());
+    run_backend(move || backend::test_extension_connection(&runtime, &server)).await
+}
+
+#[tauri::command]
+async fn reload_extensions(runtime: State<'_, Arc<AppRuntime>>) -> Result<Value, String> {
+    let runtime = Arc::clone(runtime.inner());
+    run_backend(move || backend::reload_extensions(&runtime)).await
+}
+
+#[tauri::command]
 async fn get_skills_overview(runtime: State<'_, Arc<AppRuntime>>) -> Result<Value, String> {
     let runtime = Arc::clone(runtime.inner());
     run_backend(move || backend::get_skills_overview(&runtime)).await
@@ -181,6 +203,12 @@ async fn run_skill_action(
 ) -> Result<Value, String> {
     let runtime = Arc::clone(runtime.inner());
     run_backend(move || backend::run_skill_action(&runtime, &action, &name, version)).await
+}
+
+#[tauri::command]
+async fn get_session_history(runtime: State<'_, Arc<AppRuntime>>, boot_id: String, session_id: String) -> Result<Value, String> {
+    let runtime = Arc::clone(runtime.inner());
+    run_backend(move || backend::get_session_history(&runtime, &boot_id, &session_id)).await
 }
 
 #[tauri::command]
@@ -446,14 +474,18 @@ pub fn run() {
             start_or_restart_gateway,
             stop_gateway,
             get_missions_snapshot,
+            get_mission_handoff,
             get_oauth_pending,
             enable_oauth_enrollment,
             approve_oauth_request,
             decide_extension_request,
+            test_extension_connection,
+            reload_extensions,
             get_skills_overview,
             run_skill_action,
             get_diagnostics,
             get_sessions,
+            get_session_history,
             quit_app,
         ])
         .build(tauri::generate_context!())

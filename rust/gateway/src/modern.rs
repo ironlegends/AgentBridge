@@ -215,7 +215,7 @@ pub(crate) struct Catalog {
 }
 
 impl Catalog {
-    pub(crate) fn new(published: &[ToolDefinition]) -> Self {
+    pub(crate) fn new(published: &[ToolDefinition], partition: Option<&str>) -> Self {
         let mut tools: Vec<Value> = published.iter()
             .map(|tool| serde_json::to_value(tool).unwrap_or(Value::Null))
             .collect();
@@ -228,7 +228,14 @@ impl Catalog {
             }
         }
         let tools = Value::Array(tools);
-        let digest = Sha256::digest(tools.to_string().as_bytes());
+        // Preserve the historical revision exactly when no partition was
+        // explicitly selected. The narrow view also binds its local seal,
+        // even when two selections happen to expose identical definitions.
+        let encoded = match partition {
+            Some(partition) => json!({"partition":partition,"tools":&tools}).to_string(),
+            None => tools.to_string(),
+        };
+        let digest = Sha256::digest(encoded.as_bytes());
         let revision = digest.iter().map(|byte| format!("{byte:02x}")).collect();
         Self { tools, revision }
     }

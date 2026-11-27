@@ -99,8 +99,93 @@ fn valid_tool_name(name: &str) -> bool {
         && name.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.'))
 }
 
+/// Cooperative cancellation token signalled on live revocation to abort
+/// stalled or in-flight upstream extension calls immediately.
+#[derive(Clone, Default)]
+pub struct CancellationToken {
+    state: Arc<Mutex<CancelState>>,
+}
+
+#[derive(Default)]
+struct CancelState {
+    cancelled: bool,
+    wakers: Vec<std::task::Waker>,
+}
+
+impl CancellationToken {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .cancelled
+    }
+
+    pub fn cancel(&self) {
+        let wakers = {
+            let mut guard = self
+                .state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if guard.cancelled {
+                return;
+            }
+            guard.cancelled = true;
+            std::mem::take(&mut guard.wakers)
+        };
+        for waker in wakers {
+            waker.wake();
+        }
+    }
+
+    fn register_waker(&self, waker: &std::task::Waker) -> bool {
+        let mut guard = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if guard.cancelled {
+            return true;
+        }
+        if !guard.wakers.iter().any(|existing| existing.will_wake(waker)) {
+            guard.wakers.push(waker.clone());
+        }
+        false
+    }
+}
+
+struct CancelRace<'a, F> {
+    token: &'a CancellationToken,
+    future: Pin<&'a mut F>,
+}
+
+impl<T, F: Future<Output = T>> Future for CancelRace<'_, F> {
+    type Output = Result<T>;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        if self.token.register_waker(cx.waker()) {
+            return Poll::Ready(Err(error("Extension call cancelled due to revocation")));
+        }
+        self.future.as_mut().poll(cx).map(Ok)
+    }
+}
+
 impl Session {
     pub fn open(address: &str, bearer_env: Option<&str>, header_env: &BTreeMap<String, String>) -> Result<Self> {
+        Self::open_cancellable(address, bearer_env, header_env, None)
+    }
+
+    pub fn open_cancellable(
+        address: &str,
+        bearer_env: Option<&str>,
+        header_env: &BTreeMap<String, String>,
+        cancel: Option<&CancellationToken>,
+    ) -> Result<Self> {
+        if cancel.is_some_and(CancellationToken::is_cancelled) {
+            return Err(error("Extension call cancelled due to revocation"));
+        }
         let endpoint = endpoint(address)?;
         crate::validate_header_env(address, header_env, bearer_env.is_some())?;
         if bearer_env.is_some() && endpoint.scheme() != "https" {
@@ -109,10 +194,15 @@ impl Session {
         let bearer = bearer_env.map(|key| std::env::var(key)
             .map_err(|_| error("Configured extension credential is unavailable"))).transpose()?;
         let headers = resolve_headers(header_env, |name| std::env::var(name).ok())?;
-        Self::connect(endpoint, bearer, headers)
+        Self::connect(endpoint, bearer, headers, cancel)
     }
 
-    fn connect(endpoint: Url, bearer: Option<String>, headers: HeaderMap) -> Result<Self> {
+    fn connect(
+        endpoint: Url,
+        bearer: Option<String>,
+        headers: HeaderMap,
+        cancel: Option<&CancellationToken>,
+    ) -> Result<Self> {
         let client = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none())
             .retry(reqwest::retry::never()).no_proxy()
             .tls_backend_preconfigured(https_tls()?)
@@ -131,7 +221,7 @@ impl Session {
         if let Some(secret) = bearer { config = config.auth_header(secret); }
         let mut this = Self { service: None, runtime: runtime()?, child: None };
         // The SDK transport spawns its worker, so it is built inside the runtime.
-        this.serve(|| StreamableHttpClientTransport::with_client(client, config))?;
+        this.serve(|| StreamableHttpClientTransport::with_client(client, config), cancel)?;
         Ok(this)
     }
 
@@ -139,8 +229,21 @@ impl Session {
     /// held handle and compared with the pin before launch, then re-checked
     /// after launch. At most four stdio sessions are live; a fifth is
     /// refused, never queued.
+    #[allow(dead_code)]
     pub fn open_stdio(spec: &StdioSpec, launcher: &dyn StdioLauncher,
         resolve: &dyn Fn(&str) -> Option<OsString>) -> Result<Self> {
+        Self::open_stdio_cancellable(spec, launcher, resolve, None)
+    }
+
+    pub fn open_stdio_cancellable(
+        spec: &StdioSpec,
+        launcher: &dyn StdioLauncher,
+        resolve: &dyn Fn(&str) -> Option<OsString>,
+        cancel: Option<&CancellationToken>,
+    ) -> Result<Self> {
+        if cancel.is_some_and(CancellationToken::is_cancelled) {
+            return Err(error("Extension call cancelled due to revocation"));
+        }
         spec.validate()?;
         let slot = stdio::SessionSlot::acquire()?;
         let environment = stdio::child_environment(spec, resolve)?;
@@ -162,7 +265,7 @@ impl Session {
         drop(pin);
         let (reader, writer) = (owner.reader(), owner.writer());
         let mut this = Self { service: None, runtime: runtime()?, child: Some(owner) };
-        this.serve(|| AsyncRwTransport::new_client(reader, writer).with_max_line_length(MAX_BYTES))?;
+        this.serve(|| AsyncRwTransport::new_client(reader, writer).with_max_line_length(MAX_BYTES), cancel)?;
         Ok(this)
     }
 
@@ -170,8 +273,11 @@ impl Session {
     /// legacy `initialize` only for a server the SDK classifies as legacy.
     /// Discovery and initialization are read-only, so the fallback cannot
     /// repeat an effect.
-    fn serve<T, E, A>(&mut self, transport: impl FnOnce() -> T) -> Result<()>
+    fn serve<T, E, A>(&mut self, transport: impl FnOnce() -> T, cancel: Option<&CancellationToken>) -> Result<()>
     where T: IntoTransport<RoleClient, E, A>, E: std::error::Error + Send + Sync + 'static {
+        if cancel.is_some_and(CancellationToken::is_cancelled) {
+            return Err(error("Extension call cancelled due to revocation"));
+        }
         let identity = ClientConfig::new(ClientCapabilities::default(),
             Implementation::new("agent-bridge", env!("CARGO_PKG_VERSION")))
             .with_protocol_version(ProtocolVersion::V_2026_07_28);
@@ -180,8 +286,16 @@ impl Session {
             legacy_version: Some(ProtocolVersion::LATEST_WITH_INITIALIZE),
         };
         let service = self.runtime.block_on(async {
-            tokio::time::timeout(OPEN_DEADLINE, identity.serve_with_lifecycle(transport(), lifecycle)).await
-        }).map_err(|_| error("Extension did not complete the MCP handshake in time"))?
+            let fut = tokio::time::timeout(OPEN_DEADLINE, identity.serve_with_lifecycle(transport(), lifecycle));
+            match cancel {
+                Some(token) => {
+                    tokio::pin!(fut);
+                    CancelRace { token, future: fut }.await
+                }
+                None => Ok(fut.await),
+            }
+        })?
+            .map_err(|_| error("Extension did not complete the MCP handshake in time"))?
             .map_err(|_| error("Extension refused or failed the MCP handshake"))?;
         self.service = Some(service);
         let served = self.service()?.peer_info()
@@ -208,32 +322,62 @@ impl Session {
         self.service.as_ref().ok_or_else(|| error("Extension session closed"))
     }
 
+    #[allow(dead_code)]
     fn run<T, F>(&self, future: F) -> Result<T>
     where F: Future<Output = std::result::Result<T, rmcp::ServiceError>> {
-        self.runtime.block_on(async { tokio::time::timeout(REQUEST_DEADLINE, future).await })
+        self.run_cancellable(future, None)
+    }
+
+    fn run_cancellable<T, F>(&self, future: F, cancel: Option<&CancellationToken>) -> Result<T>
+    where F: Future<Output = std::result::Result<T, rmcp::ServiceError>> {
+        if cancel.is_some_and(CancellationToken::is_cancelled) {
+            return Err(error("Extension call cancelled due to revocation"));
+        }
+        self.runtime.block_on(async {
+            let fut = tokio::time::timeout(REQUEST_DEADLINE, future);
+            match cancel {
+                Some(token) => {
+                    tokio::pin!(fut);
+                    CancelRace { token, future: fut }.await
+                }
+                None => Ok(fut.await),
+            }
+        })?
             .map_err(|_| error("Extension did not return a confirmed response"))?
             .map_err(|_| error("Extension returned an error or an unconfirmed reply"))
     }
 
     /// Lists one page. Every descriptor is returned as JSON for pinning.
-    fn page(&self, cursor: Option<String>) -> Result<(Vec<Value>, Option<String>)> {
+    fn page_cancellable(&self, cursor: Option<String>, cancel: Option<&CancellationToken>) -> Result<(Vec<Value>, Option<String>)> {
         let params = cursor.map(|c| PaginatedRequestParams::default().with_cursor(Some(c)));
-        let listed = self.run(self.service()?.list_tools(params))?;
+        let listed = self.run_cancellable(self.service()?.list_tools(params), cancel)?;
         let tools = listed.tools.iter().map(serde_json::to_value).collect::<std::result::Result<Vec<_>, _>>()
             .map_err(|_| error("Invalid remote MCP descriptor"))?;
         Ok((tools, listed.next_cursor.map(|cursor| cursor.to_string())))
     }
 
+    #[allow(dead_code)]
+    fn page(&self, cursor: Option<String>) -> Result<(Vec<Value>, Option<String>)> {
+        self.page_cancellable(cursor, None)
+    }
+
     /// One confirmed MCP tools/list traversal, without tool invocation or
     /// registry mutation. Bounded to 16 pages and 256 unique tool names.
     pub fn catalog(&mut self) -> Result<Vec<Value>> {
+        self.catalog_cancellable(None)
+    }
+
+    pub fn catalog_cancellable(&mut self, cancel: Option<&CancellationToken>) -> Result<Vec<Value>> {
         use std::collections::BTreeSet;
+        if cancel.is_some_and(CancellationToken::is_cancelled) {
+            return Err(error("Extension call cancelled due to revocation"));
+        }
         let mut cursor = None;
         let mut seen_cursors = BTreeSet::<String>::new();
         let mut names = BTreeSet::<String>::new();
         let mut entries = Vec::new();
         for _ in 0..16 {
-            let (tools, next) = self.page(cursor)?;
+            let (tools, next) = self.page_cancellable(cursor, cancel)?;
             for tool in tools {
                 let name = tool.get("name").and_then(Value::as_str)
                     .ok_or_else(|| error("Remote MCP tool has no name"))?;
@@ -257,10 +401,14 @@ impl Session {
     }
 
     pub fn tool(&mut self, name: &str) -> Result<Value> {
+        self.tool_cancellable(name, None)
+    }
+
+    pub fn tool_cancellable(&mut self, name: &str, cancel: Option<&CancellationToken>) -> Result<Value> {
         let mut cursor = None;
         let mut found = None;
         for _ in 0..16 {
-            let (tools, next) = self.page(cursor)?;
+            let (tools, next) = self.page_cancellable(cursor, cancel)?;
             for entry in tools {
                 if entry["name"].as_str() == Some(name) && found.replace(entry).is_some() {
                     return Err(error("Ambiguous extension tool name"));
@@ -277,15 +425,77 @@ impl Session {
 
     /// Sends exactly one `tools/call`. Only a completed result is accepted:
     /// an input request or a task is refused and nothing is resent.
+    #[allow(dead_code)]
     pub fn call_tool(&mut self, name: &str, arguments: Map<String, Value>) -> Result<Value> {
+        self.call_tool_cancellable(name, arguments, None)
+    }
+
+    pub fn call_tool_cancellable(&mut self, name: &str, arguments: Map<String, Value>, cancel: Option<&CancellationToken>) -> Result<Value> {
         if !valid_tool_name(name) { return Err(error("Extension request name cannot be routed")); }
         let params = CallToolRequestParams::new(name.to_owned()).with_arguments(arguments);
-        match self.run(self.service()?.call_tool_once(params))? {
+        match self.run_cancellable(self.service()?.call_tool_once(params), cancel)? {
             CallToolResponse::Complete(result) => serde_json::to_value(result)
                 .map_err(|_| error("Invalid extension tool result")),
             _ => Err(error("Extension reply is not a completed result")),
         }
     }
+}
+
+/// Maps transport, pin, and protocol failures to fixed static error classes
+/// so diagnostics and test reports never leak raw URLs, secrets, or paths.
+pub(crate) fn classify_error(err: &std::io::Error) -> &'static str {
+    let message = err.to_string();
+    if message.contains("executable changed") || message.contains("executable pin") {
+        return "executable_pin_mismatch";
+    }
+    if message.contains("executable is unavailable")
+        || message.contains("not a regular file")
+        || message.contains("not a native console image")
+        || message.contains("link or reparse point")
+        || message.contains("directory another user can replace")
+        || message.contains("ownership or mode is unsafe")
+        || message.contains("exceeds the size bound")
+        || message.contains("no valid SystemRoot")
+        || message.contains("no usable PATH")
+        || message.contains("Cannot start the stdio extension")
+        || message.contains("executable has no directory")
+    {
+        return "executable_unavailable";
+    }
+    if message.contains("credential is unavailable")
+        || message.contains("credential exceeds")
+        || message.contains("credential is invalid")
+        || message.contains("variable is unavailable")
+        || message.contains("variable exceeds")
+    {
+        return "credential_unavailable";
+    }
+    if message.contains("Too many stdio extensions") {
+        return "concurrency_limit";
+    }
+    if message.contains("in time")
+        || message.contains("did not return a confirmed response")
+        || err.kind() == std::io::ErrorKind::TimedOut
+    {
+        return "timeout";
+    }
+    if message.contains("cancelled due to revocation")
+        || err.kind() == std::io::ErrorKind::Interrupted
+    {
+        return "revoked_cancelled";
+    }
+    if message.contains("MCP handshake")
+        || message.contains("protocol version or tool capability unsupported")
+    {
+        return "handshake_failed";
+    }
+    if message.contains("Remote MCP")
+        || message.contains("pagination")
+        || message.contains("descriptor")
+    {
+        return "catalog_failed";
+    }
+    "transport_error"
 }
 
 impl Drop for Session {
@@ -768,7 +978,7 @@ mod modern_tests {
         let mut key = HeaderValue::from_static("fixture-only-key");
         key.set_sensitive(true);
         headers.insert("x-api-key", key);
-        let mut session = Session::connect(endpoint(&address).unwrap(), None, headers).unwrap();
+        let mut session = Session::connect(endpoint(&address).unwrap(), None, headers, None).unwrap();
         assert_eq!(session.catalog().unwrap()[0]["name"], "echo");
         let arguments = json!({"value":1}).as_object().unwrap().clone();
         let called = session.call_tool("echo", arguments).unwrap();

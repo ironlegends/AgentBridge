@@ -1,5 +1,6 @@
 //! Immutable local selection for the complete native capability.
 use crate::runtime::RuntimeError;
+use crate::catalogue_selection::{CatalogueSelection, family_counts};
 use agent_bridge_gateway::ToolDefinition;
 use agent_bridge_oauth_server::CapabilityIdentity;
 use serde::{Deserialize, Serialize};
@@ -40,13 +41,29 @@ pub(crate) struct UnifiedSelection {
     pub version: u32,
     pub policy_version: u32,
     pub catalogue_sha256: String,
+    #[serde(default, skip_serializing_if = "CatalogueSelection::is_unified")]
+    pub catalogue: CatalogueSelection,
     pub private_root: PathBuf,
     pub file_scope: FileScopeSelection,
     pub allow_import: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub mission_handoff: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attempt_maintenance: Option<AttemptSelection>,
     pub browser: BundleSelection,
     pub windows: BundleSelection,
     pub agent_desktop: DesktopSelection,
 }
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct AttemptSelection {
+    pub mission_id: String,
+    pub subtask_id: String,
+    pub base_commit: String,
+}
+
+fn is_false(value: &bool) -> bool { !*value }
 
 fn strict_hash(hash: &str) -> bool {
     hash.len() == 64 && hash.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
@@ -65,6 +82,14 @@ pub(crate) fn decode_selection(bytes: &[u8]) -> Result<UnifiedSelection, Runtime
         || !strict_hash(&selected.windows.manifest_sha256)
         || !strict_hash(&selected.agent_desktop.manifest_sha256)
     { return Err("Unsupported unified version or malformed resource/catalogue digest".into()); }
+    if let Some(attempt) = &selected.attempt_maintenance {
+        if !selected.mission_handoff || !agent_bridge_missions::valid_id("mis",&attempt.mission_id)
+            || !agent_bridge_missions::valid_id("sub",&attempt.subtask_id)
+            || !matches!(attempt.base_commit.len(),40|64)
+            || !attempt.base_commit.bytes().all(|b|b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) {
+            return Err("Attempt maintenance requires explicit handoff and exact mission, subtask and base.".into());
+        }
+    }
     if let FileScopeSelection::AllowedRoots { roots } = &selected.file_scope {
         if roots.is_empty() || roots.len() > 32 {
             return Err("Unified allowed-roots must select 1..32 physical directories".into());
@@ -155,9 +180,9 @@ impl QualifiedManifest {
     pub(crate) fn verify_catalogue(&self, catalogue:&[ToolDefinition])->Result<(),RuntimeError> {
         let actual=catalogue_digest(catalogue)?;
         let names:std::collections::BTreeSet<_>=catalogue.iter().map(|tool|tool.name.as_str()).collect();
-        let expected:std::collections::BTreeSet<_>=COMPLETE_TOOL_NAMES.iter().copied().collect();
-        if catalogue.len()!=46 || names!=expected {
-            return Err("UNIFIED_CATALOGUE_INCOMPLETE: all 46 real unique handlers are required".into());
+        let expected:std::collections::BTreeSet<_>=self.expected_tool_names().collect();
+        if catalogue.len()!=expected.len() || names!=expected {
+            return Err("UNIFIED_CATALOGUE_INCOMPLETE: all expected real unique handlers are required".into());
         }
         if actual!=self.selection.catalogue_sha256 {
             return Err(format!("UNIFIED_CATALOGUE_CHANGED: expected {}, actual {actual}",
@@ -215,10 +240,18 @@ impl QualifiedManifest {
             protected_roots:protected,private_root:self.selection.private_root.clone(),
         }
     }
+    pub(crate) fn expected_tool_names(&self)->impl Iterator<Item=&'static str> {
+        let selected=self.selection.catalogue;
+        selected_tool_names(self.selection.mission_handoff)
+            .chain(self.selection.attempt_maintenance.is_some().then_some(crate::attempt_maintenance::TOOL_NAME))
+            .filter(move |name| selected.allows(name))
+    }
     pub(crate) fn summary(&self)->Result<Value,RuntimeError> {
-        Ok(serde_json::json!({
-            "identity":self.identity()?,"total_tools":46,
-            "families":{"desktop":27,"missions_including_status":16,"project_commands":1,"historical_utilities":2},
+        let mut summary=serde_json::json!({
+            "identity":self.identity()?,"total_tools":self.expected_tool_names().count(),
+            "families":{"desktop":27,"missions_including_status":
+                16 + u32::from(self.selection.mission_handoff) + u32::from(self.selection.attempt_maintenance.is_some()),
+                "project_commands":1,"historical_utilities":2},
             "filesystem":self.selection.file_scope,"allow_import":self.selection.allow_import,
             "resources":{
                 "browser_manifest_sha256":self.selection.browser.manifest_sha256,
@@ -235,7 +268,36 @@ impl QualifiedManifest {
                 "extensions":{"implementation":"attached","availability":"exact-local-approval"},
                 "skills":{"implementation":"attached","availability":"live-profile-and-local-policy"},
             }
-        }))
+        });
+        if self.selection.attempt_maintenance.is_some() {
+            summary["components"]["attempt_maintenance"]=serde_json::json!({
+                "implementation":"attached","qualification":"pending-local-qualification",
+                "availability":"fixed-native-head-verification"
+            });
+        }
+        let selected=self.selection.catalogue;
+        if !selected.is_unified() {
+            summary["catalogue"] = serde_json::json!(selected.name());
+            summary["families"] = family_counts(self.expected_tool_names());
+            // Keep operator diagnostics honest: attached providers may be
+            // present behind the narrow view but their tools are excluded.
+            for (component, witness) in [
+                ("files", "desktop_read_file"),
+                ("browser", "desktop_browser_session"),
+                ("windows_ui", "desktop_ui_windows"),
+                ("agent_desktop", "desktop_agent_desktop"),
+                ("missions", "agent_bridge_mission_get"),
+                ("terminal", "desktop_start_process"),
+                ("extensions", "desktop_mcp_tool_call"),
+                ("skills", "desktop_skill_manage"),
+                ("attempt_maintenance", crate::attempt_maintenance::TOOL_NAME),
+            ] {
+                if summary["components"].get(component).is_some() && !selected.allows(witness) {
+                    summary["components"][component] = serde_json::json!({"implementation":"excluded","availability":"catalogue"});
+                }
+            }
+        }
+        Ok(summary)
     }
     pub(crate) fn identity(&self) -> Result<CapabilityIdentity, RuntimeError> {
         Ok(CapabilityIdentity::UnifiedV1 {
@@ -257,6 +319,7 @@ pub(crate) const COMPLETE_TOOL_NAMES: &[&str] = &[
     "agent_bridge_mission_create",
     "agent_bridge_mission_get",
     "agent_bridge_mission_grant",
+    "agent_bridge_mission_handoff",
     "agent_bridge_mission_list",
     "agent_bridge_mission_observe",
     "agent_bridge_mission_subtask_assign",
@@ -296,6 +359,16 @@ pub(crate) const COMPLETE_TOOL_NAMES: &[&str] = &[
     "desktop_ui_windows",
     "desktop_write_file",
 ];
+
+/// The audit may identify an opt-in tool without adding it to any connector's catalogue.
+pub(crate) fn audit_tool_name(name: Option<&str>) -> &'static str {
+    COMPLETE_TOOL_NAMES.iter().copied().chain(std::iter::once(crate::attempt_maintenance::TOOL_NAME))
+        .find(|known| Some(*known) == name).unwrap_or("other")
+}
+
+pub(crate) fn selected_tool_names(handoff: bool) -> impl Iterator<Item = &'static str> {
+    COMPLETE_TOOL_NAMES.iter().copied().filter(move |name| handoff || *name != "agent_bridge_mission_handoff")
+}
 
 fn path_key(path:&Path)->String {
     let value=path.to_string_lossy().trim_end_matches(['\\','/']).to_owned();
@@ -411,6 +484,61 @@ mod tests {
         assert!(decode_selection(duplicate.as_bytes()).is_err(), "duplicate selection fields are ambiguous");
     }
     #[test]
+    fn handoff_catalogue_is_explicit_and_preserves_old_selection_bytes() {
+        let old = selection();
+        let legacy = decode_selection(&serde_json::to_vec(&old).unwrap()).unwrap();
+        assert!(!legacy.mission_handoff);
+        let serialized = serde_json::to_value(&legacy).unwrap();
+        assert_eq!(serialized, old);
+        assert_eq!(selected_tool_names(false).count(), 46);
+        assert!(!selected_tool_names(false).any(|name| name == "agent_bridge_mission_handoff"));
+        let mut opt_in = old.clone();
+        opt_in["mission_handoff"] = json!(true);
+        let selected = decode_selection(&serde_json::to_vec(&opt_in).unwrap()).unwrap();
+        assert!(selected.mission_handoff);
+        assert_eq!(selected_tool_names(true).count(), 47);
+        assert_eq!(serde_json::to_value(&selected).unwrap(), opt_in);
+        assert_ne!(canonical_digest(&old).unwrap(), canonical_digest(&opt_in).unwrap());
+        let mut attempts = opt_in.clone();
+        attempts["attempt_maintenance"] = json!({
+            "mission_id":format!("mis_{}","1".repeat(32)),
+            "subtask_id":format!("sub_{}","2".repeat(32)),
+            "base_commit":"a".repeat(40)
+        });
+        let selected = decode_selection(&serde_json::to_vec(&attempts).unwrap()).unwrap();
+        assert!(selected.attempt_maintenance.is_some());
+        assert_eq!(serde_json::to_value(&selected).unwrap(),attempts);
+        assert_ne!(canonical_digest(&opt_in).unwrap(),canonical_digest(&attempts).unwrap());
+        attempts["mission_handoff"]=json!(false);
+        assert!(decode_selection(&serde_json::to_vec(&attempts).unwrap()).is_err());
+    }
+
+    #[test]
+    fn specialized_selection_is_strict_and_preserves_the_historical_default() {
+        let original=selection();
+        let implicit=decode_selection(&serde_json::to_vec(&original).unwrap()).unwrap();
+        assert!(implicit.catalogue.is_unified());
+        let mut explicit=original.clone();
+        explicit["catalogue"]=json!("unified");
+        assert_eq!(serde_json::to_value(decode_selection(&serde_json::to_vec(&explicit).unwrap()).unwrap()).unwrap(),original);
+        for (name,count) in [("core",19),("code",19),("desktop",10),("automation",18),("extensions",6)] {
+            let mut raw=original.clone();
+            raw["catalogue"]=json!(name);
+            let parsed=decode_selection(&serde_json::to_vec(&raw).unwrap()).unwrap();
+            assert_eq!(serde_json::to_value(&parsed).unwrap(),raw);
+            assert_eq!(selected_tool_names(false).filter(|tool|parsed.catalogue.allows(tool)).count(),count);
+            assert_ne!(canonical_digest(&raw).unwrap(),canonical_digest(&original).unwrap());
+        }
+        for invalid in [json!("unknown"),json!("Core"),json!("code "),json!(null),json!(["core"])] {
+            let mut raw=original.clone();raw["catalogue"]=invalid;
+            assert!(decode_selection(&serde_json::to_vec(&raw).unwrap()).is_err());
+        }
+        let duplicate=serde_json::to_string(&explicit).unwrap()
+            .replacen("\"catalogue\":\"unified\"","\"catalogue\":\"core\",\"catalogue\":\"unified\"",1);
+        assert!(decode_selection(duplicate.as_bytes()).is_err());
+    }
+
+    #[test]
     fn capability_manifest_digest_is_canonical_and_covers_every_policy_field() {
         let original = selection();
         let first = canonical_digest(&original).unwrap();
@@ -495,6 +623,25 @@ mod tests {
         std::fs::rename(fixture.root.join("private/browser"),fixture.root.join("private/old-browser")).unwrap();
         std::fs::create_dir(fixture.root.join("private/browser")).unwrap();
         assert!(fixture.manifest.verify().is_err(),"same path cannot authorize a replacement private state root");
+    }
+
+    #[test]
+    fn specialized_selection_changes_the_physical_manifest_even_with_the_same_digest() {
+        let fixture=PhysicalFixture::new();
+        let path=fixture.root.join("settings/unified-v1.json");
+        let original=std::fs::read(&path).unwrap();
+        let mut selected:Value=serde_json::from_slice(&original).unwrap();
+        selected["catalogue"]=json!("core");
+        std::fs::write(&path,selected.to_string()).unwrap();
+        assert!(fixture.manifest.verify().is_err());
+        let narrow=QualifiedManifest::load(&fixture.root.join("settings"),fixture.manifest.context.clone()).unwrap();
+        assert_ne!(narrow.identity().unwrap(),fixture.manifest.identity().unwrap());
+        assert_eq!(narrow.expected_tool_names().count(),19);
+        assert_eq!(narrow.summary().unwrap()["catalogue"],"core");
+        assert_eq!(narrow.summary().unwrap()["components"]["extensions"]["implementation"],"excluded");
+        std::fs::write(&path,original).unwrap();
+        assert!(narrow.verify().is_err());
+        fixture.manifest.verify().unwrap();
     }
 
     #[test]

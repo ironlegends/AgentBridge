@@ -108,7 +108,7 @@ fn locator(id: &str) -> String {
     // This exact redacted JSON is the persisted C# v7 event locator.
     format!(r#"{{"subtask_id":"{id}"}}"#)
 }
-fn read_subtask(
+pub(crate) fn read_subtask(
     tx: &Connection, mission: &str, subtask_id: &str
 ) -> Result<Option<MissionSubtask>> {
     let result: Option<String> = tx.query_row(
@@ -261,6 +261,9 @@ pub fn update_subtask(
         if !allowed {
             return Err(BridgeError::new("INVALID_TRANSITION", "Subtask status transition is not allowed."));
         }
+        if request.status == "completed" {
+            crate::attempts::require_review_before_completion(tx, &request.mission_id, &request.subtask_id)?;
+        }
         let mission = open_mission(tx, &request.mission_id)?;
         let next = touch(tx, &mission, mission.revision)?;
         let (summary, release_reason) = if owner_release {
@@ -287,6 +290,13 @@ pub fn list_subtasks(
     conn: &Connection, actor_handle: &str, request: ListSubtasksRequest
 ) -> Result<SubtaskPage> {
     verify_schema(conn)?;
+    let actor = require_context(conn, actor_handle)?;
+    list_subtasks_snapshot(conn, &actor, request)
+}
+
+pub(crate) fn list_subtasks_snapshot(
+    conn: &Connection, actor: &str, request: ListSubtasksRequest
+) -> Result<SubtaskPage> {
     require_id("mis", &request.mission_id)?;
     if !(1..=20).contains(&request.limit) || request.after_created_revision < 0
         || (request.subtask_id.is_some() && request.after_created_revision != 0)
@@ -294,7 +304,6 @@ pub fn list_subtasks(
         return Err(invalid("Invalid subtask selection or page."));
     }
     if let Some(ref id) = request.subtask_id { require_id("sub", id)?; }
-    let actor = require_context(conn, actor_handle)?;
     // Include the caller CTE in this same query even for an empty page.
     let mut statement = conn.prepare(
         "WITH caller AS ( \

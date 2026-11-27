@@ -4,12 +4,14 @@ use std::sync::{Arc, Mutex, RwLock, RwLockReadGuard};
 use crate::runtime::RuntimeError;
 
 pub(crate) type Revoker = Arc<dyn Fn() -> Result<(), RuntimeError> + Send + Sync>;
+type ChangeObserver=Arc<dyn Fn() + Send + Sync>;
 
 #[derive(Clone)]
 pub(crate) struct ProfileControl {
     startup: DesktopProfile,
     active: Arc<RwLock<DesktopProfile>>,
     revokers: Arc<Mutex<Vec<(DesktopProfile, Revoker)>>>,
+    observers: Arc<Mutex<Vec<ChangeObserver>>>,
 }
 
 pub(crate) fn rank(profile: DesktopProfile) -> u8 {
@@ -27,6 +29,7 @@ impl ProfileControl {
             startup,
             active: Arc::new(RwLock::new(startup)),
             revokers: Arc::new(Mutex::new(Vec::new())),
+            observers: Arc::default(),
         }
     }
 
@@ -56,6 +59,12 @@ impl ProfileControl {
             .push((minimum, revoke));
         Ok(())
     }
+    /// Called under the profile write gate for *every* real transition,
+    /// including elevation and return to a previous value.
+    pub(crate) fn register_change_observer(&self,observe:ChangeObserver)->Result<(),RuntimeError>{
+        self.observers.lock().map_err(|_|"PROFILE_OBSERVERS_UNAVAILABLE")?.push(observe);
+        Ok(())
+    }
     pub(crate) fn set(&self, requested: DesktopProfile) -> Result<Value, RuntimeError> {
         if !self.allows(requested) {
             return Err("PROFILE_CEILING_EXCEEDED: restart locally with the required maximum profile".into());
@@ -74,6 +83,8 @@ impl ProfileControl {
                 }
             }
         }
+        let observers=self.observers.lock().map_err(|_|"PROFILE_OBSERVERS_UNAVAILABLE")?;
+        for observe in observers.iter(){observe();}
         *active = requested;
         Ok(self.snapshot_at(requested))
     }
@@ -126,6 +137,23 @@ mod tests {
         control.set(DesktopProfile::FullyUnlocked).unwrap();
         control.set(DesktopProfile::WorkspaceWrite).unwrap();
         assert_eq!(revoked.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn change_observers_fence_every_real_transition_even_return_to_same_profile(){
+        let control=ProfileControl::new(DesktopProfile::FullyUnlocked);
+        let observed=Arc::new(AtomicUsize::new(0));
+        let count=Arc::clone(&observed);
+        control.register_change_observer(Arc::new(move||{
+            count.fetch_add(1,Ordering::SeqCst);
+        })).unwrap();
+        control.set(DesktopProfile::FullControl).unwrap();
+        control.set(DesktopProfile::FullyUnlocked).unwrap();
+        control.set(DesktopProfile::FullyUnlocked).unwrap();
+        assert_eq!(observed.load(Ordering::SeqCst),2);
+        control.set(DesktopProfile::WorkspaceWrite).unwrap();
+        control.set(DesktopProfile::FullControl).unwrap();
+        assert_eq!(observed.load(Ordering::SeqCst),4);
     }
 
     #[test]

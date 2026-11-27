@@ -99,8 +99,12 @@ pub fn ensure_original_owner(conn: &mut Connection, mission_id: &str, handle: &s
 
 pub fn get_mission(conn: &Connection, actor_handle: &str, mission_id: &str) -> Result<MissionDto> {
     verify_schema(conn)?;
-    require_id("mis", mission_id)?;
     let hash = require_context(conn, actor_handle)?;
+    get_mission_snapshot(conn, &hash, mission_id)
+}
+
+pub(crate) fn get_mission_snapshot(conn: &Connection, hash: &str, mission_id: &str) -> Result<MissionDto> {
+    require_id("mis", mission_id)?;
     // Authorize in the same statement as the row: a public mission ID grants nothing.
     let value: Option<MissionDto> = conn.query_row(
         "SELECT m.mission_id,m.goal,m.status,m.current_revision,m.project_id,\
@@ -166,8 +170,14 @@ pub fn observe_mission(
     conn: &Connection, actor_handle: &str, mission_id: &str
 ) -> Result<MissionObservation> {
     verify_schema(conn)?;
-    require_id("mis", mission_id)?;
     let hash = require_context(conn, actor_handle)?;
+    observe_mission_snapshot(conn, &hash, mission_id)
+}
+
+pub(crate) fn observe_mission_snapshot(
+    conn: &Connection, hash: &str, mission_id: &str
+) -> Result<MissionObservation> {
+    require_id("mis", mission_id)?;
     // Exactly one snapshot, including an invitee who has not attached yet.
     conn.query_row(
         "SELECT m.current_revision,owner_context.context_id,caller.role,caller.state \
@@ -322,9 +332,15 @@ pub fn recent_checkpoints(
     conn: &Connection, actor_handle: &str, mission_id: &str, limit: i64
 ) -> Result<Vec<MissionCheckpoint>> {
     verify_schema(conn)?;
+    let hash = require_context(conn, actor_handle)?;
+    recent_checkpoints_snapshot(conn, &hash, mission_id, limit)
+}
+
+pub(crate) fn recent_checkpoints_snapshot(
+    conn: &Connection, hash: &str, mission_id: &str, limit: i64
+) -> Result<Vec<MissionCheckpoint>> {
     require_id("mis", mission_id)?;
     if !(1..=100).contains(&limit) { return Err(invalid("Checkpoint limit must be 1-100.")); }
-    let hash = require_context(conn, actor_handle)?;
     // Membership and bounded checkpoint selection share one read statement.
     let mut query = conn.prepare(
         "SELECT cp.checkpoint_id,cp.summary,cp.revision \
@@ -335,7 +351,7 @@ pub fn recent_checkpoints(
     )?;
     // A zero-row result could be an empty authorized page or unauthorized.
     // Confirm access *first*, never silently return an unauthorized empty page.
-    membership(conn, mission_id, &hash, false)?;
+    membership(conn, mission_id, hash, false)?;
     let results = query.query_map(params![mission_id, hash, limit], |r| {
         Ok(MissionCheckpoint {
             checkpoint_id: r.get(0)?, mission_id: mission_id.to_owned(),

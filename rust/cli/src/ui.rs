@@ -50,6 +50,7 @@ pub struct UiConfig {
     pub open_browser: bool,
     pub capability_selection: Option<Value>,
     pub(crate) request_audit: Option<Arc<crate::request_audit::RequestAudit>>,
+    pub(crate) extension_status: Option<crate::extensions::ExtensionScope>,
 }
 
 #[derive(Clone)]
@@ -173,6 +174,7 @@ fn parse_args(args: &[OsString]) -> Result<UiConfig, RuntimeError> {
         open_browser,
         capability_selection: None,
         request_audit: None,
+        extension_status: None,
     })
 }
 
@@ -217,7 +219,7 @@ pub(crate) async fn start_local_session_view(
         config: UiConfig {
             port, database: None, settings_dir: None, oauth_state: None, oauth_origin: None,
             oauth_audience: None, project: None, open_browser: false, capability_selection: None,
-            request_audit: Some(audit),
+            request_audit: Some(audit), extension_status: None,
         },
         token,
         bound_port: port,
@@ -302,15 +304,19 @@ async fn serve_with_profile(
         .route("/api/profile", get(handle_profile).post(handle_set_profile))
         .route("/api/shutdown", post(handle_shutdown))
         .route("/api/missions", get(handle_missions))
+        .route("/api/missions/handoff", post(handle_copy_handoff))
         .route("/api/oauth", get(handle_oauth_list))
         .route("/api/oauth/enroll", post(handle_oauth_enroll))
         .route("/api/oauth/approve", post(handle_oauth_approve))
         .route("/api/extensions", get(handle_extensions_list))
         .route("/api/extensions/decide", post(handle_extensions_decide))
+        .route("/api/extensions/test", post(handle_extensions_test))
+        .route("/api/extensions/reload", post(handle_extensions_reload))
         .route("/api/skills", get(handle_skills_list))
         .route("/api/skills/action", post(handle_skills_action))
         .route("/api/diagnostics", get(handle_diagnostics))
         .route("/api/sessions", get(handle_sessions))
+        .route("/api/sessions/history/{boot}/{session}", get(handle_session_history))
         .with_state(state);
 
     println!(
@@ -923,6 +929,39 @@ async fn handle_missions(State(state): State<Arc<UiState>>, headers: HeaderMap) 
     }
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CopyHandoffBody {
+    mission_id: String,
+    revision: i64,
+}
+
+async fn handle_copy_handoff(State(state): State<Arc<UiState>>, headers: HeaderMap, body: Body) -> Response {
+    if let Err(resp) = validate_loopback_request(&headers, &state, true) { return resp; }
+    let request: CopyHandoffBody = match read_json_body(body).await {
+        Ok(request) => request,
+        Err(response) => return response,
+    };
+    let live = state.live_database.clone();
+    let path = state.config.database.clone();
+    let result = state.blocking(move || {
+        if let Some(db) = live {
+            let db = db.lock().map_err(|_| ())?;
+            return agent_bridge_missions::handoff::desktop_copy_handoff(
+                db.connection(), &request.mission_id, request.revision).map_err(|_| ());
+        }
+        let path = path.ok_or(())?;
+        let db = CoreDatabase::open_existing_read_only(&path).map_err(|_| ())?;
+        agent_bridge_missions::handoff::desktop_copy_handoff(
+            db.connection(), &request.mission_id, request.revision).map_err(|_| ())
+    }).await;
+    match result {
+        Ok(Ok(value)) => json_response(StatusCode::OK, value),
+        _ => json_response(StatusCode::FORBIDDEN, json!({"error":"HANDOFF_NOT_AUTHORIZED",
+            "message":"A current explicit member approval is required."})),
+    }
+}
+
 fn open_oauth_owner(cfg: &UiConfig) -> Option<Result<LocalOwner, String>> {
     let state_dir = cfg.oauth_state.clone()?;
     let public_origin = cfg.oauth_origin.clone()?;
@@ -1115,6 +1154,7 @@ async fn handle_extensions_list(State(state): State<Arc<UiState>>, headers: Head
     }
     let settings = state.config.settings_dir.clone();
     let oauth_owner = state.oauth_owner.clone();
+    let ext_scope = state.config.extension_status.clone();
     let result = state.blocking(move || match settings {
         None => Ok(json!({
             "configured": false,
@@ -1124,6 +1164,9 @@ async fn handle_extensions_list(State(state): State<Arc<UiState>>, headers: Head
             let mut data = crate::extensions::ui_overview(&oauth_owner, &dir).map_err(|e| e.to_string())?;
             data["configured"] = json!(true);
             data["settings_dir"] = json!(dir.display().to_string());
+            if let Some(generation) = ext_scope.as_ref().and_then(|scope| scope.live_generation(&dir)) {
+                data["generation"] = json!(generation);
+            }
             Ok(data)
         }
     })
@@ -1197,6 +1240,96 @@ async fn handle_extensions_decide(
         Err((status, msg)) => json_response(
             status,
             json!({"error": "EXTENSION_DECISION_FAILED", "message": msg}),
+        ),
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TestExtensionBody {
+    server: String,
+}
+
+async fn handle_extensions_test(
+    State(state): State<Arc<UiState>>,
+    headers: HeaderMap,
+    body: Body,
+) -> Response {
+    if let Err(resp) = validate_loopback_request(&headers, &state, true) {
+        return resp;
+    }
+    let req: TestExtensionBody = match read_json_body(body).await {
+        Ok(v) => v,
+        Err(resp) => return resp,
+    };
+    let settings = state.config.settings_dir.clone();
+    let ext_scope = state.config.extension_status.clone();
+    let result = state
+        .blocking(move || {
+            let Some(dir) = settings else {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    "Settings directory is not configured on this UI instance.".to_owned(),
+                ));
+            };
+            crate::extensions::test_connection_from_operator_ui(&dir, &req.server, ext_scope.as_ref())
+                .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))
+        })
+        .await
+        .unwrap_or_else(|_| {
+            Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Background task failed".to_owned(),
+            ))
+        });
+
+    match result {
+        Ok(val) => json_response(StatusCode::OK, val),
+        Err((status, msg)) => json_response(
+            status,
+            json!({"error": "EXTENSION_TEST_FAILED", "message": msg}),
+        ),
+    }
+}
+
+async fn handle_extensions_reload(
+    State(state): State<Arc<UiState>>,
+    headers: HeaderMap,
+    body: Body,
+) -> Response {
+    if let Err(resp) = validate_loopback_request(&headers, &state, true) {
+        return resp;
+    }
+    let _: Value = match read_json_body(body).await {
+        Ok(v) => v,
+        Err(resp) => return resp,
+    };
+    let settings = state.config.settings_dir.clone();
+    let ext_scope = state.config.extension_status.clone();
+    let result = state
+        .blocking(move || {
+            let Some(dir) = settings else {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    "Settings directory is not configured on this UI instance.".to_owned(),
+                ));
+            };
+            crate::extensions::reload_from_operator_ui(&dir, ext_scope.as_ref())
+                .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))
+        })
+        .await
+        .unwrap_or_else(|_| {
+            Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Background task failed".to_owned(),
+            ))
+        });
+
+    match result {
+        Ok(val) => json_response(StatusCode::OK, val),
+        Err((status, msg)) => json_response(
+            status,
+            json!({"error": "EXTENSION_RELOAD_FAILED", "message": msg}),
         ),
     }
 }
@@ -1330,10 +1463,55 @@ async fn handle_sessions(State(state): State<Arc<UiState>>, headers: HeaderMap) 
     }).await;
     match result {
         Ok(Ok(mut snapshot)) => {
+            // The compatibility listener exposes only GET /api/sessions.
+            // It must never advertise a copy command that it cannot serve.
+            if state.profile.is_none() {
+                fn hide_copy(value: &mut Value) {
+                    match value {
+                        Value::Object(fields) => {
+                            fields.remove("copy_handoff");
+                            for field in fields.values_mut() { hide_copy(field); }
+                        }
+                        Value::Array(items) => { for item in items { hide_copy(item); } }
+                        _ => {}
+                    }
+                }
+                hide_copy(&mut snapshot);
+            }
             snapshot["available"] = json!(true);
             json_response(StatusCode::OK, snapshot)
         }
         _ => json_response(StatusCode::SERVICE_UNAVAILABLE, json!({"error": "SESSIONS_UNAVAILABLE"})),
+    }
+}
+
+async fn handle_session_history(
+    State(state): State<Arc<UiState>>, headers: HeaderMap,
+    axum::extract::Path((boot, session)): axum::extract::Path<(String, String)>,
+) -> Response {
+    if let Err(response) = validate_loopback_request(&headers, &state, true) {
+        return response;
+    }
+    let Some(crate::backend::OperatorRead::SessionHistory { boot, session }) =
+        crate::backend::OperatorRead::session_history(&boot, &session) else {
+        return json_response(StatusCode::BAD_REQUEST, json!({"error":"INVALID_SESSION_HISTORY_KEY"}));
+    };
+    read_session_history(state, boot, session).await
+}
+
+async fn read_session_history(state: Arc<UiState>, boot: u128, session: u128) -> Response {
+    let Some(audit) = state.config.request_audit.clone() else {
+        return json_response(StatusCode::SERVICE_UNAVAILABLE, json!({"available":false}));
+    };
+    let history = state.blocking(move || audit.query_history(&crate::audit_history::AuditHistoryFilter {
+        boot_id: Some(format!("{boot:032x}")),
+        session_id: Some(format!("{session:032x}")),
+        limit: Some(50),
+        ..Default::default()
+    })).await;
+    match history {
+        Ok(history) => json_response(StatusCode::OK, json!(history)),
+        Err(_) => json_response(StatusCode::SERVICE_UNAVAILABLE, json!({"available":false})),
     }
 }
 
@@ -1385,6 +1563,13 @@ async fn handle_diagnostics(State(state): State<Arc<UiState>>, headers: HeaderMa
             "Unavailable"
         };
 
+        let extension_status = cfg.settings_dir.as_deref().map(|settings| {
+            cfg.extension_status
+                .as_ref()
+                .map(|scope| scope.status_snapshot(settings))
+                .unwrap_or_else(|| crate::extensions::ExtensionScope::data_only().status_snapshot(settings))
+        });
+
         json!({
             "os": std::env::consts::OS,
             "arch": std::env::consts::ARCH,
@@ -1414,6 +1599,11 @@ async fn handle_diagnostics(State(state): State<Arc<UiState>>, headers: HeaderMa
             "workspace_inspection": workspace_report,
             "capability_selection": cfg.capability_selection,
             "mcp_request_audit": cfg.request_audit.as_ref().map(|audit| audit.snapshot()),
+            "extension_status": extension_status,
+            "extension_reload_audit": cfg.extension_status.as_ref().map(|scope| scope.reload_audit_snapshot()),
+            "audit_history": cfg.request_audit.as_ref()
+                .map(|audit| audit.history_diagnostics())
+                .unwrap_or_else(crate::audit_history::AuditHistoryDiagnostics::unavailable),
             "provider_cleanup": crate::provider_owner::ProviderOwner::rollback_status().map(|status|json!({
                 "pending":status.pending,"omitted":status.omitted,
                 "failures":status.failures.iter().map(|failure|json!({
@@ -1519,6 +1709,11 @@ impl NativeOperator {
             OperatorRead::Skills => handle_skills_list(state, headers).await,
             OperatorRead::Diagnostics => handle_diagnostics(state, headers).await,
             OperatorRead::Sessions => handle_sessions(state, headers).await,
+            OperatorRead::SessionHistory { boot, session } => {
+                handle_session_history(state, headers, axum::extract::Path((
+                    format!("{boot:032x}"), format!("{session:032x}"),
+                ))).await
+            }
         };
         let mut reply = self.reply(response).await?;
         if matches!(operation, OperatorRead::Overview) {
@@ -1547,7 +1742,10 @@ impl NativeOperator {
             OperatorWrite::OAuthEnroll => handle_oauth_enroll(state, headers, body).await,
             OperatorWrite::OAuthApprove => handle_oauth_approve(state, headers, body).await,
             OperatorWrite::ExtensionsDecide => handle_extensions_decide(state, headers, body).await,
+            OperatorWrite::ExtensionsTest => handle_extensions_test(state, headers, body).await,
+            OperatorWrite::ExtensionsReload => handle_extensions_reload(state, headers, body).await,
             OperatorWrite::SkillsAction => handle_skills_action(state, headers, body).await,
+            OperatorWrite::CopyHandoff => handle_copy_handoff(state, headers, body).await,
         };
         self.reply(response).await
     }
@@ -1601,6 +1799,7 @@ mod native_operator_tests {
             oauth_origin: None, oauth_audience: None, project: None, open_browser: false,
             capability_selection: None,
             request_audit: Some(Arc::new(crate::request_audit::RequestAudit::new().unwrap())),
+            extension_status: None,
         }, ProfileControl::new(DesktopProfile::ReadOnly), None)
     }
 
@@ -1614,6 +1813,12 @@ mod native_operator_tests {
         assert_eq!(unauthenticated.status, 401);
         assert!(unauthenticated.body.get("mcp_request_audit").is_none());
         assert!(unauthenticated.body.get("client_sessions").is_none());
+        let denied_history = operator.reply(handle_session_history(
+            State(Arc::clone(&operator.state)), headers.clone(),
+            axum::extract::Path(("0".repeat(32), "a".repeat(32))),
+        ).await).await.unwrap();
+        assert_eq!(denied_history.status, 401);
+        assert!(denied_history.body.get("records").is_none());
         let denied = operator.reply(handle_sessions(
             State(Arc::clone(&operator.state)), headers,
         ).await).await.unwrap();
@@ -1631,6 +1836,28 @@ mod native_operator_tests {
         assert_eq!(sessions.status, 200);
         assert_eq!(sessions.body["boot_id"], reply.body["mcp_request_audit"]["boot_id"]);
         assert_eq!(sessions.body["sessions"], json!([]));
+    }
+
+    #[tokio::test]
+    async fn copy_handoff_requires_local_auth_and_member_approval() {
+        let operator = operator();
+        let payload = json!({"mission_id":format!("mis_{}", "a".repeat(32)),"revision":1});
+        let mut headers = operator.headers();
+        headers.remove("X-Agent-Bridge-Token");
+        let denied = operator.reply(handle_copy_handoff(State(Arc::clone(&operator.state)),
+            headers, Body::from(payload.to_string())).await).await.unwrap();
+        assert_eq!(denied.status, 401);
+        assert!(denied.body.get("handoff").is_none());
+        let refused = operator.post(crate::backend::OperatorWrite::CopyHandoff,
+            payload.clone()).await.unwrap();
+        assert_eq!(refused.status, 403);
+        assert!(refused.body.get("handoff").is_none());
+        let mut forged = payload;
+        forged["context_id"] = json!("ctx_00000000000000000000000000000000");
+        let refused = operator.post(crate::backend::OperatorWrite::CopyHandoff,
+            forged).await.unwrap();
+        assert_eq!(refused.status, 400);
+        assert!(refused.body.get("handoff").is_none());
     }
 
     #[tokio::test]
@@ -1692,6 +1919,351 @@ mod native_operator_tests {
         let operator = operator();
         let response = json_response(StatusCode::OK, json!({"value":"x".repeat(2*1024*1024)}));
         assert!(operator.reply(response).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn operator_extension_connection_test_probes_approved_and_refuses_unapproved() {
+        use std::io::{BufRead, BufReader, Read, Write};
+        use std::net::TcpListener;
+
+        let dir = crate::test_state_base().join(format!(
+            "ext-ui-test-{}",
+            agent_bridge_missions::operator::random_token_hex(8)
+        ));
+        struct Cleanup(PathBuf);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let _cleanup = Cleanup(dir.clone());
+        std::fs::create_dir_all(&dir).unwrap();
+        let settings = dir.join("settings");
+        agent_bridge_lifecycle::initialize_operator_settings(&settings).unwrap();
+
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let mcp_port = listener.local_addr().unwrap().port();
+        let srv = std::thread::spawn(move || {
+            for _ in 0..2 {
+                let Ok((mut stream, _)) = listener.accept() else { break };
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut len = 0usize;
+                loop {
+                    let mut line = String::new();
+                    if reader.read_line(&mut line).unwrap_or(0) == 0 || line == "\r\n" {
+                        break;
+                    }
+                    if let Some((k, v)) = line.split_once(':') {
+                        if k.eq_ignore_ascii_case("content-length") {
+                            len = v.trim().parse().unwrap_or(0);
+                        }
+                    }
+                }
+                let mut body = vec![0u8; len];
+                reader.read_exact(&mut body).unwrap();
+                let req: Value = serde_json::from_slice(&body).unwrap();
+                let id = req["id"].clone();
+                let resp = match req["method"].as_str().unwrap_or("") {
+                    "server/discover" => json!({
+                        "jsonrpc": "2.0", "id": id,
+                        "result": {
+                            "resultType": "complete",
+                            "supportedVersions": ["2026-07-28"],
+                            "capabilities": {"tools": {}},
+                            "ttlMs": 0, "cacheScope": "private"
+                        }
+                    }),
+                    "tools/list" => json!({
+                        "jsonrpc": "2.0", "id": id,
+                        "result": {
+                            "resultType": "complete", "ttlMs": 0, "cacheScope": "private",
+                            "tools": [{"name": "list_items", "inputSchema": {"type": "object"}}]
+                        }
+                    }),
+                    _ => json!({"jsonrpc": "2.0", "id": id, "error": {"code": -32601, "message": "unexpected"}}),
+                };
+                let text = resp.to_string();
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{text}",
+                    text.len()
+                )
+                .unwrap();
+            }
+        });
+
+        crate::write_private(
+            settings.join("extensions.json"),
+            serde_json::to_vec(&json!({
+                "version": 1,
+                "servers": {
+                    "approved_local": {
+                        "endpoint": format!("http://127.0.0.1:{mcp_port}/mcp"),
+                        "tools": {}
+                    }
+                }
+            }))
+            .unwrap(),
+        );
+
+        let operator = NativeOperator::new(
+            UiConfig {
+                port: 0,
+                database: None,
+                settings_dir: Some(settings),
+                oauth_state: None,
+                oauth_origin: None,
+                oauth_audience: None,
+                project: None,
+                open_browser: false,
+                capability_selection: None,
+                request_audit: None,
+                extension_status: None,
+            },
+            ProfileControl::new(DesktopProfile::ReadOnly),
+            None,
+        );
+
+        let refused = operator
+            .post(
+                crate::backend::OperatorWrite::ExtensionsTest,
+                json!({"server": "unapproved"}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(refused.status, 400);
+
+        let ok = operator
+            .post(
+                crate::backend::OperatorWrite::ExtensionsTest,
+                json!({"server": "approved_local"}),
+            )
+            .await
+            .unwrap();
+        srv.join().unwrap();
+        assert_eq!(ok.status, 200);
+        assert_eq!(ok.body["ok"], true);
+        assert_eq!(ok.body["live_tool_count"], 1);
+        assert_eq!(ok.body["approved_grants_changed"], false);
+        assert_eq!(ok.body["tool_invoked"], false);
+        assert!(ok.body["latency_ms"].as_u64().is_some());
+    }
+
+    #[tokio::test]
+    async fn operator_diagnostics_exposes_redacted_extension_status() {
+        use std::io::{BufRead, BufReader, Read, Write};
+        use std::net::TcpListener;
+
+        let dir = crate::test_state_base().join(format!(
+            "ext-diag-test-{}",
+            agent_bridge_missions::operator::random_token_hex(8)
+        ));
+        struct Cleanup(PathBuf);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let _cleanup = Cleanup(dir.clone());
+        std::fs::create_dir_all(&dir).unwrap();
+        let settings = dir.join("settings");
+        agent_bridge_lifecycle::initialize_operator_settings(&settings).unwrap();
+
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let mcp_port = listener.local_addr().unwrap().port();
+        let srv = std::thread::spawn(move || {
+            for _ in 0..2 {
+                let Ok((mut stream, _)) = listener.accept() else { break };
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut len = 0usize;
+                loop {
+                    let mut line = String::new();
+                    if reader.read_line(&mut line).unwrap_or(0) == 0 || line == "\r\n" {
+                        break;
+                    }
+                    if let Some((k, v)) = line.split_once(':') {
+                        if k.eq_ignore_ascii_case("content-length") {
+                            len = v.trim().parse().unwrap_or(0);
+                        }
+                    }
+                }
+                let mut body = vec![0u8; len];
+                reader.read_exact(&mut body).unwrap();
+                let req: Value = serde_json::from_slice(&body).unwrap();
+                let id = req["id"].clone();
+                let resp = match req["method"].as_str().unwrap_or("") {
+                    "server/discover" => json!({
+                        "jsonrpc": "2.0", "id": id,
+                        "result": {
+                            "resultType": "complete",
+                            "supportedVersions": ["2026-07-28"],
+                            "capabilities": {"tools": {}},
+                            "ttlMs": 0, "cacheScope": "private"
+                        }
+                    }),
+                    "tools/list" => json!({
+                        "jsonrpc": "2.0", "id": id,
+                        "result": {
+                            "resultType": "complete", "ttlMs": 0, "cacheScope": "private",
+                            "tools": [{"name": "list_items", "inputSchema": {"type": "object"}}]
+                        }
+                    }),
+                    _ => json!({"jsonrpc": "2.0", "id": id, "error": {"code": -32601, "message": "unexpected"}}),
+                };
+                let text = resp.to_string();
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{text}",
+                    text.len()
+                )
+                .unwrap();
+            }
+        });
+
+        crate::write_private(
+            settings.join("extensions.json"),
+            serde_json::to_vec(&json!({
+                "version": 1,
+                "servers": {
+                    "diag_srv": {
+                        "endpoint": format!("http://127.0.0.1:{mcp_port}/mcp"),
+                        "tools": {}
+                    }
+                }
+            }))
+            .unwrap(),
+        );
+
+        let operator = NativeOperator::new(
+            UiConfig {
+                port: 0,
+                database: None,
+                settings_dir: Some(settings),
+                oauth_state: None,
+                oauth_origin: None,
+                oauth_audience: None,
+                project: None,
+                open_browser: false,
+                capability_selection: None,
+                request_audit: None,
+                extension_status: Some(crate::extensions::ExtensionScope::data_only()),
+            },
+            ProfileControl::new(DesktopProfile::ReadOnly),
+            None,
+        );
+
+        let before = operator.get(crate::backend::OperatorRead::Diagnostics).await.unwrap();
+        assert_eq!(before.status, 200);
+        assert_eq!(before.body["extension_status"]["servers"][0]["server"], "diag_srv");
+        assert_eq!(before.body["extension_status"]["servers"][0]["state"], "idle");
+
+        let tested = operator
+            .post(crate::backend::OperatorWrite::ExtensionsTest, json!({"server": "diag_srv"}))
+            .await
+            .unwrap();
+        srv.join().unwrap();
+        assert_eq!(tested.status, 200);
+
+        let after = operator.get(crate::backend::OperatorRead::Diagnostics).await.unwrap();
+        assert_eq!(after.status, 200);
+        assert!(matches!(
+            after.body["extension_status"]["servers"][0]["state"].as_str(),
+            Some("ready" | "slow")
+        ));
+        assert!(after.body["extension_status"]["servers"][0]["last_latency_ms"].as_u64().is_some());
+    }
+
+    #[tokio::test]
+    async fn operator_reload_swaps_atomically_keeps_previous_on_invalid_and_audits() {
+        let dir = crate::test_state_base().join(format!(
+            "ext-reload-ui-{}",
+            agent_bridge_missions::operator::random_token_hex(8)
+        ));
+        struct Cleanup(PathBuf);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let _cleanup = Cleanup(dir.clone());
+        std::fs::create_dir_all(&dir).unwrap();
+        let settings = dir.join("settings");
+        agent_bridge_lifecycle::initialize_operator_settings(&settings).unwrap();
+
+        crate::write_private(
+            settings.join("extensions.json"),
+            serde_json::to_vec(&json!({
+                "version": 1,
+                "servers": {
+                    "srv_one": {
+                        "endpoint": "https://one.example.invalid/mcp",
+                        "tools": {}
+                    }
+                }
+            }))
+            .unwrap(),
+        );
+        let scope = crate::extensions::ExtensionScope::data_only();
+        let live = scope.bind_live(&settings).unwrap();
+
+        let operator = NativeOperator::new(
+            UiConfig {
+                port: 0,
+                database: None,
+                settings_dir: Some(settings.clone()),
+                oauth_state: None,
+                oauth_origin: None,
+                oauth_audience: None,
+                project: None,
+                open_browser: false,
+                capability_selection: None,
+                request_audit: None,
+                extension_status: Some(scope.clone()),
+            },
+            ProfileControl::new(DesktopProfile::ReadOnly),
+            None,
+        );
+
+        // Update valid extensions.json and reload atomically.
+        crate::write_private(
+            settings.join("extensions.json"),
+            serde_json::to_vec(&json!({
+                "version": 1,
+                "servers": {
+                    "srv_two": {
+                        "endpoint": "https://two.example.invalid/mcp",
+                        "tools": {}
+                    }
+                }
+            }))
+            .unwrap(),
+        );
+        let swapped = operator
+            .post(crate::backend::OperatorWrite::ExtensionsReload, json!({}))
+            .await
+            .unwrap();
+        assert_eq!(swapped.status, 200);
+        assert_eq!(swapped.body["ok"], true);
+        assert_eq!(swapped.body["generation"], 2);
+        assert_eq!(live.current().server_names(), vec!["srv_two".to_owned()]);
+
+        // Corrupt extensions.json: reload must fail while previous active stays srv_two.
+        crate::write_private(settings.join("extensions.json"), b"{not valid json");
+        let failed = operator
+            .post(crate::backend::OperatorWrite::ExtensionsReload, json!({}))
+            .await
+            .unwrap();
+        assert_eq!(failed.status, 400);
+        assert_eq!(live.current().server_names(), vec!["srv_two".to_owned()]);
+
+        let diag = operator.get(crate::backend::OperatorRead::Diagnostics).await.unwrap();
+        assert_eq!(diag.status, 200);
+        assert_eq!(diag.body["extension_reload_audit"]["generation"], 2);
+        let records = diag.body["extension_reload_audit"]["records"].as_array().unwrap();
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0]["ok"], true);
+        assert_eq!(records[1]["ok"], false);
+        assert_eq!(records[1]["reason_code"], "invalid_config_refused");
     }
 }
 

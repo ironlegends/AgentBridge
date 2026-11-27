@@ -1,3 +1,4 @@
+use agent_bridge_lifecycle::rotating_log::{RotatingLogPolicy, RotatingLogStats, RotatingLogWriter};
 use crate::native_config::TunnelConfig;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
@@ -8,7 +9,9 @@ use std::mem::{size_of, size_of_val};
 use std::os::windows::ffi::OsStrExt;
 use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
 use std::os::windows::io::{AsRawHandle, FromRawHandle};
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 use windows::core::{PCWSTR, PWSTR};
 use windows::Win32::Foundation::*;
@@ -129,13 +132,14 @@ pub fn private_log(path: &Path) -> Result<File, String> {
             bInheritHandle: false.into(),
         };
         let access = FILE_APPEND_DATA.0 | FILE_READ_ATTRIBUTES.0 | READ_CONTROL.0;
+        let share = FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE;
         let handle = match CreateFileW(PCWSTR(name.as_ptr()), access,
-            FILE_SHARE_READ | FILE_SHARE_WRITE, Some(&attributes), CREATE_NEW,
+            share, Some(&attributes), CREATE_NEW,
             FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT, None) {
             Ok(handle) => handle,
             Err(error) if error.code() == windows::core::HRESULT::from_win32(ERROR_FILE_EXISTS.0)
                 || error.code() == windows::core::HRESULT::from_win32(ERROR_ALREADY_EXISTS.0) => {
-                CreateFileW(PCWSTR(name.as_ptr()), access, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                CreateFileW(PCWSTR(name.as_ptr()), access, share,
                     None, OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT, None)
                     .map_err(|e| failure("Private log opening failed", e))?
             }
@@ -148,22 +152,78 @@ pub fn private_log(path: &Path) -> Result<File, String> {
     }
 }
 
+pub(crate) struct RotatingStdioPipe {
+    writer_end: Option<std::io::PipeWriter>,
+    pump: Option<JoinHandle<RotatingLogStats>>,
+}
+
+impl RotatingStdioPipe {
+    pub(crate) fn open(path: &Path, policy: RotatingLogPolicy) -> Result<Self, String> {
+        let mut writer = RotatingLogWriter::open_with_opener(
+            path,
+            policy,
+            Box::new(|target| private_log(target).map_err(std::io::Error::other)),
+        )
+        .map_err(|e| format!("Private rotating log setup failed: {e}"))?;
+        let (mut reader, writer_end) = std::io::pipe()
+            .map_err(|e| format!("Private stdio log pipe creation failed: {e}"))?;
+        let pump = std::thread::Builder::new()
+            .name("ab-stdio-log".to_owned())
+            .spawn(move || {
+                let mut buf = [0u8; 8192];
+                loop {
+                    match reader.read(&mut buf) {
+                        Ok(0) => break,
+                        Ok(n) => writer.write_best_effort(&buf[..n]),
+                        Err(err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
+                        Err(_) => break,
+                    }
+                }
+                writer.stats()
+            })
+            .map_err(|e| format!("Private stdio log thread failed: {e}"))?;
+        Ok(Self {
+            writer_end: Some(writer_end),
+            pump: Some(pump),
+        })
+    }
+
+    pub(crate) fn handle(&self) -> &std::io::PipeWriter {
+        self.writer_end.as_ref().expect("pipe writer active")
+    }
+
+    pub(crate) fn into_pump(mut self) -> JoinHandle<RotatingLogStats> {
+        self.writer_end.take();
+        self.pump.take().expect("pipe pump active")
+    }
+}
+
 pub fn initialize_diagnostics(root: &Path) -> Result<(), String> {
+    static OUTPUTS: Mutex<Option<(PathBuf, RotatingStdioPipe, RotatingStdioPipe)>> = Mutex::new(None);
     let _parents = pin_directories(root.parent().ok_or("The diagnostics directory has no parent.")?)?;
     match std::fs::create_dir(root) {
         Ok(()) => {},
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {},
         Err(_) => return Err("The private diagnostics directory cannot be created.".into()),
     }
-    let stdout = private_log(&root.join("native.stdout.log"))?;
-    let stderr = private_log(&root.join("native.stderr.log"))?;
-    unsafe {
-        SetStdHandle(STD_OUTPUT_HANDLE, HANDLE(stdout.as_raw_handle()))
-            .map_err(|e| failure("Native stdout redirection failed", e))?;
-        SetStdHandle(STD_ERROR_HANDLE, HANDLE(stderr.as_raw_handle()))
-            .map_err(|e| failure("Native stderr redirection failed", e))?;
+    let mut outputs = OUTPUTS.lock().map_err(|_| "Native diagnostics ownership unavailable.")?;
+    if outputs.is_none() {
+        let stdout = RotatingStdioPipe::open(&root.join("native.stdout.log"), RotatingLogPolicy::default())?;
+        let stderr = RotatingStdioPipe::open(&root.join("native.stderr.log"), RotatingLogPolicy::default())?;
+        *outputs = Some((root.to_owned(), stdout, stderr));
     }
-    let _ = Box::leak(Box::new((stdout, stderr)));
+    let (active_root, stdout, stderr) = outputs.as_ref().expect("diagnostic streams initialized");
+    if active_root != root { return Err("Native diagnostics already use a different directory.".into()); }
+    unsafe {
+        let previous = GetStdHandle(STD_OUTPUT_HANDLE).unwrap_or_default();
+        SetStdHandle(STD_OUTPUT_HANDLE, HANDLE(stdout.handle().as_raw_handle()))
+            .map_err(|e| failure("Native stdout redirection failed", e))?;
+        if let Err(error) = SetStdHandle(STD_ERROR_HANDLE, HANDLE(stderr.handle().as_raw_handle())) {
+            let _ = SetStdHandle(STD_OUTPUT_HANDLE, previous);
+            return Err(failure("Native stderr redirection failed", error));
+        }
+    }
+    drop(outputs);
     std::panic::set_hook(Box::new(|info| {
         if let Some(location) = info.location() {
             eprintln!("native-panic {}:{}", location.file(), location.line());
@@ -343,7 +403,7 @@ pub struct OwnedProcess {
 }
 impl OwnedProcess {
     pub fn spawn(program: &Path, arguments: &[&OsStr], cwd: &Path, environment: &mut [u16],
-        stdout: &File, stderr: &File) -> Result<Self, String> {
+        stdout: &impl AsRawHandle, stderr: &impl AsRawHandle) -> Result<Self, String> {
         let image = wide(program.as_os_str())?;
         let directory = wide(cwd.as_os_str())?;
         let mut command = quote(program.as_os_str())?;
@@ -418,8 +478,24 @@ impl OwnedProcess {
 pub struct TunnelChild {
     pub process: OwnedProcess,
     _inputs: Vec<File>,
+    log_pumps: Vec<JoinHandle<RotatingLogStats>>,
 }
 impl TunnelChild {
+    pub fn stop(&mut self) -> Result<(), String> {
+        self.process.stop()?;
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while self.log_pumps.iter().any(|pump| !pump.is_finished()) {
+            if Instant::now() >= deadline {
+                return Err("Native tunnel log drain timed out; ownership is retained.".into());
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        for pump in self.log_pumps.drain(..) {
+            pump.join().map_err(|_| "Native tunnel log drain failed.".to_owned())?;
+        }
+        Ok(())
+    }
+
     pub fn spawn(config: &TunnelConfig, identity: &mut Option<String>) -> Result<Self, String> {
         config.validate()?;
         let mut pins = Vec::new();
@@ -445,17 +521,31 @@ impl TunnelChild {
         pins.extend(pin_directories(&config.state_dir)?);
         pins.extend(pin_directories(&config.state_dir.join("logs"))?);
         pins.extend(pin_directories(&config.state_dir.join("health"))?);
-        let stdout = private_log(&config.state_dir.join("logs/native-tunnel.stdout.log"))?;
-        let stderr = private_log(&config.state_dir.join("logs/native-tunnel.stderr.log"))?;
+        let stdout = RotatingStdioPipe::open(
+            &config.state_dir.join("logs/native-tunnel.stdout.log"),
+            RotatingLogPolicy::default(),
+        )?;
+        let stderr = RotatingStdioPipe::open(
+            &config.state_dir.join("logs/native-tunnel.stderr.log"),
+            RotatingLogPolicy::default(),
+        )?;
         let mut environment = child_environment(config, &key)?;
         let arguments = [
             OsStr::new("run"), OsStr::new("--profile"), OsStr::new(&config.profile),
             OsStr::new("--profile-dir"), config.profile_dir.as_os_str(),
             OsStr::new("--open-web-ui=false"), OsStr::new("--allow-remote-ui=false"),
         ];
-        let process = OwnedProcess::spawn(&config.program, &arguments, &config.state_dir, &mut environment, &stdout, &stderr)?;
-        pins.extend([program, profile, key_file, stdout, stderr]);
-        Ok(Self { process, _inputs: pins })
+        let process = OwnedProcess::spawn(
+            &config.program,
+            &arguments,
+            &config.state_dir,
+            &mut environment,
+            stdout.handle(),
+            stderr.handle(),
+        )?;
+        let log_pumps = vec![stdout.into_pump(), stderr.into_pump()];
+        pins.extend([program, profile, key_file]);
+        Ok(Self { process, _inputs: pins, log_pumps })
     }
 }
 #[cfg(test)]

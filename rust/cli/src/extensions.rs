@@ -1,55 +1,459 @@
 mod admin;
+mod revocation_ipc;
 pub(crate) mod stdio_child;
 pub(crate) use admin::UiOAuthOwner;
+use revocation_ipc::RevocationAckReceipt;
 
 use agent_bridge_desktop::DesktopProfile;
-use agent_bridge_extensions::{Registry, SessionPool, ToolScope};
+use agent_bridge_extensions::{
+    LiveExtensionRegistry, Registry, ReloadAuditRecord, ReloadMode, SessionPool, StatusTracker,
+    ToolScope, CacheRequest,
+};
 use agent_bridge_gateway::{ToolCallResult, ToolDefinition, ToolMapHandler};
 use serde_json::{json, Value};
-use std::path::Path;
-use std::sync::{Arc, RwLock};
+use std::collections::VecDeque;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, RwLock, Weak};
+use std::sync::atomic::{AtomicU8, Ordering};
+use std::io;
 use crate::runtime::RuntimeError;
-use crate::session_profile::ProfileControl;
+use crate::session_profile::{rank, ProfileControl};
+
+thread_local! {
+    static AUTHENTICATED_CACHE: std::cell::RefCell<Option<CacheRequest>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Synchronous, reentrant request scope. The nested call sees only its own
+/// authority (including None); unwind restores the prior one. No caller
+/// metadata or argument can populate this slot.
+pub(crate) fn with_authenticated_cache<T>(request:Option<CacheRequest>,f:impl FnOnce()->T)->T{
+    struct Restore(Option<CacheRequest>);
+    impl Drop for Restore {
+        fn drop(&mut self){AUTHENTICATED_CACHE.with(|slot|{slot.replace(self.0.take());});}
+    }
+    let _restore=Restore(AUTHENTICATED_CACHE.with(|slot|slot.replace(request)));
+    f()
+}
+
+fn authenticated_cache()->Option<CacheRequest>{
+    AUTHENTICATED_CACHE.with(|slot|slot.borrow().clone())
+}
+
+#[cfg(test)]
+pub(crate) fn test_cache_scope_present()->bool{
+    authenticated_cache().is_some()
+}
+
+struct ValidatedBase {
+    bytes: Vec<u8>,
+    stamp: (u64, String),
+}
+
+struct Attached {
+    identity: PathBuf,
+    live: Arc<LiveExtensionRegistry>,
+    base: Mutex<ValidatedBase>,
+    _peer: Arc<revocation_ipc::PeerLease>,
+}
+
+// Each route retains its own pool/profile. Weak references exist only to
+// deliver a committed local restriction to every attached view of this root.
+static ATTACHED: Mutex<Vec<Weak<Attached>>> = Mutex::new(Vec::new());
+
+fn attached_at(identity: &Path) -> Vec<Arc<Attached>> {
+    let mut all = ATTACHED.lock().unwrap_or_else(|p| p.into_inner());
+    all.retain(|entry| entry.strong_count() > 0);
+    all.iter().filter_map(Weak::upgrade).filter(|entry| entry.identity == identity).collect()
+}
+
+fn journal_registry(bytes: &[u8], journal: &admin::Journal) -> io::Result<Registry> {
+    Ok(admin::apply_journal(bytes, journal)?.with_stdio_launcher(Arc::new(stdio_child::ContainedLauncher)))
+}
+
+impl Attached {
+    fn reconcile_detailed(&self, base: &mut ValidatedBase, journal: &admin::Journal) -> io::Result<(usize, usize)> {
+        let result = (|| {
+            let stamp = admin::journal_stamp(journal)?;
+            if stamp.0 < base.stamp.0 || (stamp.0 == base.stamp.0 && stamp != base.stamp) {
+                return Err(io::Error::other("Extension approval journal changed or regressed"));
+            }
+            let effective = journal_registry(&base.bytes, journal)?;
+            // Even a revoke/re-enable that returns to the identical effective
+            // fingerprint has crossed a durable approval generation.
+            if stamp!=base.stamp { self.live.invalidate_results(); }
+            let record = self.live.restrict_to(&effective)?;
+            base.stamp = stamp;
+            Ok(record.map_or((0, 0), |r| (r.cancelled_in_flight, r.closed_idle_sessions)))
+        })();
+        if result.is_err() { self.live.cancel_all(); }
+        result
+    }
+
+    fn reconcile(&self, base: &mut ValidatedBase, journal: &admin::Journal) -> io::Result<()> {
+        self.reconcile_detailed(base, journal).map(|_| ())
+    }
+}
+
+// Called under the existing private journal writer lock AFTER durable commit,
+// before the native operator decision is acknowledged. No network probe.
+fn journal_committed(settings: &Path, journal: &admin::Journal) -> io::Result<RevocationAckReceipt> {
+    let identity = std::fs::canonicalize(settings)?;
+    let (journal_revision, state_hash) = admin::journal_stamp(journal)?;
+    let mut receipt = RevocationAckReceipt {
+        journal_revision,
+        ..RevocationAckReceipt::default()
+    };
+    for entry in attached_at(&identity) {
+        let mut base = entry.base.lock().unwrap_or_else(|p| p.into_inner());
+        let (cancelled, closed) = entry.reconcile_detailed(&mut base, journal)?;
+        receipt.local_views_acknowledged += 1;
+        receipt.cancelled_in_flight += cancelled;
+        receipt.closed_idle_sessions += closed;
+    }
+    let (remote_ack, remote_cancelled, remote_closed) = revocation_ipc::notify_and_wait_peers(
+        settings,
+        &identity,
+        journal_revision,
+        &state_hash,
+        revocation_ipc::DEFAULT_ACK_TIMEOUT,
+    )?;
+    receipt.remote_backends_acknowledged = remote_ack;
+    receipt.cancelled_in_flight += remote_cancelled;
+    receipt.closed_idle_sessions += remote_closed;
+    Ok(receipt)
+}
+
+pub(super) fn reconcile_from_disk_for_peer(
+    settings: &Path,
+    identity: &Path,
+    expected_revision: u64,
+    expected_state_hash: &str,
+) -> io::Result<(usize, usize, usize)> {
+    let journal = match admin::read_committed_for_reconcile(settings) {
+        Ok(journal) => journal,
+        Err(err) => {
+            journal_unavailable(settings);
+            return Err(err);
+        }
+    };
+    let stamp = match admin::journal_stamp(&journal) {
+        Ok(stamp) => stamp,
+        Err(err) => {
+            journal_unavailable(settings);
+            return Err(err);
+        }
+    };
+    if stamp != (expected_revision, expected_state_hash.to_owned()) {
+        return Err(io::Error::other(
+            "Committed extension journal does not match revocation request",
+        ));
+    }
+    let mut views_reconciled = 0usize;
+    let mut cancelled_in_flight = 0usize;
+    let mut closed_idle_sessions = 0usize;
+    for entry in attached_at(identity) {
+        let mut base = entry.base.lock().unwrap_or_else(|p| p.into_inner());
+        let (cancelled, closed) = entry.reconcile_detailed(&mut base, &journal)?;
+        views_reconciled += 1;
+        cancelled_in_flight += cancelled;
+        closed_idle_sessions += closed;
+    }
+    Ok((views_reconciled, cancelled_in_flight, closed_idle_sessions))
+}
+
+fn journal_unavailable(settings: &Path) {
+    if let Ok(identity) = std::fs::canonicalize(settings) {
+        for entry in attached_at(&identity) { entry.live.cancel_all(); }
+    }
+}
 
 /// The profile that decides which granted extension tools a route may call.
 /// It is read at each call, so a profile change applies to the next one.
-/// The route's tool calls share its pool of idle sessions.
+/// The route's tool calls share its pool of idle sessions, status tracker,
+/// and live atomic registry.
 #[derive(Clone)]
 pub(crate) struct ExtensionScope {
     profile: Option<Arc<RwLock<DesktopProfile>>>,
     pool: Arc<SessionPool>,
+    status: Arc<StatusTracker>,
+    live: Arc<Mutex<Option<Arc<Attached>>>>,
+    minimum_profile: Arc<AtomicU8>,
+    reload_audit: Arc<Mutex<VecDeque<ReloadAuditRecord>>>,
+}
+
+impl std::fmt::Debug for ExtensionScope {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ExtensionScope").finish_non_exhaustive()
+    }
 }
 
 impl ExtensionScope {
     /// A route without a profile: named data operations only.
-    pub(crate) fn data_only() -> Self { Self { profile: None, pool: SessionPool::new() } }
+    pub(crate) fn data_only() -> Self {
+        Self {
+            profile: None,
+            minimum_profile: Arc::new(AtomicU8::new(0)),
+            pool: SessionPool::new(),
+            status: StatusTracker::new(),
+            live: Arc::default(),
+            reload_audit: Arc::default(),
+        }
+    }
     pub(crate) fn fixed(profile: DesktopProfile) -> Self {
-        Self { profile: Some(Arc::new(RwLock::new(profile))), pool: SessionPool::new() }
+        Self {
+            profile: Some(Arc::new(RwLock::new(profile))),
+            minimum_profile: Arc::new(AtomicU8::new(0)),
+            pool: SessionPool::new(),
+            status: StatusTracker::new(),
+            live: Arc::default(),
+            reload_audit: Arc::default(),
+        }
     }
     /// A live profile. Any lowering closes the idle sessions, like the
     /// other processes the bridge owns; routes gate calls at different ranks.
     pub(crate) fn live(profile: &ProfileControl) -> Result<Self, RuntimeError> {
-        let pool = SessionPool::new();
+        let scope = Self {
+            profile: Some(profile.shared()),
+            minimum_profile: Arc::new(AtomicU8::new(rank(DesktopProfile::WorkspaceWrite))),
+            pool: SessionPool::new(),
+            status: StatusTracker::new(),
+            live: Arc::default(),
+            reload_audit: Arc::default(),
+        };
+        let binding=Arc::downgrade(&scope.live);
+        profile.register_change_observer(Arc::new(move || {
+            if let Some(binding)=binding.upgrade(){
+                if let Some(entry)=binding.lock().unwrap_or_else(|p|p.into_inner()).as_ref(){
+                    entry.live.invalidate_results();
+                }
+            }
+        }))?;
         for minimum in [DesktopProfile::WorkspaceWrite, DesktopProfile::FullControl, DesktopProfile::FullyUnlocked] {
-            let idle = Arc::downgrade(&pool);
+            let live = Arc::downgrade(&scope.live);
             profile.register_revoker(minimum, Arc::new(move || {
-                if let Some(pool) = idle.upgrade() { pool.close_all(); }
+                if let Some(binding) = live.upgrade() {
+                    if let Some(entry) = binding.lock().unwrap_or_else(|p| p.into_inner()).as_ref() {
+                        entry.live.cancel_all();
+                    }
+                }
                 Ok(())
             }))?;
         }
-        Ok(Self { profile: Some(profile.shared()), pool })
+        Ok(scope)
     }
-    pub(crate) fn current(&self) -> ToolScope {
-        // An unreadable profile is treated as read-only.
-        match self.profile.as_ref().and_then(|profile| profile.read().ok().map(|active| *active)) {
-            Some(profile) if profile != DesktopProfile::ReadOnly => ToolScope::AnyGranted,
-            _ => ToolScope::DataOperations,
+    pub(crate) fn require_full_control(&self) {
+        self.minimum_profile.store(rank(DesktopProfile::FullControl), Ordering::Release);
+    }
+
+    pub(crate) fn bind_live(&self, settings: &Path) -> Result<Arc<LiveExtensionRegistry>, RuntimeError> {
+        let identity = std::fs::canonicalize(settings)?;
+        admin::with_current(settings, |bytes, journal| {
+            let mut slot = self.live.lock().map_err(|_| io::Error::other("Extension owner unavailable"))?;
+            if let Some(entry) = slot.as_ref() {
+                if entry.identity != identity { return Err(io::Error::other("Extension owner path changed")); }
+                return Ok(Arc::clone(&entry.live));
+            }
+            let initial = journal_registry(bytes, journal)?;
+            let live = LiveExtensionRegistry::new(initial, self.pool.clone(), self.status.clone());
+            let peer = revocation_ipc::acquire_peer_lease(settings, &identity)?;
+            let entry = Arc::new(Attached { identity, live: Arc::clone(&live),
+                base: Mutex::new(ValidatedBase { bytes: bytes.to_vec(), stamp: admin::journal_stamp(journal)? }),
+                _peer: peer });
+            let mut all = ATTACHED.lock().unwrap_or_else(|p| p.into_inner());
+            all.retain(|entry| entry.strong_count() > 0);
+            all.push(Arc::downgrade(&entry));
+            *slot = Some(entry);
+            Ok(live)
+        }).map_err(Into::into)
+    }
+
+    /// Snapshot only the exact profile and epoch under its read gate. Called
+    /// while the HTTP transport still holds the validated OAuth owner lock.
+    /// The ordinary journal/profile admission will recheck this observation.
+    pub(crate) fn cache_request(&self,token_hash:[u8;32])->Option<CacheRequest>{
+        let active=self.profile.as_ref()?.read().ok()?;
+        let binding=self.live.lock().ok()?;
+        binding.as_ref()?.live.cache_request(token_hash,rank(*active))
+    }
+    pub(crate) fn invalidate_results(&self){
+        if let Some(binding)=self.live.lock().unwrap_or_else(|p|p.into_inner()).as_ref(){
+            binding.live.invalidate_results();
         }
     }
-    /// The registry of one call, reusing this route's idle sessions.
-    pub(crate) fn sessions(&self, registry: Registry) -> Registry { registry.with_session_pool(self.pool.clone()) }
-    /// Closes the idle sessions, for example when the configuration is lost.
-    pub(crate) fn close_sessions(&self) { self.pool.close_all(); }
+
+    fn get_binding(&self, settings: &Path) -> Option<Arc<Attached>> {
+        let identity = std::fs::canonicalize(settings).ok()?;
+        self.live.lock().ok()?.as_ref().filter(|entry| entry.identity == identity).cloned()
+    }
+
+    fn get_live(&self, settings: &Path) -> Option<Arc<LiveExtensionRegistry>> {
+        self.get_binding(settings).map(|entry| Arc::clone(&entry.live))
+    }
+
+    /// Reconcile journal restrictions and capture the same validated
+    /// registry that admission will use. An untrusted/missing journal is
+    /// never a reason to fall back to an earlier approval.
+    fn with_live<T>(&self, settings: &Path, f: impl FnOnce(&Attached) -> io::Result<T>) -> io::Result<T> {
+        let entry = self.get_binding(settings).ok_or_else(|| io::Error::other("Extension owner unavailable"))?;
+        let result = admin::with_current(settings, |_, journal| {
+            let mut base = entry.base.lock().map_err(|_| io::Error::other("Extension owner unavailable"))?;
+            entry.reconcile(&mut base, journal)?;
+            f(&entry)
+        });
+        result
+    }
+
+    pub(crate) fn current_registry(&self, settings: &Path) -> Result<Arc<Registry>, RuntimeError> {
+        Ok(self.with_live(settings, |entry| Ok(entry.live.current()))?)
+    }
+
+    /// The existing exact OAuth seal is still checked on the very snapshot
+    /// admitted, under the journal lock. Invalid candidate bytes do not
+    /// replace that snapshot or implicitly broaden it.
+    pub(crate) fn call(
+        &self, settings: &Path, name: &str, params: &serde_json::Map<String, Value>, bound: Option<&Value>,
+    ) -> Result<Value, RuntimeError> {
+        // Historical local-only/fixed routes have no mandatory operator UI:
+        // keep their valid disk-refresh behavior, with the same validation
+        // and generation CAS. A rejected candidate leaves the last valid
+        // base in use, subject to fresh journal restrictions below.
+        if self.minimum_profile.load(Ordering::Acquire) == 0 {
+            if let (Ok(candidate), Some(live)) = (read(settings), self.get_live(settings)) {
+                if !live.current().matches_fingerprints(&candidate)? {
+                    let _ = self.reload_from_disk(settings);
+                }
+            }
+        }
+        let active = self.profile.as_ref().map(|profile| profile.read()
+            .map_err(|_| io::Error::other("PROFILE_STATE_UNAVAILABLE"))).transpose()?;
+        let minimum = self.minimum_profile.load(Ordering::Acquire);
+        let profile = active.as_deref().copied().unwrap_or(DesktopProfile::ReadOnly);
+        if rank(profile) < minimum { return Err("LIVE_PROFILE_REFUSED".into()); }
+        let tool_scope = if profile == DesktopProfile::ReadOnly { ToolScope::DataOperations } else { ToolScope::AnyGranted };
+        // Only the exact OAuth-bound handler can use the transport scope.
+        // A local/fixed/unbound call remains uncached even inside a nested
+        // synchronous dispatch with an authenticated outer frame.
+        let cache=if bound.is_some(){authenticated_cache()}else{None};
+        let admitted = self.with_live(settings, |entry| entry.live.admit_with_cache(
+            name, tool_scope,cache.as_ref(),rank(profile), |registry| {
+            if let Some(expected) = bound {
+                if !crate::runtime::registry_matches_authority(registry, expected).unwrap_or(false) {
+                    return Err(io::Error::other("EXTENSION_AUTHORITY_CHANGED: new local OAuth authorization required"));
+                }
+            }
+            Ok(())
+        }))?;
+        // Registration is inside both the live profile and journal gates.
+        // No slow upstream effect holds either lock.
+        drop(active);
+        Ok(admitted.execute(params)?)
+    }
+
+    /// Attaches the status tracker for one-shot operator probes without pooling.
+    pub(crate) fn with_status(&self, registry: Registry) -> Registry {
+        registry.with_status_tracker(self.status.clone())
+    }
+    pub(crate) fn status_snapshot(&self, settings: &Path) -> Value {
+        if let Some(live) = self.get_live(settings) {
+            let registry = self.current_registry(settings).ok().unwrap_or_else(|| live.current());
+            return self
+                .status
+                .snapshot_for_registry(&registry, Some(&self.pool), Some(live.generation()));
+        }
+        if let Ok(registry) = read(settings) {
+            return self.status.snapshot_for_registry(&registry, Some(&self.pool), None);
+        }
+        self.status.snapshot(&[], Some(&self.pool))
+    }
+
+    pub(crate) fn live_generation(&self, settings: &Path) -> Option<u64> {
+        self.get_live(settings).map(|live| live.generation())
+    }
+
+    /// Admits and runs one read-only connection probe under the active
+    /// generation lock so concurrent revocation cancels it immediately.
+    pub(crate) fn test_connection(&self, settings: &Path, server: &str) -> Result<Value, RuntimeError> {
+        if self.get_binding(settings).is_some() {
+            let admitted = self.with_live(settings, |entry| entry.live.admit_probe(server))?;
+            return Ok(admitted.execute()?);
+        }
+        Ok(self.with_status(read(settings)?).test_connection(server)?)
+    }
+
+    /// Capture and qualify outside the writer gate, then recheck the exact
+    /// private base/journal and live generation before publishing.
+    pub(crate) fn reload_from_disk(&self, settings: &Path) -> Result<Value, RuntimeError> {
+        let Some(entry) = self.get_binding(settings) else {
+            // A detached operator has no live registry to swap.
+            let candidate = read(settings).and_then(|registry| {
+                registry.validate_replacement(None)?;
+                Ok(registry)
+            });
+            let record = ReloadAuditRecord {
+                timestamp_unix_ms: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis() as u64).unwrap_or(0),
+                generation: 0, ok: candidate.is_ok(),
+                reason_code: if candidate.is_ok() {"validated_not_attached"} else {"invalid_config_refused"},
+                server_count: candidate.as_ref().map(|reg|reg.server_names().len()).unwrap_or(0),
+                removed_or_disabled:0, changed:0, closed_idle_sessions:0, cancelled_in_flight:0,
+            };
+            self.push_fallback_audit(record.clone());
+            candidate?;
+            let mut value = serde_json::to_value(record)?;
+            value["applied"] = json!(false);
+            return Ok(value);
+        };
+        let snapshot = admin::with_current(settings, |bytes, journal| {
+            let mut base = entry.base.lock().map_err(|_| io::Error::other("Extension owner unavailable"))?;
+            entry.reconcile(&mut base, journal)?;
+            Ok((bytes.to_vec(), admin::journal_stamp(journal)?, journal_registry(bytes, journal)?))
+        });
+        let (bytes, stamp, candidate) = match snapshot {
+            Ok(snapshot) => snapshot,
+            Err(error) => { entry.live.record_failure(&error); return Err(error.into()); }
+        };
+        let prepared = entry.live.prepare_reload(Ok(candidate.clone()), ReloadMode::OperatorApproved)?;
+        let committed = admin::with_current(settings, |current, journal| {
+            let mut base = entry.base.lock().map_err(|_| io::Error::other("Extension owner unavailable"))?;
+            entry.reconcile(&mut base, journal)?;
+            if current != bytes.as_slice() || admin::journal_stamp(journal)? != stamp {
+                let error = io::Error::other("Extension settings or approval changed during reload");
+                entry.live.record_failure(&error);
+                return Err(error);
+            }
+            let record = entry.live.commit_reload(prepared)?;
+            *base = ValidatedBase { bytes, stamp };
+            // Other live views keep their own sealed configuration, but no
+            // removed/reconfigured entry may survive a successful reload.
+            for other in attached_at(&entry.identity) {
+                if !Arc::ptr_eq(&entry, &other) { other.live.restrict_to(&candidate)?; }
+            }
+            Ok(record)
+        })?;
+        Ok(serde_json::to_value(committed)?)
+    }
+
+    fn push_fallback_audit(&self, record: ReloadAuditRecord) {
+        let mut guard = self.reload_audit.lock().unwrap_or_else(|p| p.into_inner());
+        if guard.len() == agent_bridge_extensions::reload::MAX_RELOAD_AUDIT {
+            guard.pop_front();
+        }
+        guard.push_back(record);
+    }
+    /// Bounded reload/revocation audit snapshot for operator diagnostics.
+    pub(crate) fn reload_audit_snapshot(&self) -> Value {
+        if let Some(entry) = self.live.lock().unwrap_or_else(|p| p.into_inner()).as_ref() {
+            return entry.live.audit_snapshot();
+        }
+        let guard = self.reload_audit.lock().unwrap_or_else(|p| p.into_inner());
+        let records: Vec<&ReloadAuditRecord> = guard.iter().collect();
+        json!({
+            "generation": 0,
+            "in_flight": 0,
+            "max_records": agent_bridge_extensions::reload::MAX_RELOAD_AUDIT,
+            "records": records,
+        })
+    }
 }
 
 pub fn read(settings: &Path) -> Result<Registry, RuntimeError> {
@@ -62,25 +466,75 @@ pub fn read(settings: &Path) -> Result<Registry, RuntimeError> {
     Ok(admin::apply_local(settings, &bytes)?.with_stdio_launcher(Arc::new(stdio_child::ContainedLauncher)))
 }
 
-/// Explicitly selected, *read-only* local CLI catalog probe. Unlike a Web
-/// administration proposal this does not change the private journal. The
-/// supported destinations are the public documentation servers
-/// (`mcp_docs`, `microsoft_learn`) and enabled, operator-approved local stdio
-/// servers; no OAuth or new tool approval is conferred by discovery.
+/// Explicitly selected, *read-only* local CLI connection & catalog probe.
+/// Uses the exact configured pins, approvals, and launcher without granting
+/// tools or modifying the private journal.
 pub fn refresh_check(settings: &Path, server: &str) -> Result<(), RuntimeError> {
-    let report = if agent_bridge_extensions::public_docs_server(server) {
-        read(settings)?.refresh_public_docs(server)?
-    } else {
-        let registry = read(settings)?;
-        let enabled = registry.servers(Some(server)).ok()
-            .and_then(|view| view["server"]["enabled"].as_bool()) == Some(true);
-        if registry.server_stdio(server).is_none() || !enabled {
-            return Err("Only the exact public documentation servers or an enabled local stdio server support this read-only probe".into());
-        }
-        registry.refresh_stdio(server)?
-    };
+    if !agent_bridge_extensions::valid_server_name(server) {
+        return Err("Invalid extension server name".into());
+    }
+    let report = read(settings)?.test_connection(server)?;
     println!("{}", serde_json::to_string_pretty(&report)?);
+    if report.get("ok").and_then(Value::as_bool) != Some(true) {
+        let class = report
+            .get("error_class")
+            .and_then(Value::as_str)
+            .unwrap_or("connection_check_failed");
+        return Err(format!("Extension connection check failed: {class}").into());
+    }
     Ok(())
+}
+
+/// Operator-only local UI connection check (never exposed to Web MCP).
+pub(crate) fn test_connection_from_operator_ui(
+    settings: &Path,
+    server: &str,
+    scope: Option<&ExtensionScope>,
+) -> Result<Value, RuntimeError> {
+    if !agent_bridge_extensions::valid_server_name(server) {
+        return Err("Invalid extension server name".into());
+    }
+    match scope {
+        Some(scope) => scope.test_connection(settings, server),
+        None => Ok(read(settings)?.test_connection(server)?),
+    }
+}
+
+/// Explicitly selected local CLI validation/reload check for `extensions.json`.
+/// Validates configuration and controls fail-closed without mutating state.
+pub fn reload_cli(settings: &Path) -> Result<(), RuntimeError> {
+    let registry = read(settings)?;
+    registry.validate_replacement(None)?;
+    let overview = registry.servers(None)?;
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&json!({
+            "ok": true,
+            "reason_code": "validated_not_attached",
+            "applied": false,
+            "server_count": registry.server_names().len(),
+            "servers": overview["servers"],
+        }))?
+    );
+    Ok(())
+}
+
+/// Operator-only local UI atomic reload path (never exposed to Web MCP).
+pub(crate) fn reload_from_operator_ui(
+    settings: &Path,
+    scope: Option<&ExtensionScope>,
+) -> Result<Value, RuntimeError> {
+    if let Some(scope) = scope {
+        return scope.reload_from_disk(settings);
+    }
+    let registry = read(settings)?;
+    registry.validate_replacement(None)?;
+    Ok(json!({
+        "ok": true,
+        "reason_code": "validated_not_attached",
+        "applied": false,
+        "server_count": registry.server_names().len(),
+    }))
 }
 
 /// Operator-only terminal path. No Web handler can invoke this function.
@@ -139,12 +593,12 @@ pub(crate) fn attach_unified(settings: &Path, catalog: &mut Vec<ToolDefinition>,
 fn attach_inner(settings: &Path, catalog: &mut Vec<ToolDefinition>, handlers: &mut ToolMapHandler, unified: bool,
     scope: ExtensionScope) -> Result<(), RuntimeError>
 {
-    // Read now to report configuration errors to the operator; read again
-    // for each call so local revocation applies to the next admission.
-    let _ = read(settings)?;
+    // Retain the last valid base; every call still checks the private journal.
+    scope.bind_live(settings)?;
     let settings = settings.to_owned();
     for name in ["desktop_mcp_manage", "desktop_mcp_tool_inspect"] {
         let directory = settings.clone();
+        let inspection_scope = scope.clone();
         handlers.register(name, move |args| {
             if name == "desktop_mcp_manage" && matches!(
                 args.get("action").and_then(Value::as_str),
@@ -158,7 +612,7 @@ fn attach_inner(settings: &Path, catalog: &mut Vec<ToolDefinition>, handlers: &m
                     Err(_) => ToolCallResult::tool_error("Extension proposal refused or local journal unavailable"),
                 });
             }
-            let Ok(registry) = read(&directory) else {
+            let Ok(registry) = inspection_scope.current_registry(&directory) else {
                 return Ok(ToolCallResult::tool_error("Local extension configuration unavailable"));
             };
             let result = match (name, args.get("action").and_then(Value::as_str)) {
@@ -204,6 +658,7 @@ fn attach_inner(settings: &Path, catalog: &mut Vec<ToolDefinition>, handlers: &m
     catalog.push(ToolDefinition::new("desktop_mcp_tool_inspect", Some("Read the cached descriptor for an approved extension tool.".into()),
         json!({"type":"object","required":["name"],"additionalProperties":false,"properties":{"name":{"type":"string","maxLength":193}}})));
     let list = settings.clone();
+    let search_scope=scope.clone();
     handlers.register("desktop_mcp_tool_search", move |args| {
         if args.keys().any(|key| !matches!(key.as_str(), "query" | "server" | "limit")) {
             return Ok(ToolCallResult::tool_error("Invalid extension search"));
@@ -223,7 +678,7 @@ fn attach_inner(settings: &Path, catalog: &mut Vec<ToolDefinition>, handlers: &m
                 _ => return Ok(ToolCallResult::tool_error("Invalid extension search")),
             },
         };
-        Ok(match read(&list) {
+        Ok(match search_scope.current_registry(&list) {
             Ok(registry) => match registry.search_cached(query, server, limit) {
                 Ok(value) => ToolCallResult::text(value.to_string()),
                 Err(error) => ToolCallResult::tool_error(error.to_string()),
@@ -246,12 +701,7 @@ fn attach_inner(settings: &Path, catalog: &mut Vec<ToolDefinition>, handlers: &m
         if args.keys().any(|k| !matches!(k.as_str(), "name" | "arguments")) || name.len() > 193 {
             return Ok(ToolCallResult::tool_error("Unexpected extension input"));
         }
-        let Ok(registry) = read(&settings) else {
-            scope.close_sessions();
-            return Ok(ToolCallResult::tool_error("Local extension configuration unavailable"));
-        };
-        let registry = scope.sessions(registry);
-        Ok(match registry.call(name, arguments, scope.current()) {
+        Ok(match scope.call(&settings, name, arguments, None) {
             Ok(value) => {
                 // Third-party content is data. It cannot register tools or
                 // trigger another action, and resources are never auto-read.
@@ -271,4 +721,414 @@ fn attach_inner(settings: &Path, catalog: &mut Vec<ToolDefinition>, handlers: &m
         json!({"type":"object","additionalProperties":false,"required":["name"],"properties":{
             "name":{"type":"string","maxLength":193},"arguments":{"type":"object"}}})));
     Ok(())
+}
+
+#[cfg(test)]
+mod connection_tests {
+    use super::*;
+    use std::io::{BufRead, BufReader, Read, Write};
+    use std::net::{Ipv4Addr, TcpListener};
+
+    #[test]
+    fn result_cache_request_scope_is_reentrant_thread_local_and_unwind_safe(){
+        let live=LiveExtensionRegistry::new(
+            Registry::parse(br#"{"version":1,"servers":{}}"#).unwrap(),
+            SessionPool::new(),StatusTracker::new());
+        let outer=live.cache_request([1;32],2).unwrap();
+        let inner=live.cache_request([2;32],3).unwrap();
+        assert!(authenticated_cache().is_none());
+        with_authenticated_cache(Some(outer),||{
+            assert!(authenticated_cache().is_some());
+            with_authenticated_cache(None,||assert!(authenticated_cache().is_none()));
+            let result=std::panic::catch_unwind(std::panic::AssertUnwindSafe(||{
+                with_authenticated_cache(Some(inner),||{
+                    assert!(authenticated_cache().is_some());
+                    with_authenticated_cache(None,||panic!("fixture unwind"));
+                });
+            }));
+            assert!(result.is_err());
+            assert!(authenticated_cache().is_some());
+            assert!(std::thread::spawn(||authenticated_cache().is_none()).join().unwrap());
+        });
+        assert!(authenticated_cache().is_none());
+    }
+
+    #[test]
+    fn cli_refresh_check_tests_approved_server_and_refuses_unapproved_or_disabled() {
+        let dir = crate::test_state_base().join(format!(
+            "ext-cli-check-{}",
+            agent_bridge_missions::operator::random_token_hex(8)
+        ));
+        struct Cleanup(std::path::PathBuf);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let _cleanup = Cleanup(dir.clone());
+        std::fs::create_dir_all(&dir).unwrap();
+        let settings = dir.join("settings");
+        agent_bridge_lifecycle::initialize_operator_settings(&settings).unwrap();
+
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let srv = std::thread::spawn(move || {
+            for _ in 0..2 {
+                let Ok((mut stream, _)) = listener.accept() else { break };
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut len = 0usize;
+                loop {
+                    let mut line = String::new();
+                    if reader.read_line(&mut line).unwrap_or(0) == 0 || line == "\r\n" {
+                        break;
+                    }
+                    if let Some((k, v)) = line.split_once(':') {
+                        if k.eq_ignore_ascii_case("content-length") {
+                            len = v.trim().parse().unwrap_or(0);
+                        }
+                    }
+                }
+                let mut body = vec![0u8; len];
+                reader.read_exact(&mut body).unwrap();
+                let req: Value = serde_json::from_slice(&body).unwrap();
+                let id = req["id"].clone();
+                let resp = match req["method"].as_str().unwrap_or("") {
+                    "server/discover" => json!({
+                        "jsonrpc": "2.0", "id": id,
+                        "result": {
+                            "resultType": "complete",
+                            "supportedVersions": ["2026-07-28"],
+                            "capabilities": {"tools": {}},
+                            "ttlMs": 0, "cacheScope": "private"
+                        }
+                    }),
+                    "tools/list" => json!({
+                        "jsonrpc": "2.0", "id": id,
+                        "result": {
+                            "resultType": "complete", "ttlMs": 0, "cacheScope": "private",
+                            "tools": [{"name": "get_item", "inputSchema": {"type": "object"}}]
+                        }
+                    }),
+                    _ => json!({"jsonrpc": "2.0", "id": id, "error": {"code": -32601, "message": "unexpected"}}),
+                };
+                let text = resp.to_string();
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{text}",
+                    text.len()
+                )
+                .unwrap();
+            }
+        });
+
+        crate::write_private(
+            settings.join("extensions.json"),
+            serde_json::to_vec(&json!({
+                "version": 1,
+                "servers": {
+                    "approved_local": {
+                        "endpoint": format!("http://127.0.0.1:{port}/mcp"),
+                        "tools": {}
+                    }
+                }
+            }))
+            .unwrap(),
+        );
+
+        assert!(refresh_check(&settings, "unapproved").is_err());
+        refresh_check(&settings, "approved_local").expect("approved server connection test");
+        srv.join().unwrap();
+    }
+
+    #[test]
+    fn extension_scope_status_snapshot_tracks_tests_without_leaking_secrets() {
+        let dir = crate::test_state_base().join(format!(
+            "ext-scope-status-{}",
+            agent_bridge_missions::operator::random_token_hex(8)
+        ));
+        struct Cleanup(std::path::PathBuf);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let _cleanup = Cleanup(dir.clone());
+        std::fs::create_dir_all(&dir).unwrap();
+        let settings = dir.join("settings");
+        agent_bridge_lifecycle::initialize_operator_settings(&settings).unwrap();
+
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let srv = std::thread::spawn(move || {
+            for _ in 0..2 {
+                let Ok((mut stream, _)) = listener.accept() else { break };
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut len = 0usize;
+                loop {
+                    let mut line = String::new();
+                    if reader.read_line(&mut line).unwrap_or(0) == 0 || line == "\r\n" {
+                        break;
+                    }
+                    if let Some((k, v)) = line.split_once(':') {
+                        if k.eq_ignore_ascii_case("content-length") {
+                            len = v.trim().parse().unwrap_or(0);
+                        }
+                    }
+                }
+                let mut body = vec![0u8; len];
+                reader.read_exact(&mut body).unwrap();
+                let req: Value = serde_json::from_slice(&body).unwrap();
+                let id = req["id"].clone();
+                let resp = match req["method"].as_str().unwrap_or("") {
+                    "server/discover" => json!({
+                        "jsonrpc": "2.0", "id": id,
+                        "result": {
+                            "resultType": "complete",
+                            "supportedVersions": ["2026-07-28"],
+                            "capabilities": {"tools": {}},
+                            "ttlMs": 0, "cacheScope": "private"
+                        }
+                    }),
+                    "tools/list" => json!({
+                        "jsonrpc": "2.0", "id": id,
+                        "result": {
+                            "resultType": "complete", "ttlMs": 0, "cacheScope": "private",
+                            "tools": [{"name": "get_item", "inputSchema": {"type": "object"}}]
+                        }
+                    }),
+                    _ => json!({"jsonrpc": "2.0", "id": id, "error": {"code": -32601, "message": "unexpected"}}),
+                };
+                let text = resp.to_string();
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{text}",
+                    text.len()
+                )
+                .unwrap();
+            }
+        });
+
+        crate::write_private(
+            settings.join("extensions.json"),
+            serde_json::to_vec(&json!({
+                "version": 1,
+                "servers": {
+                    "approved_local": {
+                        "endpoint": format!("http://127.0.0.1:{port}/mcp"),
+                        "tools": {}
+                    }
+                }
+            }))
+            .unwrap(),
+        );
+
+        let scope = ExtensionScope::data_only();
+        let before = scope.status_snapshot(&settings);
+        assert_eq!(before["servers"][0]["server"], "approved_local");
+        assert_eq!(before["servers"][0]["state"], "idle");
+
+        let report = test_connection_from_operator_ui(&settings, "approved_local", Some(&scope)).unwrap();
+        srv.join().unwrap();
+        assert_eq!(report["ok"], true);
+
+        let after = scope.status_snapshot(&settings);
+        assert!(matches!(after["servers"][0]["state"].as_str(), Some("ready" | "slow")));
+        let serialized = after.to_string();
+        assert!(!serialized.contains("127.0.0.1"));
+        assert!(!serialized.contains(&format!("{port}")));
+    }
+
+    #[test]
+    fn cli_reload_validates_config_and_refuses_invalid_extensions_json() {
+        let dir = crate::test_state_base().join(format!(
+            "ext-cli-reload-{}",
+            agent_bridge_missions::operator::random_token_hex(8)
+        ));
+        struct Cleanup(std::path::PathBuf);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let _cleanup = Cleanup(dir.clone());
+        std::fs::create_dir_all(&dir).unwrap();
+        let settings = dir.join("settings");
+        agent_bridge_lifecycle::initialize_operator_settings(&settings).unwrap();
+
+        crate::write_private(
+            settings.join("extensions.json"),
+            serde_json::to_vec(&json!({
+                "version": 1,
+                "servers": {
+                    "valid_srv": {
+                        "endpoint": "https://mcp.example.invalid/mcp",
+                        "tools": {}
+                    }
+                }
+            }))
+            .unwrap(),
+        );
+        reload_cli(&settings).expect("valid extensions.json must validate");
+
+        crate::write_private(settings.join("extensions.json"), b"{invalid json");
+        assert!(reload_cli(&settings).is_err());
+    }
+
+    #[test]
+    fn operator_ui_probe_uses_admitted_live_generation_and_cancels_on_revocation() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::time::{Duration, Instant};
+
+        let dir = crate::test_state_base().join(format!(
+            "ext-ui-live-probe-{}",
+            agent_bridge_missions::operator::random_token_hex(8)
+        ));
+        struct Cleanup(std::path::PathBuf);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let _cleanup = Cleanup(dir.clone());
+        std::fs::create_dir_all(&dir).unwrap();
+        let settings = dir.join("settings");
+        agent_bridge_lifecycle::initialize_operator_settings(&settings).unwrap();
+
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let stalled_in_list = Arc::new(AtomicBool::new(false));
+        let stop = Arc::new(AtomicBool::new(false));
+        let stalled_srv = Arc::clone(&stalled_in_list);
+        let stop_srv = Arc::clone(&stop);
+
+        let srv = std::thread::spawn(move || {
+            let mut held = Vec::new();
+            let mut list_count = 0usize;
+            for _ in 0..8 {
+                if stop_srv.load(Ordering::Acquire) {
+                    break;
+                }
+                let Ok((mut stream, _)) = listener.accept() else { break };
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut len = 0usize;
+                loop {
+                    let mut line = String::new();
+                    if reader.read_line(&mut line).unwrap_or(0) == 0 || line == "\r\n" {
+                        break;
+                    }
+                    if let Some((k, v)) = line.split_once(':') {
+                        if k.eq_ignore_ascii_case("content-length") {
+                            len = v.trim().parse().unwrap_or(0);
+                        }
+                    }
+                }
+                if len == 0 {
+                    continue;
+                }
+                let mut body = vec![0u8; len];
+                if reader.read_exact(&mut body).is_err() {
+                    continue;
+                }
+                let req: Value = serde_json::from_slice(&body).unwrap();
+                let id = req["id"].clone();
+                let method = req["method"].as_str().unwrap_or("");
+                assert_ne!(method, "tools/call", "probe must never invoke tools/call");
+                if method == "tools/list" {
+                    list_count += 1;
+                    if list_count >= 2 {
+                        stalled_srv.store(true, Ordering::Release);
+                        held.push((stream, reader));
+                        while !stop_srv.load(Ordering::Acquire) {
+                            std::thread::sleep(Duration::from_millis(20));
+                        }
+                        break;
+                    }
+                }
+                let resp = match method {
+                    "server/discover" => json!({
+                        "jsonrpc": "2.0", "id": id,
+                        "result": {
+                            "resultType": "complete",
+                            "supportedVersions": ["2026-07-28"],
+                            "capabilities": {"tools": {}},
+                            "ttlMs": 0, "cacheScope": "private"
+                        }
+                    }),
+                    "tools/list" => json!({
+                        "jsonrpc": "2.0", "id": id,
+                        "result": {
+                            "resultType": "complete", "ttlMs": 0, "cacheScope": "private",
+                            "tools": [{"name": "get_item", "inputSchema": {"type": "object"}}]
+                        }
+                    }),
+                    _ => json!({"jsonrpc": "2.0", "id": id, "error": {"code": -32601, "message": "unexpected"}}),
+                };
+                let text = resp.to_string();
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{text}",
+                    text.len()
+                );
+            }
+            drop(held);
+        });
+
+        crate::write_private(
+            settings.join("extensions.json"),
+            serde_json::to_vec(&json!({
+                "version": 1,
+                "servers": {
+                    "approved_local": {
+                        "endpoint": format!("http://127.0.0.1:{port}/mcp"),
+                        "tools": {}
+                    }
+                }
+            }))
+            .unwrap(),
+        );
+
+        let scope = ExtensionScope::data_only();
+        let _live = scope.bind_live(&settings).unwrap();
+
+        // First probe succeeds cleanly on generation 1.
+        let ok = test_connection_from_operator_ui(&settings, "approved_local", Some(&scope)).unwrap();
+        assert_eq!(ok["ok"], true);
+        assert_eq!(ok["generation"], 1);
+        assert!(ok["config_sha256"].as_str().is_some());
+        assert_eq!(scope.status_snapshot(&settings)["servers"][0]["state"], "ready");
+
+        // Second probe stalls on tools/list; concurrent operator disable cancels it immediately.
+        let sub = admin::submit(
+            &settings,
+            json!({"action": "disable", "name": "approved_local"})
+                .as_object()
+                .unwrap(),
+        )
+        .unwrap();
+        let disable_id = sub["request_id"].as_str().unwrap().to_owned();
+
+        let started = Instant::now();
+        let probe_err = std::thread::scope(|s| {
+            let h = s.spawn(|| test_connection_from_operator_ui(&settings, "approved_local", Some(&scope)));
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while !stalled_in_list.load(Ordering::Acquire) {
+                assert!(Instant::now() < deadline, "operator probe did not stall on tools/list");
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            let decision = decide_from_operator_ui(&UiOAuthOwner::default(), &settings, &disable_id, true).unwrap();
+            assert_eq!(decision["decision"], "approved");
+            h.join().unwrap().unwrap_err()
+        });
+        assert!(started.elapsed() < Duration::from_secs(3), "operator probe cancellation took {:?}", started.elapsed());
+        assert!(probe_err.to_string().contains("cancelled due to revocation"), "{probe_err}");
+
+        let snap = scope.status_snapshot(&settings);
+        assert_eq!(snap["servers"][0]["enabled"], false);
+        assert_eq!(snap["servers"][0]["state"], "disabled");
+        assert!(snap["servers"][0]["last_latency_ms"].is_null());
+        assert!(test_connection_from_operator_ui(&settings, "approved_local", Some(&scope)).is_err());
+
+        stop.store(true, Ordering::Release);
+        srv.join().unwrap();
+    }
 }

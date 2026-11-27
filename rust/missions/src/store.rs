@@ -232,6 +232,20 @@ pub(crate) fn note_context_use(conn: &Connection, hash: &str) -> Option<String> 
     Some(id)
 }
 
+/// Resolve only a server-owned public mission ID after successful admission.
+/// Invitees may observe their invitation but acquire no membership authority.
+pub(crate) fn confirmed_activity_mission(conn: &Connection, actor_hash: &str,
+    selector: &str, invited: bool) -> Option<String> {
+    if !valid_id("mis", selector) { return None; }
+    conn.query_row(
+        "SELECT m.mission_id FROM missions m
+         JOIN mission_memberships mm ON mm.mission_id=m.mission_id
+         WHERE m.mission_id=?1 AND mm.context_hash=?2
+           AND (mm.state='attached' OR (?3 AND mm.state='invited'))",
+        params![selector, actor_hash, invited], |row| row.get::<_, String>(0),
+    ).ok().filter(|id| valid_id("mis", id))
+}
+
 pub fn membership(tx: &Connection, mission: &str, actor_hash: &str, owner_only: bool) -> Result<()> {
     let membership: Option<(String, String)> = tx.query_row(
         "SELECT role,state FROM mission_memberships WHERE mission_id=?1 AND context_hash=?2",

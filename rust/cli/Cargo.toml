@@ -1,11 +1,12 @@
 [package]
 name = "agent-bridge"
-version = "2.2.0"
+version = "2.3.0"
 edition = "2021"
 license = "Apache-2.0"
 publish = false
 
 [dependencies]
+hex = "0.4"
 getrandom = "0.4"
 agent-bridge-import = { path = "../import" }
 agent-bridge-oauth-server = { path = "../oauth-server" }

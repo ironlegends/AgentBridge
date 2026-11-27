@@ -650,6 +650,89 @@ fn default_direct_child_has_no_console_and_retains_stdout_stderr_and_exit_code()
     assert!(stderr.contains("hidden-stderr-witness"),"{stderr}");
 }
 
+#[test]
+fn revocation_and_shutdown_stop_real_descendants_while_neighbor_survives() {
+    use std::io::Write;
+    use std::process::{Child, Command, Stdio};
+
+    struct NeighborGuard(Child, PathBuf);
+    impl Drop for NeighborGuard {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+            let _ = std::fs::remove_file(&self.1);
+        }
+    }
+
+    fn assert_neighbor_progress(neighbor: &mut NeighborGuard, size: u64, action: &str) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            assert!(neighbor.0.try_wait().unwrap().is_none(), "neighbor died on {action}");
+            if std::fs::File::open(&neighbor.1).unwrap().metadata().unwrap().len() > size {
+                return;
+            }
+            assert!(Instant::now() < deadline, "neighbor heartbeat stopped on {action}");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    let neighbor_path = std::env::temp_dir().join(format!(
+        "agent-bridge-neighbor-heartbeat-{}", new_session_id().unwrap()
+    ));
+    #[cfg(windows)]
+    let mut neighbor_cmd = {
+        use std::os::windows::process::CommandExt;
+        let mut cmd = Command::new(fixture_program());
+        cmd.args(["terminal-heartbeat"]).creation_flags(0x0800_0000);
+        cmd
+    };
+    #[cfg(unix)]
+    let mut neighbor_cmd = {
+        use std::os::unix::process::CommandExt;
+        let mut cmd = Command::new(std::env::current_exe().unwrap());
+        cmd.args(["--exact", "terminal::unrestricted::tests::heartbeat_fixture", "--nocapture"])
+            .process_group(0);
+        cmd
+    };
+    let mut neighbor_child = neighbor_cmd
+        .stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::null())
+        .spawn().unwrap();
+    writeln!(neighbor_child.stdin.take().unwrap(), "{}", neighbor_path.display()).unwrap();
+    let mut neighbor = NeighborGuard(neighbor_child, neighbor_path.clone());
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while std::fs::metadata(&neighbor_path).map(|m| m.len()).unwrap_or(0) < 3 {
+        assert!(Instant::now() < deadline, "neighbor heartbeat did not start");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+
+    let mut h = Harness::new();
+    let sid1 = h.start_fixture();
+    let desc1 = h.start_descendant(&sid1);
+    {
+        let mut profile = h.profile.write().unwrap();
+        (h.supervisor.revoker())().unwrap();
+        *profile = DesktopProfile::FullControl;
+    }
+    let desc1_size = std::fs::metadata(&desc1).unwrap().len();
+    let neighbor_before_downgrade = std::fs::File::open(&neighbor_path).unwrap().metadata().unwrap().len();
+    std::thread::sleep(Duration::from_millis(150));
+    assert_neighbor_progress(&mut neighbor, neighbor_before_downgrade, "downgrade");
+    assert_eq!(std::fs::metadata(&desc1).unwrap().len(), desc1_size, "descendant survived downgrade");
+    std::fs::remove_file(desc1).unwrap();
+
+    *h.profile.write().unwrap() = DesktopProfile::FullyUnlocked;
+    let sid2 = h.start_fixture();
+    assert_ne!(sid1, sid2);
+    let desc2 = h.start_descendant(&sid2);
+    h.supervisor.shutdown().unwrap();
+    let desc2_size = std::fs::metadata(&desc2).unwrap().len();
+    let neighbor_before_shutdown = std::fs::File::open(&neighbor_path).unwrap().metadata().unwrap().len();
+    std::thread::sleep(Duration::from_millis(150));
+    assert_neighbor_progress(&mut neighbor, neighbor_before_shutdown, "shutdown");
+    assert_eq!(std::fs::metadata(&desc2).unwrap().len(), desc2_size, "descendant survived shutdown");
+    std::fs::remove_file(desc2).unwrap();
+}
+
 
 #[cfg(windows)]
 mod unified_windows {

@@ -22,11 +22,16 @@ pub(crate) fn unified_router(
     let mut catalogue=Vec::new(); let mut handlers=ToolMapHandler::new();
     // Reuse the implemented Task Room and documentary skill adapters. Their
     // live policy is wrapped below. File handlers are replaced as a whole.
-    attach_desktop_surface(&Workspace {root:root.clone(),write_files:true,profile:DesktopProfile::FullyUnlocked},
+    let ext_scope = attach_desktop_surface(&Workspace {root:root.clone(),write_files:true,profile:DesktopProfile::FullyUnlocked},
         Some(&database),database_path,Some(settings),
         DesktopSurface {web_read_only:false,task_rooms:true,settings_tools:true,terminal_tool:false,processes:false},
         &mut catalogue,&mut handlers,supervisors,Some(extension_authority),Some(&profile))?;
-    replace_extension_view(settings,&mut catalogue,&mut handlers,&profile)?;
+    let unified_scope = match &ext_scope {
+        Some(scope) => scope.clone(),
+        None => crate::extensions::ExtensionScope::live(&profile)?,
+    };
+    unified_scope.require_full_control();
+    replace_extension_view(settings,&mut catalogue,&mut handlers,unified_scope.clone())?;
     handlers=guard_common(handlers,&catalogue,profile.clone());
 
     let specs=files.tool_catalog();
@@ -42,7 +47,7 @@ pub(crate) fn unified_router(
         catalogue.push(ToolDefinition::new(name,Some(spec.description.into()),spec.input_schema));
     }
     crate::unified_core::attach(Arc::clone(&database),root,manifest.commands(),profile.clone(),
-        manifest.selection.allow_import,&mut catalogue,&mut handlers)?;
+        manifest.selection.allow_import,manifest.selection.mission_handoff,&mut catalogue,&mut handlers)?;
 
     let binding=task_room_workspace_binding(root)?;
     let room_root=root.clone(); let rooms=Arc::clone(&database);
@@ -94,6 +99,16 @@ pub(crate) fn unified_router(
     profile.register_revoker(DesktopProfile::FullControl,browser_owner.revoker())?;
     providers.push(browser_owner);
 
+    if let Some(selection)=&manifest.selection.attempt_maintenance {
+        crate::attempt_maintenance::attach(selection,root,settings,database_path,Arc::clone(&database),
+            manifest.commands(),profile.clone(),&mut catalogue,&mut handlers)?;
+    }
+
+    // Narrow the exact same qualified definitions and handlers. No change
+    // to any provider's argument contract or live profile check.
+    let selected=manifest.selection.catalogue;
+    selected.restrict(&mut catalogue,&mut handlers);
+    selected.require_available(&catalogue,&handlers)?;
     let total=catalogue.len()+1;
     let mut families=json!({"desktop":0,"missions_including_status":1,"project_commands":0,"historical_utilities":0,"other":0});
     for tool in &catalogue {
@@ -106,16 +121,27 @@ pub(crate) fn unified_router(
         families[family]=json!(families[family].as_u64().unwrap_or(0)+1);
     }
     let identity=manifest.identity()?; let summary=manifest.summary()?;
+    let partition=match &identity {
+        agent_bridge_oauth_server::CapabilityIdentity::UnifiedV1 { manifest_sha256, .. }=>manifest_sha256.clone(),
+        _=>return Err("Unified capability seal required".into()),
+    };
     let live=profile.clone();
+    let status_scope = unified_scope.clone();
+    let status_settings = settings.to_path_buf();
     let (channel,production)=release_channel();
     handlers.register("agent_bridge_status",move |arguments| {
         if !arguments.is_empty() {return Err(ToolDispatchError::invalid_params("status takes no arguments"));}
         let active=*live.read().map_err(|_|ToolDispatchError::internal("PROFILE_STATE_UNAVAILABLE"))?;
-        let processes=process_status(live.startup_profile(),active);
-        Ok(ToolCallResult::text(json!({
+        let mut processes=process_status(live.startup_profile(),active);
+        for (key,tool) in [("process_tools_enabled","desktop_start_process"),
+            ("direct_processes_enabled","desktop_start_process"),
+            ("project_commands_enabled","agent_bridge_project_command")] {
+            if !selected.allows(tool) { processes[key]=json!(false); }
+        }
+        let mut result=json!({
             "ok":true,"version":env!("CARGO_PKG_VERSION"),"active_backend":"rust","audience":"workstation",
             "capability":identity,"total_tools":total,"families":families,
-            "vendor_tools":total.saturating_sub(16),
+            "vendor_tools":total.saturating_sub(families["missions_including_status"].as_u64().unwrap_or(0) as usize),
             "vendor_tools_definition":"Non-mission additions; historical compatibility field",
             "desktop_profile":active,"startup_profile":live.startup_profile(),
             "process_tools_enabled":processes["process_tools_enabled"],
@@ -123,26 +149,32 @@ pub(crate) fn unified_router(
             "direct_processes_enabled":processes["direct_processes_enabled"],
             "database_schema":agent_bridge_core::CURRENT_SCHEMA_VERSION,
             "components":summary["components"],"channel":channel,"production":production,
-        }).to_string()))
+        });
+        if !selected.is_unified() {result["catalogue"]=json!(selected.name());}
+        if selected.allows("desktop_mcp_tool_search") {
+            result["extensions"] = status_scope.status_snapshot(&status_settings);
+        }
+        Ok(ToolCallResult::text(result.to_string()))
     });
     catalogue.push(ToolDefinition::new("agent_bridge_status",
         Some("Report the exact selected tool capability, family counts, live profile and component qualification.".into()),
         json!({"type":"object","properties":{},"additionalProperties":false})));
     tool_docs::select_workstation_docs(&mut catalogue, &manifest.selection.catalogue_sha256)?;
     Ok(WorkstationRuntime {
-        router:McpGateway::new(GatewayConfig::new("agent-bridge-workstation",env!("CARGO_PKG_VERSION"))
-            .with_catalog_ttl_ms(CATALOG_TTL_MS),
+        router:McpGateway::new(selected.configure(
+            GatewayConfig::new("agent-bridge-workstation",env!("CARGO_PKG_VERSION"))
+                .with_catalog_ttl_ms(CATALOG_TTL_MS),&partition),
             catalogue,handlers),
         database:Some(database),
+        extension_scope: Some(unified_scope),
     })
 }
 
 fn replace_extension_view(
-    settings:&Path,catalogue:&mut Vec<ToolDefinition>,handlers:&mut ToolMapHandler,profile:&ProfileControl,
+    settings:&Path,catalogue:&mut Vec<ToolDefinition>,handlers:&mut ToolMapHandler,scope:crate::extensions::ExtensionScope,
 )->Result<(),RuntimeError> {
     let mut replacement=Vec::new(); let mut new_handlers=ToolMapHandler::new();
-    crate::extensions::attach_unified(settings,&mut replacement,&mut new_handlers,
-        crate::extensions::ExtensionScope::live(profile)?)?;
+    crate::extensions::attach_unified(settings,&mut replacement,&mut new_handlers,scope)?;
     // The effectful call retains the exact-authority/same-Registry handler
     // already attached above. Do not silently preserve it if its schema grows.
     let before=catalogue.iter().find(|tool|tool.name=="desktop_mcp_tool_call")
@@ -170,6 +202,10 @@ fn guard_common(
     for tool in catalogue {
         let name=tool.name.clone(); let inner=Arc::clone(&original); let live=profile.clone();
         guarded.register(name.clone(),move |arguments| {
+            // The extension handler owns admission and the exact unified
+            // Full Control minimum; do not recursively acquire the read lock
+            // or hold it while awaiting a cancellable upstream response.
+            if name=="desktop_mcp_tool_call" {return inner.call(&name,arguments);}
             let active=live.read().map_err(|_|ToolDispatchError::internal("PROFILE_STATE_UNAVAILABLE"))?;
             let action=arguments.get("action").and_then(Value::as_str);
             let read=match name.as_str() {

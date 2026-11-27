@@ -199,6 +199,10 @@ impl OperatorClient {
         })
     }
 
+    pub fn session_history(&self, boot: u128, session: u128) -> Result<Value, String> {
+        self.request("GET", &format!("/api/sessions/history/{boot:032x}/{session:032x}"), None)
+    }
+
     pub fn get(&self, path: &'static str) -> Result<Value, String> {
         if !matches!(path, "/api/profile" | "/api/overview" | "/api/missions" | "/api/oauth"
             | "/api/extensions" | "/api/skills" | "/api/diagnostics" | "/api/sessions")

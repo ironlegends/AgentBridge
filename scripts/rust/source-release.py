@@ -84,7 +84,7 @@ REVIEWED_RELEASE_INPUTS = {
     "scripts/rust/test_ci_scope.py",
     "scripts/rust/test_qualification_inventory.py",
 }
-EXACT = {*REVIEWED_RELEASE_INPUTS, "Cargo.toml", "Cargo.lock", "LICENSE", "NOTICE", "README.md", "CONTRIBUTING.md", "SECURITY.md", "contracts/mission-tools-v1.json",
+EXACT = {*REVIEWED_RELEASE_INPUTS, "Cargo.toml", "Cargo.lock", "LICENSE", "NOTICE", "README.md", "CHANGELOG.md", "CONTRIBUTING.md", "SECURITY.md", "contracts/mission-tools-v1.json",
          "contracts/stdio-workspace-tool-docs.json", "contracts/workstation-tool-docs.json",
          "contracts/task-room-v1.json",
          "docs/images/desktop-guide.png", "docs/images/desktop-views.png",

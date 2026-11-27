@@ -3,12 +3,19 @@
 //! interface changes. It does not attest the code behind an unchanged interface.
 
 pub mod oauth;
+mod result_policy;
 mod pool;
+pub mod reload;
+mod result_cache;
+pub use result_cache::CacheRequest;
+pub mod status;
 pub mod stdio;
 mod transport;
 pub use oauth::{ClientAuthMethod, OAuthServerConfig, OAuthTokenStore, TokenStatusSummary};
-pub use pool::SessionPool;
-pub use transport::fetch_https_bytes;
+pub use pool::{PoolSummary, SessionPool};
+pub use reload::{AdmittedCall, AdmittedProbe, InFlightTracker, LiveExtensionRegistry, PreparedReload, ReloadAuditRecord, ReloadMode};
+pub use status::{StatusTracker, UpstreamState};
+pub use transport::{fetch_https_bytes, CancellationToken};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
@@ -69,7 +76,7 @@ pub fn validate_header_env(address: &str, references: &BTreeMap<String, String>,
     Ok(())
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Registry {
     version: u8,
@@ -80,9 +87,12 @@ pub struct Registry {
     /// Reusable sessions for tool calls, attached by the CLI; never parsed.
     #[serde(skip)]
     session_pool: Option<std::sync::Arc<SessionPool>>,
+    /// Redacted upstream status tracker, attached by the CLI; never parsed.
+    #[serde(skip)]
+    status_tracker: Option<std::sync::Arc<StatusTracker>>,
 }
 
-#[derive(Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct Server {
     /// Exactly one of `endpoint` and `stdio`. Both are omitted when absent,
@@ -101,10 +111,15 @@ struct Server {
     disabled: bool,
 }
 
-#[derive(Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct Approval {
     descriptor_sha256: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    result_filter: Option<result_policy::ResultPolicy>,
+    /// Local operator opt-in, never inferred from remote annotations.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    result_cache: Option<result_cache::Policy>,
     /// Optional descriptor captured during local approval. Inspection is offline.
     #[serde(default)]
     descriptor: Option<Value>,
@@ -112,7 +127,7 @@ struct Approval {
     parameters: BTreeMap<String, Parameter>,
 }
 
-#[derive(Deserialize, Serialize)]
+#[derive(Clone, PartialEq, Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 enum Parameter {
     Identifier,
@@ -226,6 +241,24 @@ impl Parameter {
             _ => "string",
         }
     }
+    fn is_subset_of(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Identifier, Self::Identifier) => true,
+            (Self::Boolean, Self::Boolean) => true,
+            (Self::SearchTerms, Self::SearchTerms) => true,
+            (Self::PublicHttpsUrl, Self::PublicHttpsUrl) => true,
+            (Self::Integer { minimum: min_a, maximum: max_a }, Self::Integer { minimum: min_b, maximum: max_b }) => {
+                min_a >= min_b && max_a <= max_b
+            }
+            (Self::Number { minimum: min_a, maximum: max_a }, Self::Number { minimum: min_b, maximum: max_b }) => {
+                min_a >= min_b && max_a <= max_b
+            }
+            (Self::Choice { values: vals_a }, Self::Choice { values: vals_b }) => {
+                vals_a.iter().all(|v| vals_b.iter().any(|allowed| allowed == v))
+            }
+            _ => false,
+        }
+    }
 }
 
 fn descriptor_hash(value: &Value) -> String {
@@ -283,6 +316,95 @@ impl Registry {
         self
     }
 
+    /// Attaches a bounded, redacted upstream execution status tracker.
+    pub fn with_status_tracker(mut self, tracker: std::sync::Arc<StatusTracker>) -> Self {
+        self.status_tracker = Some(tracker);
+        self
+    }
+
+    /// Configured server identifiers in deterministic order.
+    pub fn server_names(&self) -> Vec<String> {
+        self.servers.keys().cloned().collect()
+    }
+
+    pub fn is_server_enabled(&self, name: &str) -> bool {
+        self.servers.get(name).is_some_and(|server| !server.disabled)
+    }
+
+    /// Returns a cloned registry with `name` marked disabled for live revocation.
+    pub(crate) fn with_server_disabled(&self, name: &str) -> Self {
+        let mut cloned = self.clone();
+        if let Some(server) = cloned.servers.get_mut(name) {
+            server.disabled = true;
+        }
+        cloned
+    }
+
+    /// Narrow a validated snapshot using the current private journal.
+    /// No new/changed entry or enabled grant can become active this way.
+    pub(crate) fn restricted_to(&self, effective: &Self) -> Result<Self> {
+        let mut next = self.clone();
+        for name in self.server_names() {
+            if !effective.has_server(&name) {
+                next.servers.remove(&name);
+            } else if !effective.is_server_enabled(&name)
+                || self.server_sha256(&name)? != effective.server_sha256(&name)? {
+                next.servers.get_mut(&name).expect("existing server").disabled = true;
+            }
+        }
+        Ok(next)
+    }
+
+    /// Qualification uses the actual executable and upstream catalogue,
+    /// not just well-formed hash strings. No tools/call is issued. Disabled
+    /// entries cannot execute and must not prevent a revocation.
+    pub fn validate_replacement(&self, previous: Option<&Self>) -> Result<()> {
+        for (name, server) in &self.servers {
+            if server.disabled { continue; }
+            if let Some(spec) = &server.stdio {
+                stdio::verify_executable(std::path::Path::new(&spec.executable), &spec.executable_sha256)?;
+            }
+            if server.tools.is_empty() { continue; }
+            if let Some(old) = previous {
+                if old.is_server_enabled(name) && old.server_sha256(name)? == self.server_sha256(name)? {
+                    continue;
+                }
+            }
+            let mut session = self.open_session(server)?;
+            let catalog = session.catalog()?;
+            for (tool, approval) in &server.tools {
+                let mut matches = catalog.iter().filter(|descriptor| descriptor["name"].as_str() == Some(tool.as_str()));
+                let descriptor = matches.next().ok_or_else(|| error("Approved descriptor missing during reload"))?;
+                if matches.next().is_some() || descriptor_hash(descriptor) != approval.descriptor_sha256 {
+                    return Err(error("Approved descriptor pin changed during reload"));
+                }
+                check_schema(descriptor, &approval.parameters)?;
+                if transport::declares_parameter_headers(descriptor) {
+                    return Err(error("Approved descriptor requires unsupported parameter headers"));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// True if both registries have identical configured servers, enabled
+    /// states, and exact server configuration digests.
+    pub fn matches_fingerprints(&self, other: &Self) -> Result<bool> {
+        let names = self.server_names();
+        if names != other.server_names() {
+            return Ok(false);
+        }
+        for name in names {
+            if self.is_server_enabled(&name) != other.is_server_enabled(&name) {
+                return Ok(false);
+            }
+            if self.server_sha256(&name)? != other.server_sha256(&name)? {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
     /// The pool key of one server: its name and its exact fingerprint.
     fn session_key(&self, name: &str) -> Result<String> {
         let fingerprint = self.server_sha256(name)?.ok_or_else(|| error("Unknown extension server"))?;
@@ -290,7 +412,7 @@ impl Registry {
     }
 
     /// The keys of every enabled server in this registry.
-    fn session_keys(&self) -> Result<std::collections::BTreeSet<String>> {
+    pub(crate) fn session_keys(&self) -> Result<std::collections::BTreeSet<String>> {
         self.servers.iter().filter(|(_, server)| !server.disabled)
             .map(|(name, _)| self.session_key(name)).collect()
     }
@@ -307,31 +429,186 @@ impl Registry {
         let server = self.servers.get(name).ok_or_else(|| error("Stdio extension is not configured"))?;
         let spec = server.stdio.as_ref().ok_or_else(|| error("Remote refresh is not supported for this server"))?;
         if server.disabled { return Err(error("Extension disabled by the operator")); }
+        let started = std::time::Instant::now();
         let mut session = self.open_session(server)?;
         let live = session.catalog()?;
+        let latency_ms = started.elapsed().as_millis() as u64;
         let mut report = catalog_report(server, &live)?;
+        let drift = has_approved_descriptor_drift(&report);
         report.extend([
             ("server".to_owned(), json!(name)),
             ("transport".to_owned(), json!("stdio")),
             ("executable_sha256".to_owned(), json!(spec.executable_sha256)),
             ("stderr_bytes".to_owned(), json!(session.stderr_bytes().unwrap_or(0))),
             ("protocol_version".to_owned(), json!(session.protocol_version())),
+            ("latency_ms".to_owned(), json!(latency_ms)),
+            ("ok".to_owned(), json!(!drift)),
+            ("status".to_owned(), json!(if drift { "descriptor_drift" } else { "ok" })),
+            ("error_class".to_owned(), if drift { json!("descriptor_hash_drift") } else { Value::Null }),
         ]);
+        Ok(Value::Object(report))
+    }
+
+    /// Read-only connection test for any locally approved, enabled extension
+    /// server (HTTP or stdio). Uses the exact configured pins and approvals,
+    /// performs discovery/initialize + tools/list + pinned descriptor hash
+    /// comparison, never invokes any tool, and never grants new permissions.
+    pub fn test_connection(&self, name: &str) -> Result<Value> {
+        self.test_connection_inner(name, None, None)
+    }
+
+    pub fn test_connection_cancellable(&self, name: &str, cancel: Option<&CancellationToken>) -> Result<Value> {
+        self.test_connection_inner(name, cancel, None)
+    }
+
+    pub(crate) fn test_connection_managed(
+        &self,
+        name: &str,
+        cancel: &CancellationToken,
+        generation: u64,
+    ) -> Result<Value> {
+        self.test_connection_inner(name, Some(cancel), Some(generation))
+    }
+
+    fn test_connection_inner(
+        &self,
+        name: &str,
+        cancel: Option<&CancellationToken>,
+        generation: Option<u64>,
+    ) -> Result<Value> {
+        let server = self.servers.get(name).ok_or_else(|| error("Extension server is not configured"))?;
+        if server.disabled {
+            return Err(error("Extension disabled by the operator"));
+        }
+        if let Some(docs) = PUBLIC_DOCS.iter().find(|docs| docs.server == name) {
+            if server.endpoint.as_deref() != Some(docs.endpoint) || server.bearer_env.is_some() {
+                return Err(error("Documentation refresh requires the exact public tokenless endpoint"));
+            }
+        }
+        if server.stdio.is_some() && self.stdio_launcher.is_none() {
+            return Err(error("Stdio extensions are unavailable in this context"));
+        }
+        if cancel.is_some_and(CancellationToken::is_cancelled) {
+            return Err(error("Extension call cancelled due to revocation"));
+        }
+        let transport_label = if server.stdio.is_some() { "stdio" } else { "http" };
+        let config_sha256 = self.server_sha256(name)?;
+        let status_guard = self.status_tracker.as_ref()
+            .map(|tracker| tracker.begin_starting_for(name, config_sha256.as_deref(), cancel));
+        let started = std::time::Instant::now();
+        let mut session = match self.open_session_cancellable(server, cancel) {
+            Ok(session) => session,
+            Err(err) => {
+                let cancelled = cancel.is_some_and(CancellationToken::is_cancelled)
+                    || err.to_string().contains("cancelled due to revocation");
+                let elapsed = started.elapsed();
+                if cancelled {
+                    drop(status_guard);
+                    return Err(error("Extension call cancelled due to revocation"));
+                }
+                if let Some(guard) = status_guard {
+                    guard.finish_error(transport::classify_error(&err), Some(elapsed.as_millis() as u64));
+                }
+                return Ok(connection_error_report(
+                    name,
+                    transport_label,
+                    None,
+                    None,
+                    server.stdio.as_ref().map(|s| s.executable_sha256.as_str()),
+                    &err,
+                    elapsed,
+                ));
+            }
+        };
+        let protocol_version = session.protocol_version();
+        let live = match session.catalog_cancellable(cancel) {
+            Ok(live) => live,
+            Err(err) => {
+                let cancelled = cancel.is_some_and(CancellationToken::is_cancelled)
+                    || err.to_string().contains("cancelled due to revocation");
+                let elapsed = started.elapsed();
+                drop(session);
+                if cancelled {
+                    drop(status_guard);
+                    return Err(error("Extension call cancelled due to revocation"));
+                }
+                if let Some(guard) = status_guard {
+                    guard.finish_error(transport::classify_error(&err), Some(elapsed.as_millis() as u64));
+                }
+                return Ok(connection_error_report(
+                    name,
+                    transport_label,
+                    Some(protocol_version),
+                    None,
+                    server.stdio.as_ref().map(|s| s.executable_sha256.as_str()),
+                    &err,
+                    elapsed,
+                ));
+            }
+        };
+        if cancel.is_some_and(CancellationToken::is_cancelled) {
+            drop(session);
+            drop(status_guard);
+            return Err(error("Extension call cancelled due to revocation"));
+        }
+        let latency_ms = started.elapsed().as_millis() as u64;
+        let mut report = match catalog_report(server, &live) {
+            Ok(report) => report,
+            Err(err) => {
+                if let Some(guard) = status_guard {
+                    guard.finish_error(transport::classify_error(&err), Some(latency_ms));
+                }
+                return Err(err);
+            }
+        };
+        let drift = has_approved_descriptor_drift(&report);
+        if let Some(guard) = status_guard {
+            if drift {
+                guard.finish_error("descriptor_hash_drift", Some(latency_ms));
+            } else {
+                guard.finish_ready(latency_ms);
+            }
+        }
+        report.extend([
+            ("server".to_owned(), json!(name)),
+            ("transport".to_owned(), json!(transport_label)),
+            ("protocol_version".to_owned(), json!(protocol_version)),
+            ("latency_ms".to_owned(), json!(latency_ms)),
+            ("ok".to_owned(), json!(!drift)),
+            ("status".to_owned(), json!(if drift { "descriptor_drift" } else { "ok" })),
+            ("error_class".to_owned(), if drift { json!("descriptor_hash_drift") } else { Value::Null }),
+            ("config_sha256".to_owned(), json!(config_sha256)),
+        ]);
+        if let Some(gen_id) = generation {
+            report.insert("generation".to_owned(), json!(gen_id));
+        }
+        if let Some(spec) = &server.stdio {
+            report.insert("executable_sha256".to_owned(), json!(spec.executable_sha256));
+            report.insert("stderr_bytes".to_owned(), json!(session.stderr_bytes().unwrap_or(0)));
+        }
         Ok(Value::Object(report))
     }
 
     /// One session over the server's own transport. A stdio server needs
     /// the launcher the CLI attaches; nothing is started without it.
     fn open_session(&self, server: &Server) -> Result<transport::Session> {
+        self.open_session_cancellable(server, None)
+    }
+
+    fn open_session_cancellable(
+        &self,
+        server: &Server,
+        cancel: Option<&CancellationToken>,
+    ) -> Result<transport::Session> {
         match (&server.endpoint, &server.stdio) {
             (Some(endpoint), None) =>
-                transport::Session::open(endpoint, server.bearer_env.as_deref(), &server.header_env),
+                transport::Session::open_cancellable(endpoint, server.bearer_env.as_deref(), &server.header_env, cancel),
             (None, Some(spec)) => {
                 let launcher = self.stdio_launcher.as_deref()
                     .ok_or_else(|| error("Stdio extensions are unavailable in this context"))?;
                 // An idle pooled child yields its slot to any new session.
                 if stdio::slots_exhausted() { pool::evict_idle_stdio(); }
-                transport::Session::open_stdio(spec, launcher, &|name| std::env::var_os(name))
+                transport::Session::open_stdio_cancellable(spec, launcher, &|name| std::env::var_os(name), cancel)
             }
             _ => Err(error("Invalid extension server entry")),
         }
@@ -413,6 +690,19 @@ impl Registry {
                 }
             }
             for (name, tool) in &server.tools {
+                if let Some(policy) = &tool.result_filter { policy.validate()?; }
+                if let Some(cache)=tool.result_cache {
+                    if !tool.descriptor.as_ref().is_some_and(|d|cache.valid(d)) {
+                        return Err(error("Result cache requires a pinned read-only descriptor and local read-only policy"));
+                    }
+                    // A mutable outbound credential can change outside the
+                    // inbound grant. Do not retain results for those HTTP
+                    // configurations until outbound identity is fenced.
+                    if server.bearer_env.is_some() || !server.header_env.is_empty() ||
+                        server.stdio.as_ref().is_some_and(|spec|!spec.env.is_empty() || spec.inherit_path) {
+                        return Err(error("Result cache requires a fixed extension without mutable credential or PATH references"));
+                    }
+                }
                 if let Some(descriptor) = &tool.descriptor {
                     if descriptor.get("name").and_then(Value::as_str) != Some(name)
                         || descriptor_hash(descriptor) != tool.descriptor_sha256 {
@@ -461,14 +751,21 @@ impl Registry {
         if server.endpoint.as_deref() != Some(docs.endpoint) || server.bearer_env.is_some() {
             return Err(error("Documentation refresh requires the exact public tokenless endpoint"));
         }
+        let started = std::time::Instant::now();
         let mut session = transport::Session::open(docs.endpoint, None, &BTreeMap::new())?;
         let live = session.catalog()?;
+        let latency_ms = started.elapsed().as_millis() as u64;
         let mut report = catalog_report(server, &live)?;
+        let drift = has_approved_descriptor_drift(&report);
         report.extend([
             ("server".to_owned(), json!(name)),
             ("endpoint".to_owned(), json!(docs.endpoint)),
             ("transport".to_owned(), json!("mcp_streamable_http_tools_list")),
             ("protocol_version".to_owned(), json!(session.protocol_version())),
+            ("latency_ms".to_owned(), json!(latency_ms)),
+            ("ok".to_owned(), json!(!drift)),
+            ("status".to_owned(), json!(if drift { "descriptor_drift" } else { "ok" })),
+            ("error_class".to_owned(), if drift { json!("descriptor_hash_drift") } else { Value::Null }),
         ]);
         Ok(Value::Object(report))
     }
@@ -683,9 +980,35 @@ impl Registry {
     }
 
     pub fn call(&self, qualified: &str, args: &Map<String,Value>, scope: ToolScope) -> Result<Value> {
-        // Idle sessions of removed, disabled or changed servers close first,
-        // even when this call is refused.
-        if let Some(pool) = &self.session_pool { pool.retain(&self.session_keys()?); }
+        self.call_cancellable(qualified, args, scope, None)
+    }
+
+    pub fn call_cancellable(
+        &self,
+        qualified: &str,
+        args: &Map<String,Value>,
+        scope: ToolScope,
+        cancel: Option<&CancellationToken>,
+    ) -> Result<Value> {
+        self.call_inner(qualified, args, scope, cancel, false, None)
+    }
+
+    pub(crate) fn call_managed(
+        &self, qualified: &str, args: &Map<String, Value>, scope: ToolScope,
+        cancel: &CancellationToken, cache: Option<&CacheRequest>,
+    ) -> Result<Value> {
+        self.call_inner(qualified, args, scope, Some(cancel), true, cache)
+    }
+
+    fn call_inner(
+        &self, qualified: &str, args: &Map<String, Value>, scope: ToolScope,
+        cancel: Option<&CancellationToken>, managed: bool, cache: Option<&CacheRequest>,
+    ) -> Result<Value> {
+        // Only the live registry owns its pool's eviction policy. An old
+        // snapshot must never prune the new generation's idle entries.
+        if !managed {
+            if let Some(pool) = &self.session_pool { let _ = pool.retain(&self.session_keys()?); }
+        }
         let (server_id, name) = qualified.split_once(':').ok_or_else(||error("An exact qualified tool name is required"))?;
         let (server, approval) = self.servers.get(server_id).and_then(|s| s.tools.get(name).map(|a|(s,a)))
             .ok_or_else(|| error("Individual tool approval required"))?;
@@ -703,39 +1026,170 @@ impl Registry {
             return Err(error("Public documentation search requires one approved public query"));
         }
         if server.disabled { return Err(error("Extension disabled by the operator")); }
+        if cancel.is_some_and(CancellationToken::is_cancelled) {
+            return Err(error("Extension call cancelled due to revocation"));
+        }
         // A pooled child is reused only where a new one could be launched.
         if server.stdio.is_some() && self.stdio_launcher.is_none() {
             return Err(error("Stdio extensions are unavailable in this context"));
         }
+        let server_sha = self.server_sha256(server_id)?;
+        let status_guard = self.status_tracker.as_ref()
+            .map(|tracker| tracker.begin_starting_for(server_id, server_sha.as_deref(), cancel));
+        let started = std::time::Instant::now();
         let pool = self.session_pool.as_ref();
         let key = pool.map(|_| self.session_key(server_id)).transpose()?;
         // A reused session that fails before the tool call is replaced once.
         // Listing is read-only, so the replacement cannot repeat an effect.
-        let reused = pool.zip(key.as_deref()).and_then(|(pool, key)| pool.take(key));
-        let (mut session, descriptor) = match reused.map(|mut session| (session.tool(name), session)) {
+        let reused = pool.zip(key.as_deref()).and_then(|(pool, key)| pool.take(key, cancel));
+        let (mut session, descriptor) = match reused.map(|mut session| (session.tool_cancellable(name, cancel), session)) {
             Some((Ok(descriptor), session)) => (session, descriptor),
             stale => {
                 // The broken child closes before its replacement takes a slot.
                 drop(stale);
-                let mut session = self.open_session(server)?;
-                let descriptor = session.tool(name)?;
+                let mut session = match self.open_session_cancellable(server, cancel) {
+                    Ok(session) => session,
+                    Err(err) => {
+                        if let Some(guard) = status_guard {
+                            guard.finish_error(transport::classify_error(&err), Some(started.elapsed().as_millis() as u64));
+                        }
+                        return Err(err);
+                    }
+                };
+                let descriptor = match session.tool_cancellable(name, cancel) {
+                    Ok(descriptor) => descriptor,
+                    Err(err) => {
+                        if let Some(guard) = status_guard {
+                            guard.finish_error(transport::classify_error(&err), Some(started.elapsed().as_millis() as u64));
+                        }
+                        return Err(err);
+                    }
+                };
                 (session, descriptor)
             }
         };
         let give_back = |session: transport::Session| {
-            if let (Some(pool), Some(key)) = (pool, &key) { pool.put(key.clone(), server.stdio.is_some(), session); }
+            if cancel.is_some_and(CancellationToken::is_cancelled) {
+                drop(session);
+                return;
+            }
+            if let (Some(pool), Some(key)) = (pool, &key) { pool.put(key.clone(), server.stdio.is_some(), session, cancel); }
         };
         if let Err(refusal) = admit(&descriptor, approval, args) {
+            let class = if descriptor_hash(&descriptor) != approval.descriptor_sha256 {
+                "descriptor_hash_drift"
+            } else {
+                "catalog_failed"
+            };
+            if let Some(guard) = status_guard {
+                guard.finish_error(class, Some(started.elapsed().as_millis() as u64));
+            }
             give_back(session);
             return Err(refusal);
         }
+        // Cache is strictly downstream of the real admission, journal and
+        // fresh upstream descriptor pin/schema checks, never a substitute.
+        let flight=cache.zip(approval.result_cache)
+            .filter(|(_,policy)|managed && policy.valid(&descriptor))
+            .and_then(|(request,policy)|request.tool(server_id,name,&approval.descriptor_sha256,args,policy));
+        if let Some(value)=flight.as_ref().and_then(|f|f.get(std::time::Instant::now(),cancel)){
+            if let Some(guard)=status_guard {
+                guard.finish_ready(started.elapsed().as_millis() as u64);
+            }
+            give_back(session);
+            if cancel.is_some_and(CancellationToken::is_cancelled){
+                return Err(error("Extension call cancelled due to revocation"));
+            }
+            return Ok(value);
+        }
         // There is exactly one effectful request, including on disconnect.
         // A failed call drops its session; only a confirmed reply returns it.
-        let response = session.call_tool(name, args.clone())
-            .map_err(|_| error("Extension outcome uncertain; do not replay the request"))?;
+        let response = match session.call_tool_cancellable(name, args.clone(), cancel) {
+            Ok(response) => {
+                if let Some(guard) = status_guard {
+                    guard.finish_ready(started.elapsed().as_millis() as u64);
+                }
+                response
+            }
+            Err(err) => {
+                let cancelled = cancel.is_some_and(CancellationToken::is_cancelled)
+                    || err.to_string().contains("cancelled due to revocation");
+                if let Some(guard) = status_guard {
+                    let class = if cancelled { "revoked_cancelled" } else { transport::classify_error(&err) };
+                    guard.finish_error(class, Some(started.elapsed().as_millis() as u64));
+                }
+                if cancelled {
+                    return Err(error("Extension call cancelled due to revocation"));
+                }
+                return Err(error("Extension outcome uncertain; do not replay the request"));
+            }
+        };
         give_back(session);
-        Ok(response)
+        if cancel.is_some_and(CancellationToken::is_cancelled) {
+            // A response observed during revocation is not permission to
+            // repeat a possibly completed upstream effect.
+            return Err(error("Extension call cancelled due to revocation; outcome may be uncertain; do not replay"));
+        }
+        // Remember only the upstream success bit, before a result policy
+        // can remove fields. Never cache errors even if a filter masks them.
+        let success=response.as_object().is_some_and(|r|
+            r.get("isError").is_none_or(|v|v==&Value::Bool(false)) &&
+            !r.contains_key("error") && !r.contains_key("is_error"));
+        // Never store the upstream response. Only this final, successful
+        // #186 policy result may enter the bounded cache.
+        let filtered=approval.result_filter.as_ref().unwrap_or(&result_policy::ResultPolicy::default()).apply(response)?;
+        if success {
+            if let Some(flight)=flight {
+                flight.publish_filtered(&filtered,std::time::Instant::now(),cancel);
+            }
+        }
+        Ok(filtered)
     }
+}
+
+/// Returns `true` if `new` grants any server, enabled state, tool, transport
+/// endpoint/pin/credential reference, or parameter range beyond `old`.
+pub(crate) fn authority_widens(old: &Registry, new: &Registry) -> Result<bool> {
+    for (name, new_srv) in &new.servers {
+        if new_srv.disabled {
+            continue;
+        }
+        let Some(old_srv) = old.servers.get(name) else {
+            return Ok(true);
+        };
+        if old_srv.disabled {
+            return Ok(true);
+        }
+        if new_srv.endpoint != old_srv.endpoint
+            || new_srv.stdio != old_srv.stdio
+            || new_srv.bearer_env != old_srv.bearer_env
+            || new_srv.header_env != old_srv.header_env
+        {
+            return Ok(true);
+        }
+        for (tool_name, new_app) in &new_srv.tools {
+            let Some(old_app) = old_srv.tools.get(tool_name) else {
+                return Ok(true);
+            };
+            if new_app.result_cache != old_app.result_cache { return Ok(true); }
+            if serde_json::to_value(&new_app.result_filter).map_err(|_|error("Invalid result policy"))?
+                != serde_json::to_value(&old_app.result_filter).map_err(|_|error("Invalid result policy"))? {
+                return Ok(true);
+            }
+            if new_app.descriptor_sha256 != old_app.descriptor_sha256 {
+                return Ok(true);
+            }
+            for (param_name, new_param) in &new_app.parameters {
+                let Some(old_param) = old_app.parameters.get(param_name) else {
+                    return Ok(true);
+                };
+                if !new_param.is_subset_of(old_param) {
+                    return Ok(true);
+                }
+            }
+        }
+    }
+    Ok(false)
 }
 
 /// The live descriptor must match its pin and grant before the one call.
@@ -796,6 +1250,45 @@ fn catalog_report(server: &Server, live: &[Value]) -> Result<Map<String, Value>>
         "tool_invoked":false
     });
     Ok(report.as_object().cloned().unwrap_or_default())
+}
+
+fn has_approved_descriptor_drift(report: &Map<String, Value>) -> bool {
+    report.get("approved_tools")
+        .and_then(Value::as_array)
+        .is_some_and(|tools| tools.iter().any(|entry| entry.get("status").and_then(Value::as_str) != Some("unchanged")))
+}
+
+fn connection_error_report(
+    name: &str,
+    transport: &str,
+    protocol_version: Option<String>,
+    stderr_bytes: Option<u64>,
+    executable_sha256: Option<&str>,
+    err: &io::Error,
+    elapsed: std::time::Duration,
+) -> Value {
+    let mut report = json!({
+        "ok": false,
+        "status": "error",
+        "error_class": transport::classify_error(err),
+        "latency_ms": elapsed.as_millis() as u64,
+        "server": name,
+        "transport": transport,
+        "protocol_version": protocol_version,
+        "remote_refreshed": false,
+        "operator_approval_required_for_any_new_scope": true,
+        "approved_grants_changed": false,
+        "registry_changed": false,
+        "oauth_used": false,
+        "tool_invoked": false
+    });
+    if let Some(sha) = executable_sha256 {
+        report["executable_sha256"] = json!(sha);
+    }
+    if let Some(bytes) = stderr_bytes {
+        report["stderr_bytes"] = json!(bytes);
+    }
+    report
 }
 
 /// Only granted parameters are ever sent, so only they must be plain data

@@ -8,6 +8,7 @@ publish = false
 
 [dependencies]
 agent-bridge-core = { path = "../core" }
+agent-bridge-leases = { path = "../leases" }
 chrono.workspace = true
 rand = "0.10"
 rusqlite = { version = "0.43", features = ["bundled", "serde_json"] }
