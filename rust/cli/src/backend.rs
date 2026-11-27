@@ -100,7 +100,7 @@ pub struct ShutdownReport { pub clean: bool }
 #[derive(Serialize)]
 pub struct OperatorReply { pub status: u16, pub body: Value }
 #[derive(Clone, Copy)]
-pub enum OperatorRead { Overview, Profile, Missions, OAuth, Extensions, Skills, Diagnostics }
+pub enum OperatorRead { Overview, Profile, Missions, OAuth, Extensions, Skills, Diagnostics, Sessions }
 #[derive(Clone, Copy)]
 pub enum OperatorWrite { SetProfile, OAuthEnroll, OAuthApprove, ExtensionsDecide, SkillsAction }
 

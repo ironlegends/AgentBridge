@@ -29,6 +29,7 @@ fn operator_read(runtime: &AppRuntime, operation: OperatorRead) -> Result<Value,
         OperatorRead::Missions => "/api/missions", OperatorRead::OAuth => "/api/oauth",
         OperatorRead::Extensions => "/api/extensions", OperatorRead::Skills => "/api/skills",
         OperatorRead::Diagnostics => "/api/diagnostics",
+        OperatorRead::Sessions => "/api/sessions",
     };
     runtime.operator.client()?.get(path)
 }
@@ -1057,6 +1058,48 @@ pub fn run_skill_action(
     manager
         .dispatch(&Value::Object(args))
         .map_err(|e| e.to_string())
+}
+
+fn map_sessions(value: Value) -> Value {
+    // The operator snapshot contains only schema-defined keys.
+    match value {
+        Value::Array(values) => Value::Array(values.into_iter().map(map_sessions).collect()),
+        Value::Object(fields) => Value::Object(fields.into_iter().map(|(key, value)| {
+            let mut words = key.split('_');
+            let mut camel = words.next().unwrap_or_default().to_owned();
+            for word in words {
+                let mut chars = word.chars();
+                if let Some(first) = chars.next() {
+                    camel.push(first.to_ascii_uppercase());
+                    camel.push_str(chars.as_str());
+                }
+            }
+            (camel, map_sessions(value))
+        }).collect()),
+        value => value,
+    }
+}
+
+pub fn get_sessions(runtime: &AppRuntime) -> Result<Value, String> {
+    if runtime.is_live() {
+        return Ok(match operator_read(runtime, OperatorRead::Sessions) {
+            Ok(snapshot) if snapshot["available"] == true => map_sessions(snapshot),
+            _ => json!({ "available": false, "reason": "The workstation session view is unavailable." }),
+        });
+    }
+    let path = runtime.settings.lock().map_err(|_| "Settings lock poisoned".to_owned())?
+        .database_path.clone();
+    let mut snapshot = json!({ "available": false, "reason": "The workstation is not running." });
+    if !path.is_empty() {
+        if let Ok(db) = CoreDatabase::open_existing_read_only(Path::new(&path)) {
+            if let Ok((_, earlier)) = agent_bridge_missions::operator::inspect_session_contexts(
+                db.connection(), &[], Some(&Default::default()), 1_900_000,
+            ) {
+                snapshot["earlier"] = map_sessions(json!(earlier));
+            }
+        }
+    }
+    Ok(snapshot)
 }
 
 pub fn get_diagnostics(runtime: &AppRuntime) -> Result<Value, String> {

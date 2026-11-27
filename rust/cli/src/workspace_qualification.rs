@@ -110,6 +110,14 @@ pub(super) fn qualify(
     Ok(workspace)
 }
 
+pub(super) fn check_session_descriptor(workspace: &Path, descriptor: &Path) -> Result<()> {
+    let directory = descriptor.parent().ok_or_else(|| fail(
+        "WORKSPACE_REFERENCE_UNAVAILABLE", "The operator descriptor needs a private directory",
+    ))?;
+    reject_overlap(&compare_key(workspace)?, directory, "WORKSPACE_OVERLAPS_SESSION_DESCRIPTOR",
+        "the private operator session descriptor directory")
+}
+
 fn reject_overlap(
     workspace: &[String],
     reference: &Path,

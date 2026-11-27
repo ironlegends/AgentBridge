@@ -91,6 +91,16 @@ impl CoreDatabase {
         Ok(Self { path, connection, _authority_file: None })
     }
 
+    /// Open an offline database for inspection without creating SQLite files.
+    pub fn open_existing_read_only(path: impl AsRef<Path>) -> Result<Self> {
+        let path = qualified_path(path.as_ref())?;
+        let (connection, status) = inspect_connection(&path)?;
+        if status.version != CURRENT_SCHEMA_VERSION {
+            return Err(CoreError::IncompatibleSchema("migration required before opening"));
+        }
+        Ok(Self { path, connection, _authority_file: None })
+    }
+
     /// Create a database only if the target path does NOT exist. The parent
     /// directory must already exist and must not traverse links/reparse points.
     /// WAL is enabled as in the C# Core, followed by all seven migrations in
@@ -233,8 +243,12 @@ pub fn physical_file_identity(file:&std::fs::File)->Result<String> {
 /// version may be 1..7; gaps, unknown versions and mismatched checksums fail.
 pub fn inspect_existing(path: impl AsRef<Path>) -> Result<SchemaStatus> {
     let path = qualified_path(path.as_ref())?;
-    preflight_existing(&path)?;
-    let uri = immutable_uri(&path)?;
+    inspect_connection(&path).map(|(_, status)| status)
+}
+
+fn inspect_connection(path: &Path) -> Result<(Connection, SchemaStatus)> {
+    preflight_existing(path)?;
+    let uri = immutable_uri(path)?;
     let connection = Connection::open_with_flags(
         Path::new(&uri),
         OpenFlags::SQLITE_OPEN_READ_ONLY
@@ -243,7 +257,8 @@ pub fn inspect_existing(path: impl AsRef<Path>) -> Result<SchemaStatus> {
     )?;
     connection.busy_timeout(Duration::from_secs(3))?;
     connection.execute_batch("PRAGMA query_only=ON; PRAGMA foreign_keys=ON;")?;
-    validate_schema(&connection)
+    let status = validate_schema(&connection)?;
+    Ok((connection, status))
 }
 
 fn open_read_write(path: &Path) -> Result<Connection> {

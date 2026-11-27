@@ -20,8 +20,11 @@ const PROFILES: [&str; 4] = ["read-only", "workspace-write", "full-control", "fu
 struct ConnectionConfig {
     version: u32,
     control_port: u16,
+    #[serde(default)]
     gateway_port: u16,
     stdout_log: PathBuf,
+    #[serde(default)]
+    session_view_only: bool,
     #[serde(default)]
     supervisor: Option<SupervisorConfig>,
 }
@@ -129,7 +132,9 @@ fn read_config(path: &Path) -> Result<ConnectionConfig, String> {
     }
     let config: ConnectionConfig = serde_json::from_slice(&bytes)
         .map_err(|_| "Invalid operator connection configuration.")?;
-    if config.version != 1 || config.control_port == 0 || config.gateway_port == 0
+    if config.version != 1 || config.control_port == 0
+        || (!config.session_view_only && config.gateway_port == 0)
+        || (config.session_view_only && config.supervisor.is_some())
         || config.control_port == config.gateway_port || !local_absolute_path(&config.stdout_log)
     {
         return Err("Invalid operator connection configuration.".to_owned());
@@ -146,7 +151,7 @@ impl OperatorClient {
     pub fn supervisor(&self) -> Option<&SupervisorConfig> { self.config.supervisor.as_ref() }
 
     pub fn supports_shutdown(&self) -> bool {
-        self.session_record().is_ok_and(|record| record.shutdown_control)
+        !self.config.session_view_only && self.session_record().is_ok_and(|record| record.shutdown_control)
     }
 
     fn session_token(&self) -> Result<String, String> { Ok(self.session_record()?.token) }
@@ -170,10 +175,17 @@ impl OperatorClient {
             .find(|record| record["service"] == "agent-bridge-ui")
             .ok_or("No operator session record is available in the selected log.")?;
         let listen = format!("127.0.0.1:{}", self.config.control_port);
+        let matching_mode = if self.config.session_view_only {
+            record["session_view_only"] == true
+                && record["live_profile_control"] == false
+                && record["workstation_shutdown_control"] == false
+        } else {
+            record["live_profile_control"] == true && record["session_view_only"] != true
+        };
         if record["listen"].as_str() != Some(listen.as_str())
             || record["token_required"] != true
             || record["loopback_only"] != true
-            || record["live_profile_control"] != true
+            || !matching_mode
         {
             return Err("The latest operator session does not match the attached workstation.".to_owned());
         }
@@ -189,7 +201,7 @@ impl OperatorClient {
 
     pub fn get(&self, path: &'static str) -> Result<Value, String> {
         if !matches!(path, "/api/profile" | "/api/overview" | "/api/missions" | "/api/oauth"
-            | "/api/extensions" | "/api/skills" | "/api/diagnostics")
+            | "/api/extensions" | "/api/skills" | "/api/diagnostics" | "/api/sessions")
         {
             return Err("Unsupported local operator read operation.".to_owned());
         }
@@ -209,6 +221,9 @@ impl OperatorClient {
     }
 
     fn request(&self, method: &str, path: &str, body: Option<Value>) -> Result<Value, String> {
+        if self.config.session_view_only && (method != "GET" || path != "/api/sessions") {
+            return Err("This local attachment only provides the session view.".to_owned());
+        }
         let token = self.session_token()?;
         let payload = body.map(|value| value.to_string()).unwrap_or_default();
         if payload.len() > MAX_REQUEST_BYTES {

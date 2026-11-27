@@ -210,6 +210,28 @@ pub fn require_context(conn: &Connection, handle: &str) -> Result<String> {
     Ok(hash)
 }
 
+/// Telemetry is best effort. Locks or read-only connections cannot change
+/// the authorization decision or the result of the caller's operation.
+pub(crate) fn note_context_use(conn: &Connection, hash: &str) -> Option<String> {
+    let (id, touch): (String, bool) = conn.query_row(
+        "SELECT context_id, last_seen IS NULL OR
+            julianday(last_seen) < julianday(datetime('now', '-60 seconds'))
+         FROM agent_contexts WHERE handle_hash=?1",
+        [hash],
+        |row| Ok((row.get(0)?, row.get::<_, Option<bool>>(1)?.unwrap_or(true))),
+    ).ok()?;
+    if touch {
+        // Recheck under the SQLite write lock for concurrent connections.
+        let _ = conn.execute(
+            "UPDATE agent_contexts SET last_seen=?1 WHERE context_id=?2 AND handle_hash=?3
+             AND (julianday(last_seen) IS NULL OR
+                  julianday(last_seen) < julianday(datetime(?1, '-60 seconds')))",
+            params![now(), id, hash],
+        );
+    }
+    Some(id)
+}
+
 pub fn membership(tx: &Connection, mission: &str, actor_hash: &str, owner_only: bool) -> Result<()> {
     let membership: Option<(String, String)> = tx.query_row(
         "SELECT role,state FROM mission_memberships WHERE mission_id=?1 AND context_hash=?2",

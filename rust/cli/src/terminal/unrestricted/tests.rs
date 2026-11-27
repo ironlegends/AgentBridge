@@ -6,6 +6,7 @@ use std::io::{BufRead, Write};
 use crate::test_process_fixture::{program as fixture_program, args as fixture_args};
 
 struct Harness {
+    catalog: Vec<ToolDefinition>,
     handlers: ToolMapHandler,
     profile: Arc<RwLock<DesktopProfile>>,
     supervisor: SessionSupervisor,
@@ -18,7 +19,7 @@ impl Harness {
         let supervisor = attach(&std::env::temp_dir(), &mut catalog, &mut handlers,
             Arc::clone(&profile)).unwrap();
         assert_eq!(catalog.len(), 4);
-        Self { handlers, profile, supervisor }
+        Self { catalog, handlers, profile, supervisor }
     }
     fn call(&self, name: &str, arguments: Value) -> (bool, Value) {
         let result = self.handlers.call(name, arguments.as_object().unwrap().clone()).unwrap();
@@ -64,6 +65,56 @@ impl Harness {
         }
         path
     }
+}
+
+#[test]
+fn connected_sessions_shows_fixed_process_label_without_launch_details() {
+    use crate::client_sessions::{Client, ClientSessions};
+    use agent_bridge_gateway::{GatewayConfig, McpGateway};
+
+    let mut harness = Harness::new();
+    let router = McpGateway::new(
+        GatewayConfig::new("example", "1"), harness.catalog.clone(), harness.handlers.clone(),
+    );
+    let registry = ClientSessions::default();
+    let program = fixture_program();
+    let frame = json!({
+        "jsonrpc":"2.0", "id":1, "method":"tools/call", "params":{
+            "name":"desktop_start_process", "arguments":{
+                "program":program,
+                "args":fixture_args("terminal::unrestricted::tests::child_fixture", &["--skip", "example-argument-marker"]),
+                "timeout_ms":2000,
+            }
+        }
+    }).to_string();
+    let result = registry.dispatch(Client::Local("stdio"), &router, &frame, usize::MAX,
+        || router.handle_str(&frame)).unwrap();
+    let response: Value = serde_json::from_str(&result).unwrap();
+    assert_ne!(response["result"]["isError"], true, "{response}");
+    let result: Value = serde_json::from_str(response["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+    let id = result["session_id"].as_str().unwrap();
+    let snapshot = registry.snapshot("example-boot", None, None).unwrap();
+    let session = &snapshot["sessions"][0];
+    assert_eq!(session["commands"][0]["program"], "Process");
+    let display_id = session["commands"][0]["id"].as_str().unwrap();
+    assert_eq!(session["terminal_session_ids"], json!([display_id]));
+    assert_ne!(display_id, id);
+    assert!(!valid_session_id(display_id));
+    assert_eq!(session["commands"][0]["state"], "running");
+    let basename = Path::new(&program).file_name().unwrap().to_str().unwrap();
+    assert!(session["commands"][0]["started_at"].as_str().unwrap().ends_with('Z'));
+    let text = snapshot.to_string();
+    assert!(!text.contains(program.to_str().unwrap()));
+    assert!(!text.contains(basename));
+    assert!(!text.contains(id));
+    assert!(!text.contains("example-argument-marker"));
+    assert!(!text.contains("fixture-ready"));
+
+    harness.supervisor.shutdown().unwrap();
+    let snapshot = registry.snapshot("example-boot", None, None).unwrap();
+    assert_eq!(snapshot["sessions"][0]["commands"][0]["id"], display_id);
+    assert_eq!(snapshot["sessions"][0]["commands"][0]["state"], "ended");
+    assert!(snapshot["sessions"][0]["commands"][0]["ended_at"].as_str().unwrap().ends_with('Z'));
 }
 
 // A fixture runs only as a child selected by the exact test name; an
@@ -236,6 +287,7 @@ fn cleanup_failure_is_not_a_confirmed_exit() {
     let session = Arc::new(Session {
         id: id.clone(),
         program: "fixture".into(),
+        command: None,
         cwd: std::env::temp_dir(),
         started: Instant::now(),
         capture: Arc::new((Mutex::new(capture), Condvar::new())),
@@ -519,7 +571,7 @@ fn supervisor_drop_stops_children_even_while_handlers_are_still_owned() {
     let h = Harness::new();
     let sid = h.start_fixture();
     let heartbeat = h.start_descendant(&sid);
-    let Harness { handlers, profile: _, supervisor } = h;
+    let Harness { handlers, supervisor, .. } = h;
     drop(supervisor);
     // Retained handler Arcs must not keep the owned process running or admit
     // another process after the lifetime owner has stopped the host.
@@ -552,7 +604,7 @@ fn failed_cleanup_survives_capacity_pressure_and_blocks_revocation() {
                 ..Default::default()
             };
             registry.sessions.insert(id.clone(), Arc::new(Session {
-                id, program: String::new(), cwd: manager.root.clone(),
+                id, program: String::new(), command: None, cwd: manager.root.clone(),
                 started: started + Duration::from_millis(index as u64),
                 capture: Arc::new((Mutex::new(capture), Condvar::new())),
                 input: Mutex::new(InputQueue { sender: None, next_id: 1, eof_queued: false }),

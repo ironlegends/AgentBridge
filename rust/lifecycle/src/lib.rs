@@ -466,6 +466,187 @@ fn write_marker<T: Serialize>(path: &Path, payload: &T) -> Result<()> {
     Ok(())
 }
 
+/// Owns the published credential for the lifetime of the session-view listener.
+#[must_use = "keep the descriptor alive while the session-view listener is running"]
+pub struct SessionViewDescriptor {
+    file: File,
+    #[cfg(unix)]
+    path: PathBuf,
+}
+
+#[cfg(windows)]
+impl Drop for SessionViewDescriptor {
+    fn drop(&mut self) {
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::Storage::FileSystem::{
+            FileDispositionInfoEx, SetFileInformationByHandle, FILE_DISPOSITION_FLAG_DELETE,
+            FILE_DISPOSITION_FLAG_ON_CLOSE, FILE_DISPOSITION_FLAG_POSIX_SEMANTICS,
+            FILE_DISPOSITION_INFO_EX,
+        };
+
+        // Release the name when this handle closes, even during an operator read.
+        // On filesystems without POSIX disposition, delete-on-close still applies.
+        let disposition = FILE_DISPOSITION_INFO_EX {
+            Flags: FILE_DISPOSITION_FLAG_DELETE | FILE_DISPOSITION_FLAG_ON_CLOSE
+                | FILE_DISPOSITION_FLAG_POSIX_SEMANTICS,
+        };
+        // The descriptor still owns the handle and the OS only reads the buffer.
+        let _ = unsafe {
+            SetFileInformationByHandle(self.file.as_raw_handle(), FileDispositionInfoEx,
+                (&disposition as *const FILE_DISPOSITION_INFO_EX).cast(),
+                std::mem::size_of_val(&disposition) as u32)
+        };
+    }
+}
+
+#[cfg(unix)]
+impl Drop for SessionViewDescriptor {
+    fn drop(&mut self) {
+        retire_unix_descriptor(&self.file, &self.path);
+    }
+}
+
+/// Move the name aside atomically, then unlink it only when it is still the
+/// owned inode. A replacement installed after publication is put back without
+/// overwriting a newer entry, and is never unlinked.
+#[cfg(unix)]
+fn retire_unix_descriptor(file: &File, path: &Path) {
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt};
+
+    let (Ok(owned), Some(parent), Ok(nonce)) = (file.metadata(), path.parent(), random_hex()) else {
+        return;
+    };
+    // A fresh owner-only directory with an unguessable name keeps the staged
+    // entry away from other writers in the descriptor directory.
+    let stage = parent.join(format!(".session-view-retired-{}", &nonce[..32]));
+    if fs::DirBuilder::new().mode(0o700).create(&stage).is_err() {
+        return;
+    }
+    // A regular-file slot makes rename(2) refuse a replacement directory
+    // atomically (ENOTDIR or EISDIR) instead of moving it aside.
+    let staged = stage.join("descriptor");
+    if OpenOptions::new().write(true).create_new(true).open(&staged).is_ok() {
+        if fs::rename(path, &staged).is_ok() {
+            match fs::symlink_metadata(&staged) {
+                Ok(current) if (owned.dev(), owned.ino()) == (current.dev(), current.ino()) => {
+                    let _ = fs::remove_file(&staged);
+                }
+                _ => {
+                    // link(2) refuses an existing target, so a newer entry stays intact.
+                    if fs::hard_link(&staged, path).is_ok() {
+                        let _ = fs::remove_file(&staged);
+                    }
+                }
+            }
+        } else {
+            let _ = fs::remove_file(&staged);
+        }
+    }
+    // Succeeds only when empty: a replacement that could not be restored keeps
+    // its staging directory instead of being deleted.
+    let _ = fs::remove_dir(&stage);
+}
+
+#[cfg(all(test, unix))]
+mod session_view_retire_tests {
+    use super::*;
+
+    fn fresh_dir() -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("ab-retire-{}", random_hex().unwrap()));
+        fs::create_dir(&dir).unwrap();
+        dir
+    }
+
+    fn leftovers(dir: &Path) -> Vec<String> {
+        fs::read_dir(dir).unwrap().map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|name| name.starts_with(".session-view-retired-")).collect()
+    }
+
+    #[test]
+    fn retiring_removes_only_the_owned_descriptor() {
+        let dir = fresh_dir();
+        let path = dir.join("session.json");
+        let owned = OpenOptions::new().read(true).write(true).create_new(true).open(&path).unwrap();
+        retire_unix_descriptor(&owned, &path);
+        assert!(!path.exists());
+        assert!(leftovers(&dir).is_empty());
+
+        let replaced = OpenOptions::new().read(true).write(true).create_new(true).open(&path).unwrap();
+        fs::remove_file(&path).unwrap();
+        fs::write(&path, b"replacement").unwrap();
+        retire_unix_descriptor(&replaced, &path);
+        assert_eq!(fs::read(&path).unwrap(), b"replacement");
+        assert!(leftovers(&dir).is_empty());
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn retiring_leaves_a_replacement_directory_or_symlink_in_place() {
+        let dir = fresh_dir();
+        let path = dir.join("session.json");
+        let owned = OpenOptions::new().read(true).write(true).create_new(true).open(&path).unwrap();
+        fs::remove_file(&path).unwrap();
+        fs::create_dir(&path).unwrap();
+        fs::write(path.join("kept"), b"data").unwrap();
+        retire_unix_descriptor(&owned, &path);
+        assert_eq!(fs::read(path.join("kept")).unwrap(), b"data");
+        assert!(leftovers(&dir).is_empty());
+
+        fs::remove_dir_all(&path).unwrap();
+        let target = dir.join("target.json");
+        fs::write(&target, b"target").unwrap();
+        std::os::unix::fs::symlink(&target, &path).unwrap();
+        retire_unix_descriptor(&owned, &path);
+        assert!(fs::symlink_metadata(&path).unwrap().file_type().is_symlink());
+        assert_eq!(fs::read(&target).unwrap(), b"target");
+        assert!(leftovers(&dir).is_empty());
+        fs::remove_dir_all(&dir).unwrap();
+    }
+}
+
+/// Publish a local session-view credential into an existing owner-private
+/// directory. The selected file must not exist. Dropping the owner removes it.
+pub fn publish_session_view_descriptor(
+    path: &Path, record: &serde_json::Value,
+) -> Result<SessionViewDescriptor> {
+    let directory = path.parent().ok_or(LifecycleError::Invalid("operator descriptor directory required"))?;
+    let directory = valid_root(directory, false)?;
+    let name = path.file_name().and_then(|name| name.to_str())
+        .filter(|name| name.len() <= 128 && name.ends_with(".json")
+            && name.bytes().all(|byte| byte.is_ascii_alphanumeric() || b"-_.".contains(&byte)))
+        .ok_or(LifecycleError::Invalid("invalid operator descriptor filename"))?;
+    let bytes = serde_json::to_vec(record)?;
+    if bytes.len() > MAX_MARKER_BYTES as usize {
+        return Err(LifecycleError::Invalid("operator descriptor exceeds limit"));
+    }
+    let mut options = OpenOptions::new();
+    options.read(true).write(true).create_new(true);
+    #[cfg(unix)]
+    platform::private_open_options(&mut options);
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Foundation::{GENERIC_READ, GENERIC_WRITE};
+        use windows_sys::Win32::Storage::FileSystem::{
+            DELETE, FILE_FLAG_DELETE_ON_CLOSE, FILE_FLAG_OPEN_REPARSE_POINT,
+        };
+
+        // Remove the exact file object owned by this handle at close.
+        options.access_mode(GENERIC_READ | GENERIC_WRITE | DELETE)
+            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_DELETE_ON_CLOSE);
+    }
+    let path = directory.join(name);
+    let mut descriptor = SessionViewDescriptor {
+        file: options.open(&path)?,
+        #[cfg(unix)]
+        path,
+    };
+    platform::verify_private_handle(&descriptor.file, false)?;
+    descriptor.file.write_all(&bytes)?;
+    descriptor.file.sync_all()?;
+    Ok(descriptor)
+}
+
 fn open_lock(path: &Path) -> Result<File> {
     if existing_file(path)? {
         return lock_file(path, false);

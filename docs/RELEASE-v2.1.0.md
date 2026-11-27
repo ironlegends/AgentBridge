@@ -1,5 +1,7 @@
 # v2.1.0 Release
 
+This historical record describes the 2.1.0 release. Later releases have their own notes; the [README](../README.md) links the current one.
+
 ## Status
 
 The Rust CLI and native desktop manifests are aligned at **2.1.0**, the current stable release for **Windows x64**. It follows the `2.1.0-alpha.1`, `2.1.0-beta.1` and `2.1.0-rc.1` pre-releases; the release candidate ran on the operator workstation before this release. The release comprises the portable desktop ZIP (application, pinned browser and native resource bundles, notices and `release-manifest.json`), the canonical source ZIP, the MPL-2.0 source companion and a detached ECDSA P-256 signature over their SHA-256 checksums, made with the same release key as 2.0.0 (`licenses/agent-bridge-release-public.pem`). The packaged build reports `"channel":"stable"`. The executables are not Authenticode-signed. No prebuilt CLI binary is published; build the CLI from source. Linux and macOS remain experimental. Exact artifact hashes are published with the GitHub release.

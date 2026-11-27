@@ -142,6 +142,10 @@ pub fn inspect_revision(project: &Path, database: &Path, settings: &Path) -> Res
 }
 
 pub fn missions(database_path: &Path) -> Result<Router, RuntimeError> {
+    mission_transport(database_path).map(|(router, _)| router)
+}
+
+fn mission_transport(database_path: &Path) -> Result<(Router, SharedCoreDatabase), RuntimeError> {
     // Mission-only HTTP has no workstation sessions or watchdog to keep.
     let mut supervisors = Vec::new();
     open_qualified(database_path, None, None, None, None, None,
@@ -789,7 +793,7 @@ fn open_qualified(
     #[cfg(any(windows, unix))] native_chrome_approval: Option<crate::browser_docs::interactive::LocalInteractiveApproval>,
     // Owned by serve_stdio. Drop is a safe fallback on early failures.
     supervisors: &mut Vec<crate::terminal::SessionSupervisor>,
-) -> Result<Router, RuntimeError> {
+) -> Result<(Router, SharedCoreDatabase), RuntimeError> {
     // Every supplementary workstation family is opt-in on the LOCAL process
     // command line. Browser readers are distinct source-confined providers;
     // their three handler names cannot be registered simultaneously.
@@ -819,7 +823,9 @@ fn open_qualified(
         let name = tool.name.clone();
         handlers.register(name.clone(), move |args| {
             let mut db = connection.lock().map_err(|_| ToolDispatchError::internal("Core unavailable"))?;
-            let result = agent_bridge_missions::dispatch_tool(db.connection_mut(), &name, &Value::Object(args));
+            let result = agent_bridge_missions::dispatch_tool_observed(
+                db.connection_mut(), &name, &Value::Object(args), crate::client_sessions::link_context,
+            );
             match result {
                 Ok(value) => Ok(ToolCallResult::text(value.to_string())),
                 Err(error) => Ok(ToolCallResult::tool_error(format!("CORE_{}: {}", error.code, error.message))),
@@ -875,7 +881,11 @@ fn open_qualified(
             "channel": channel, "production": production
         }).to_string()))
     });
-    Ok(McpGateway::new(GatewayConfig::new("agent-bridge", version).with_catalog_ttl_ms(CATALOG_TTL_MS), catalog, handlers))
+    let router = McpGateway::new(
+        GatewayConfig::new("agent-bridge", version).with_catalog_ttl_ms(CATALOG_TTL_MS),
+        catalog, handlers,
+    );
+    Ok((router, database))
 }
 
 pub fn serve_stdio(
@@ -887,7 +897,9 @@ pub fn serve_stdio(
     local_learn_url: Option<String>,
     native_chrome_pages: Vec<String>,
     native_chrome_origins: Vec<String>,
+    ui: Option<(u16, &Path)>,
 ) -> Result<(), RuntimeError> {
+    if let Some((port, _)) = ui { check_port(port)?; }
     #[cfg(not(any(windows, unix)))]
     if !native_chrome_pages.is_empty() || !native_chrome_origins.is_empty() {
         return Err("Native Chrome interactive provider is unavailable on this platform".into());
@@ -911,6 +923,9 @@ pub fn serve_stdio(
         .map(|(root, _)| agent_bridge_lifecycle::workspace_access::PinnedProjectDirectory::open(root))
         .transpose()?;
     let qualified = qualified_workspace(database_path, workspace, settings)?;
+    if let (Some(work), Some((_, descriptor))) = (&qualified, ui) {
+        workspace_qualification::check_session_descriptor(&work.root, descriptor)?;
+    }
     if let Some(work) = &qualified {
         eprintln!(
             "agent-bridge: selected project workspace [{}] : {}",
@@ -967,18 +982,23 @@ pub fn serve_stdio(
         Some(approved)
     };
     let mut supervisors = Vec::new();
-    let gateway = open_qualified(
+    let (gateway, database) = open_qualified(
         database_path, qualified, settings, window_approval, docs_approval,
         learn_approval,
         #[cfg(any(windows, unix))] native_chrome_approval,
         &mut supervisors,
     )?;
-    // The first discovery or initialize fixes the protocol era of this
-    // process; a frame from the other era is refused instead of downgraded.
-    let mut era = agent_bridge_gateway::modern::StdioEra::default();
-    let served = agent_bridge_gateway::stdio::serve(
-        io::stdin().lock(), io::stdout().lock(), |frame| era.dispatch(&gateway, frame)
-    );
+    let audit = Arc::new(crate::request_audit::RequestAudit::new()?);
+    let local_view = if let Some((port, descriptor)) = ui {
+        let runtime = tokio::runtime::Builder::new_multi_thread().worker_threads(1).enable_all().build()?;
+        let view = runtime.block_on(crate::ui::start_local_session_view(
+            port, descriptor, Arc::clone(&audit), database,
+        ))?;
+        Some((runtime, view))
+    } else {
+        None
+    };
+    let served = serve_stdio_mcp(io::stdin().lock(), io::stdout().lock(), &gateway, &audit.sessions);
     // stdio EOF or an I/O error must not allow any owned child or watchdog to
     // survive the stream. Join even when the client was idle at disconnect.
     drop(gateway);
@@ -988,9 +1008,29 @@ pub fn serve_stdio(
             shutdown_failure = Some(error);
         }
     }
+    let operator_result = match local_view {
+        Some((runtime, view)) => runtime.block_on(view.stop()),
+        None => Ok(()),
+    };
     if let Some(error) = shutdown_failure { return Err(error.into()); }
+    operator_result?;
     served?;
     Ok(())
+}
+
+fn serve_stdio_mcp(
+    reader: impl io::BufRead,
+    writer: impl io::Write,
+    router: &Router,
+    sessions: &crate::client_sessions::ClientSessions,
+) -> io::Result<()> {
+    // The first discovery or initialize fixes the protocol era of this
+    // process; a frame from the other era is refused instead of downgraded.
+    let mut era = agent_bridge_gateway::modern::StdioEra::default();
+    agent_bridge_gateway::stdio::serve(reader, writer, |frame| {
+        sessions.dispatch(crate::client_sessions::Client::Local("stdio"), router, frame,
+            agent_bridge_gateway::stdio::MAX_FRAME_BYTES, || era.dispatch(router, frame))
+    })
 }
 
 pub fn check_port(port: u16) -> Result<(), RuntimeError> {
@@ -1000,19 +1040,115 @@ pub fn check_port(port: u16) -> Result<(), RuntimeError> {
     Ok(())
 }
 
-pub fn serve_http(database: &Path, port: u16) -> Result<(), RuntimeError> {
+pub fn serve_http(database: &Path, port: u16, ui: Option<(u16, &Path)>) -> Result<(), RuntimeError> {
     check_port(port)?;
-    let router = missions(database)?;
+    if let Some((port, _)) = ui { check_port(port)?; }
+    let (router, database) = mission_transport(database)?;
+    let audit = Arc::new(crate::request_audit::RequestAudit::new()?);
     let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
     runtime.block_on(async move {
         let listener = agent_bridge_http::bind_loopback(port).await?;
-        agent_bridge_http::serve(
-            listener,
-            agent_bridge_http::HttpServerConfig::default(),
-            move |frame| router.handle_str(frame),
-            agent_bridge_http::HealthStatus::ok,
+        let local_view = match ui {
+            Some((port, descriptor)) => Some(crate::ui::start_local_session_view(
+                port, descriptor, Arc::clone(&audit), database,
+            ).await?),
+            None => None,
+        };
+        let served = serve_http_mcp(
+            listener, router, audit,
             async { let _ = tokio::signal::ctrl_c().await; },
-        ).await
+        ).await;
+        if let Some(view) = local_view { view.stop().await?; }
+        served?;
+        Ok::<(), RuntimeError>(())
     })?;
     Ok(())
+}
+
+async fn serve_http_mcp(
+    listener: tokio::net::TcpListener,
+    router: Router,
+    audit: Arc<crate::request_audit::RequestAudit>,
+    shutdown: impl std::future::Future<Output = ()> + Send + 'static,
+) -> io::Result<()> {
+    let config = agent_bridge_http::HttpServerConfig::default();
+    let response_limit = config.max_response_body_bytes;
+    agent_bridge_http::serve(
+        listener,
+        config,
+        move |frame| audit.sessions.dispatch(crate::client_sessions::Client::Local("http"), &router, frame,
+            response_limit, || router.handle_str(frame)),
+        agent_bridge_http::HealthStatus::ok,
+        shutdown,
+    ).await
+}
+
+#[cfg(test)]
+mod session_transport_tests {
+    use super::*;
+    use crate::request_audit::RequestAudit;
+
+    const LARGE_CALL: &str = r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"large_fixture"}}"#;
+
+    fn large_reply_router() -> Router {
+        let mut handlers = ToolMapHandler::new();
+        handlers.register("large_fixture", |_| {
+            crate::client_sessions::link_context("example-oversize-context");
+            Ok(ToolCallResult::text("x".repeat(1024 * 1024)))
+        });
+        McpGateway::new(GatewayConfig::new("fixture", "1"),
+            vec![ToolDefinition::new("large_fixture", None, json!({"type":"object"}))],
+            handlers)
+    }
+
+    #[test]
+    fn foreground_stdio_does_not_record_a_reply_rejected_by_its_frame_limit() {
+        let audit = RequestAudit::new().unwrap();
+        let input = format!("{}\n{LARGE_CALL}\n",
+            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26"}}"#);
+        let mut output = Vec::new();
+        let error = serve_stdio_mcp(input.as_bytes(), &mut output, &large_reply_router(),
+            &audit.sessions).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(error.to_string(), "stdio output frame exceeds maximum size");
+        let replies: Vec<_> = std::str::from_utf8(&output).unwrap().lines().collect();
+        assert_eq!(replies.len(), 1);
+        assert!(serde_json::from_str::<Value>(replies[0]).unwrap().get("result").is_some());
+        let snapshot = audit.sessions.snapshot("fixture", None, None).unwrap();
+        let session = &snapshot["sessions"][0];
+        assert_eq!(session["request_count"], 1);
+        assert_eq!(session["context_ids"], json!([]));
+        assert_eq!(session["tool_calls"], json!([]));
+    }
+
+    #[tokio::test]
+    async fn foreground_http_does_not_record_a_reply_rejected_by_its_body_limit() {
+        use std::io::{Read, Write};
+        use std::net::TcpStream;
+        use std::time::Duration;
+
+        let audit = Arc::new(RequestAudit::new().unwrap());
+        let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (stop, shutdown) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(serve_http_mcp(listener, large_reply_router(), audit.clone(),
+            async { let _ = shutdown.await; }));
+        let response = tokio::task::spawn_blocking(move || {
+            let timeout = Duration::from_secs(5);
+            let mut stream = TcpStream::connect_timeout(&address, timeout).unwrap();
+            stream.set_read_timeout(Some(timeout)).unwrap();
+            write!(stream, "POST /mcp HTTP/1.1\r\nHost: {address}\r\nContent-Type: application/json\r\nAccept: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{LARGE_CALL}",
+                LARGE_CALL.len()).unwrap();
+            let mut reply = String::new();
+            stream.read_to_string(&mut reply).unwrap();
+            reply
+        }).await;
+        stop.send(()).unwrap();
+        server.await.unwrap().unwrap();
+        let response = response.unwrap();
+        assert!(response.starts_with("HTTP/1.1 500 "), "{response}");
+        assert!(response.contains("response_too_large"));
+        let snapshot = audit.sessions.snapshot("fixture", None, None).unwrap();
+        assert_eq!(snapshot["sessions"], json!([]));
+    }
 }

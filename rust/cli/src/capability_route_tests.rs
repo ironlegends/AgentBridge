@@ -308,6 +308,97 @@ async fn request_audit_correlates_status_with_discovery_and_verified_oauth_ident
     for private in [&fixture.legacy_access, &chatgpt_access, &gemini_id, &chatgpt_id] {
         assert!(!serialized.contains(private.as_str()));
     }
+
+    let sessions = fixture.app.request_audit.sessions.snapshot(
+        &fixture.app.request_audit.boot_id, None, None,
+    ).unwrap();
+    assert_eq!(sessions["totals"], json!({"live": 2, "connected": 2}));
+    for (provider, hash, count) in [("gemini", &gemini_hash, 3), ("chatgpt", &chatgpt_hash, 1)] {
+        let session = sessions["sessions"].as_array().unwrap().iter()
+            .find(|session| session["provider"] == provider).unwrap();
+        assert_eq!(session["client_label"], &hash[..8]);
+        assert_eq!(session["request_count"], count);
+        assert_eq!(session["transport"], "http");
+        assert_eq!(session["tool_calls"][0]["tool_name"], "agent_bridge_status");
+    }
+    let serialized = sessions.to_string();
+    for private in [&fixture.legacy_access, &chatgpt_access, &gemini_id, &chatgpt_id, &gemini_hash, &chatgpt_hash] {
+        assert!(!serialized.contains(private.as_str()));
+    }
+}
+
+#[tokio::test]
+async fn connected_sessions_ignores_unverified_and_refused_requests() {
+    let fixture = Fixture::new();
+    let status = call("agent_bridge_status", json!({}));
+    assert_eq!(mcp(fixture.app.clone(), "example-invalid-token", status).await.0, 401);
+    let (status, response) = mcp(
+        fixture.app.clone(), &fixture.legacy_access, call("example-unknown-tool", json!({})),
+    ).await;
+    assert_eq!(status, 200);
+    assert_eq!(response["error"]["code"], -32602);
+    let audit = &fixture.app.request_audit;
+    assert_eq!(audit.sessions.snapshot(&audit.boot_id, None, None).unwrap()["sessions"], json!([]));
+}
+
+#[test]
+fn connected_sessions_joins_only_resolved_contexts_and_redacted_mission_fields() {
+    use crate::client_sessions::{Client, ClientSessions};
+    let root = TestRoot(crate::test_state_base().join(format!(
+        "session-missions-{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed),
+    )));
+    std::fs::create_dir_all(&root.0).unwrap();
+    let path = root.0.join("missions.sqlite");
+    let mut db = agent_bridge_core::CoreDatabase::initialize_new(&path).unwrap();
+    let earlier = agent_bridge_missions::create_context(db.connection_mut()).unwrap();
+    agent_bridge_missions::dispatch_tool(db.connection_mut(), "agent_bridge_mission_create", &json!({
+        "actor_context_handle":earlier.context_handle, "goal":"Example earlier mission",
+        "idempotency_key":"example-earlier-key",
+    })).unwrap();
+    drop(db);
+    let router = runtime::missions(&path).unwrap();
+    let registry = ClientSessions::default();
+    let refused = call("example-unknown-tool", json!({})).to_string();
+    let response = registry.dispatch(Client::Local("http"), &router, &refused, usize::MAX,
+        || router.handle_str(&refused)).unwrap();
+    assert_eq!(serde_json::from_str::<Value>(&response).unwrap()["error"]["code"], -32602);
+    assert_eq!(registry.snapshot("example-boot", None, None).unwrap()["sessions"], json!([]));
+    let invoke = |name, args| -> Value {
+        let frame = call(name, args).to_string();
+        let result = registry.dispatch(Client::Local("http"), &router, &frame, usize::MAX,
+            || router.handle_str(&frame)).unwrap();
+        let response: Value = serde_json::from_str(&result).unwrap();
+        assert_ne!(response["result"]["isError"], true, "{response}");
+        serde_json::from_str(response["result"]["content"][0]["text"].as_str().unwrap()).unwrap()
+    };
+    let context = invoke("agent_bridge_context_create", json!({}));
+    let goal = "é".repeat(205);
+    let mission = invoke("agent_bridge_mission_create", json!({
+        "goal":goal, "actor_context_handle":context["context_handle"], "idempotency_key":"example-mission-key",
+    }));
+    let subtask = invoke("agent_bridge_mission_subtask_create", json!({
+        "goal":"Example subtask", "actor_context_handle":context["context_handle"],
+        "mission_id":mission["mission_id"], "assignee_context_id":context["context_id"],
+        "idempotency_key":"example-subtask-key",
+    }));
+    drop(router);
+    let db = Arc::new(Mutex::new(agent_bridge_core::CoreDatabase::open_existing(&path).unwrap()));
+    let snapshot = registry.snapshot("example-boot", Some(&db), None).unwrap();
+    let joined = &snapshot["sessions"][0]["contexts"][0];
+    assert_eq!(joined["context_id"], context["context_id"]);
+    assert_eq!(joined["missions"][0]["mission_id"], mission["mission_id"]);
+    assert_eq!(joined["missions"][0]["goal"].as_str().unwrap().chars().count(), 200);
+    assert_eq!(joined["missions"][0]["subtasks"][0], json!({
+        "id":subtask["subtask"]["subtask_id"], "title":"Example subtask", "status":"pending",
+        "assigned_to_context":true,
+    }));
+    assert_eq!(snapshot["earlier"].as_array().unwrap().len(), 1);
+    assert_eq!(snapshot["earlier"][0]["context_id"], earlier.context_id);
+    assert_eq!(snapshot["earlier"][0]["missions"][0]["goal"], "Example earlier mission");
+    let text = snapshot.to_string();
+    for private in [context["context_handle"].as_str().unwrap(), "example-mission-key", "example-subtask-key"] {
+        assert!(!text.contains(private));
+    }
 }
 
 #[tokio::test]

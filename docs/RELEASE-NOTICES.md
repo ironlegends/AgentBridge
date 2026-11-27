@@ -2,7 +2,7 @@
 
 This historical record covers the `2.0.0-rc.1` Rust CLI candidate and the
 `2.0.0` desktop release for `x86_64-pc-windows-msvc`. The counted inventories
-below belong to those builds. The `2.1.0` desktop inventory, regenerated at release, contains 364 packages
+below belong to those builds. The `2.1.0` and `2.2.0` desktop inventories, regenerated at each release, contain 364 packages
 and 675 notice records with the same reviewed exceptions.
 This record documents the files retained and the explicit packaging review decisions. It does not relicense third-party code or replace the terms shipped with each dependency.
 

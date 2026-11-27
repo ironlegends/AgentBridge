@@ -109,7 +109,7 @@ foreach ($path in $paths) {
 
 On macOS/Linux, create the corresponding directories with owner-only permissions (`0700`) under a private parent; keep OAuth state initially empty. For an existing installation, retain its paths, ownership and grants rather than rerunning first-time directory setup. Substitute your chosen root for `/path/to/private` and the Windows placeholder paths throughout this guide.
 
-Initialize the database and private settings once. In standalone mode, the panel also offers **Initialize** in **Settings → Advanced settings**.
+Initialize the database and private settings once. In standalone mode, the panel also offers **Initialize** in **Settings → Storage and web relay**.
 
 ```sh
 agent-bridge db init /path/to/private/database/missions.sqlite
@@ -153,6 +153,10 @@ $env:AGENT_BRIDGE_SKILL_ALLOWED_HTTPS_ORIGINS = "<your-approved-https-origin>"
 ```
 
 Pinned commands are defined exclusively by the operator in `<settings>/commands.json` (each entry pinned by executable path and SHA-256). This restricted provider remains in place for `stdio` and full-control workstations. A workstation started explicitly with `--profile fully-unlocked --enable-processes` uses the separate direct process provider described in [WORKSTATION-MODES.md](WORKSTATION-MODES.md).
+
+### Show a harness in the desktop Sessions page
+
+Each `stdio` or `serve` process is its own boot. To see its sessions in the desktop app, add `--ui-port <port> --ui-session-file <private-json-path>`. The session file must be a local absolute path, through real directories with no symbolic links or Windows reparse points, to a new `.json` file whose name has at most 128 ASCII letters, digits, `-`, `_` or `.`. Its directory must already exist, be owner-private, and neither contain nor sit inside any selected `stdio` workspace. The process then writes a loopback, token-protected session record to that owner-private file and accepts only the sessions read. Point the panel at it with an `operator-connection.json` that sets `"version": 1`, `"controlPort": <port>`, `"sessionViewOnly": true` and `"stdoutLog": "<private-json-path>"`. Launch the panel without an embedded Workstation configuration (`workstation-app.json`), which takes precedence, and restart the panel after changing `operator-connection.json`. This attachment cannot change profiles, read other operator routes or stop the process. Because the profile route is refused, the home screen shows the bridge as **Unavailable** even when the attachment works; open **Sessions** to verify it. A clean shutdown removes the session file, so a restart can reuse the same path.
 
 ---
 
@@ -480,10 +484,14 @@ Add `--ui-port 18890` to the Workstation command to enable the operator listener
 
 Use a new OAuth state directory when widening the startup authority; retain the old one for rollback and re-enroll the exact client against the new state. Mode changes made inside the startup ceiling do not require re-pairing. The complete command, mode matrix and shell examples are in [WORKSTATION-MODES.md](WORKSTATION-MODES.md).
 
+### See connected AI sessions
+
+In the desktop app, open **Sessions**. The client list is filled by an embedded or attached Workstation, or by a `stdio` or `serve` process attached as described in [Show a harness in the desktop Sessions page](#show-a-harness-in-the-desktop-sessions-page); the standalone panel alone shows only stored mission contexts. Bridge lists AI clients that are live (a request in progress or one in the last 120 seconds), clients seen earlier in this boot, and stored mission contexts that still hold an active or blocked mission. Select a session to see its missions, subtasks, commands and recent tool calls. Commands list process sessions with a fixed process label such as `git-version` or `project-program`, or `Process`; a one-shot `agent_bridge_project_command` appears only under recent tool calls, which show the tool name. The Rust snapshot also carries display-only command IDs. Tool arguments, output and tokens are not shown, but mission goals and subtask titles are displayed as written, truncated to 200 characters and not redacted. Only successful replies count as activity: unverified, refused or failed requests do not create or refresh sessions.
+
 ### Diagnose Gemini Web approvals and tool quota
 
-In the desktop app, open **Settings > Advanced settings > Diagnostics & Skills** to see the MCP request
-audit summary and the 20 most recent records, newest first. An embedded desktop
+In the desktop app, open **Settings > Diagnostics and skills** to see the MCP request
+log summary and the 20 most recent records, newest first. An embedded desktop
 workstation shows the audit without an operator listener.
 
 Read `mcp_request_audit` from `GET /api/diagnostics` on the workstation's

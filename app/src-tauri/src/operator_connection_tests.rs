@@ -52,7 +52,10 @@ fn config(root: &Path, port: u16) -> OperatorClient {
         "stdoutLog": log,
     }).to_string()).unwrap();
     OperatorClient {
-        config: ConnectionConfig { version: 1, control_port: port, gateway_port, stdout_log: log, supervisor: None },
+        config: ConnectionConfig {
+            version: 1, control_port: port, gateway_port, stdout_log: log,
+            session_view_only: false, supervisor: None,
+        },
     }
 }
 
@@ -161,6 +164,17 @@ fn fixture_route(state: &mut MockState, method: &str, path: &str, body: Value) -
             "os": "fixture-os", "arch": "fixture-arch", "version": "fixture",
             "capabilities": { "outbound_oauth_keystore": "Fixture keystore", "missions_and_task_rooms": true },
             "browser_profiles": { "mcp_persistent_profiles": ["fixture-profile"] },
+        })),
+        ("GET", "/api/sessions") => (200, json!({
+            "available": true, "boot_id": "example-boot", "live_window_seconds": 120,
+            "sessions": [{
+                "session_id": "example-session", "terminal_session_ids": ["example-command"],
+                "contexts": [{"missions": [{"mission_id": "example-mission", "subtasks": [
+                    {"id": "example-subtask", "assigned_to_context": true}
+                ]}]}],
+                "tool_calls": [{"tool_name": "agent_bridge_status"}],
+                "commands": [{"id": "example-command", "exit_code": 0}],
+            }],
         })),
         _ => (404, json!({ "error": "UNEXPECTED_ROUTE" })),
     }
@@ -306,6 +320,29 @@ fn log_selection_is_bounded_and_uses_only_the_latest_matching_session_record() {
 }
 
 #[test]
+fn session_view_only_attachment_accepts_local_sessions_and_refuses_other_reads_and_writes() {
+    let service = MockService::start();
+    let root = TestRoot::new();
+    let client = config(&root.0, service.port);
+    let mut record = session_record(service.port, TEST_TOKEN);
+    record["session_view_only"] = json!(true);
+    record["live_profile_control"] = json!(false);
+    record["workstation_shutdown_control"] = json!(false);
+    fs::write(&client.config.stdout_log, format!("{record}\n")).unwrap();
+    assert!(client.get("/api/sessions").is_err());
+    fs::write(root.0.join(CONFIG_FILE), json!({
+        "version": 1, "controlPort": service.port, "sessionViewOnly": true,
+        "stdoutLog": client.config.stdout_log,
+    }).to_string()).unwrap();
+    let runtime = AppRuntime::new(root.0.clone());
+    let client = runtime.operator.client().unwrap();
+    assert_eq!(backend::get_sessions(&runtime).unwrap()["bootId"], "example-boot");
+    assert!(client.get("/api/diagnostics").is_err());
+    assert!(client.post("/api/profile", json!({"profile":"fully-unlocked"})).is_err());
+    assert!(!client.supports_shutdown());
+}
+
+#[test]
 fn http_parser_rejects_unbounded_ambiguous_or_oversized_responses() {
     for head in [
         "HTTP/1.1 200 OK\r\n\r\n".to_owned(),
@@ -397,6 +434,16 @@ fn attached_screens_use_operator_apis_and_theme_does_not_replace_local_runtime_s
     let diagnostics = backend::get_diagnostics(&runtime).unwrap();
     assert_eq!(diagnostics["oauthKeystore"], "Fixture keystore");
     assert_eq!(diagnostics["mcpBrowserProfiles"][0], "fixture-profile");
+    let sessions = backend::get_sessions(&runtime).unwrap();
+    assert_eq!(sessions["bootId"], "example-boot");
+    assert_eq!(sessions["liveWindowSeconds"], 120);
+    let session = &sessions["sessions"][0];
+    assert_eq!(session["sessionId"], "example-session");
+    assert_eq!(session["terminalSessionIds"][0], "example-command");
+    assert_eq!(session["toolCalls"][0]["toolName"], "agent_bridge_status");
+    assert_eq!(session["commands"][0]["exitCode"], 0);
+    assert_eq!(session["contexts"][0]["missions"][0]["subtasks"][0]["assignedToContext"], true);
+    assert!(session.get("session_id").is_none());
     assert_eq!(backend::enable_oauth_enrollment(&runtime).unwrap()["enabled"], true);
     assert_eq!(backend::approve_oauth_request(&runtime, "fixture-request", "https://chatgpt.com/connector_platform_oauth_redirect", None).unwrap()["approved"], true);
     assert_eq!(backend::run_skill_action(&runtime, "rollback", "fixture-skill", None).unwrap()["ok"], true);

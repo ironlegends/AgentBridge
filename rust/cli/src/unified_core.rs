@@ -30,7 +30,9 @@ pub(crate) fn attach(
                 return Ok(ToolCallResult::tool_error("WRITE_ACCESS_REQUIRED: mission mutation refused"));
             }
             let mut db=connection.lock().map_err(|_|ToolDispatchError::internal("CORE_UNAVAILABLE"))?;
-            Ok(match agent_bridge_missions::dispatch_tool(db.connection_mut(),&name,&Value::Object(arguments)) {
+            Ok(match agent_bridge_missions::dispatch_tool_observed(
+                db.connection_mut(), &name, &Value::Object(arguments), crate::client_sessions::link_context,
+            ) {
                 Ok(value)=>ToolCallResult::text(value.to_string()),
                 Err(error)=>ToolCallResult::tool_error(format!("CORE_{}: {}",error.code,error.message)),
             })
@@ -91,8 +93,7 @@ fn import_task(database:&SharedCoreDatabase,binding:&str,args:&Value)->Result<Va
     let conn=db.connection_mut();
     // This validates the registered actor without enrolling it into the
     // historical mission or changing any source Task Room membership.
-    agent_bridge_missions::dispatch_tool(conn,"agent_bridge_mission_list",
-        &json!({"actor_context_handle":actor,"limit":1}))
+    let actor = agent_bridge_missions::AuthenticatedContext::authenticate(conn, actor)
         .map_err(|error|format!("CORE_{}: {}",error.code,error.message))?;
     let source=agent_bridge_missions::task_room::read_import_snapshot_scoped(conn,
         handle,task_id,binding)
@@ -132,7 +133,9 @@ fn import_task(database:&SharedCoreDatabase,binding:&str,args:&Value)->Result<Va
             .ok_or("INVALID_SOURCE_TOTAL")?).map_err(|_|"SOURCE_TOTAL_EXCEEDS_IMPORT_BOUND")?,
         events:normalized_events,steps:normalized_steps,
     };
-    Ok(serde_json::to_value(agent_bridge_import::import_snapshot(conn,&snapshot)?)?)
+    let result = serde_json::to_value(agent_bridge_import::import_snapshot(conn, &snapshot)?)?;
+    actor.observe_success(conn, crate::client_sessions::link_context);
+    Ok(result)
 }
 
 #[cfg(test)]
@@ -191,15 +194,18 @@ mod tests {
             serde_json::from_str(reply["result"]["content"][0]["text"].as_str().unwrap()).unwrap()
         }
         fn source(&self)->(Value,Value) {
-            let mut database=self.database.lock().unwrap();
-            let conn=database.connection_mut();
-            let context=agent_bridge_missions::task_room::dispatch_scoped(conn,
-                &json!({"action":"context_create","context_label":"Synthetic import"}),&self.binding).unwrap();
-            let task=agent_bridge_missions::task_room::dispatch_scoped(conn,
-                &json!({"action":"create","context_handle":context["context_handle"],"title":"Safe historical task",
-                    "goal":"Read-only source","steps":[{"id":"s1","title":"Historical only"}]}),&self.binding).unwrap();
-            (context,task)
+            task_source(&self.database, &self.binding)
         }
+    }
+    fn task_source(database: &SharedCoreDatabase, binding: &str) -> (Value, Value) {
+        let mut database = database.lock().unwrap();
+        let conn = database.connection_mut();
+        let context = agent_bridge_missions::task_room::dispatch_scoped(conn,
+            &json!({"action":"context_create","context_label":"Synthetic import"}), binding).unwrap();
+        let task = agent_bridge_missions::task_room::dispatch_scoped(conn,
+            &json!({"action":"create","context_handle":context["context_handle"],"title":"Safe historical task",
+                "goal":"Read-only source","steps":[{"id":"s1","title":"Historical only"}]}), binding).unwrap();
+        (context, task)
     }
     fn denied(reply:&Value)->bool { reply.get("error").is_some() || reply["result"]["isError"]==true }
 
@@ -288,6 +294,41 @@ mod tests {
         let count:i64=fixture.database.lock().unwrap().connection().query_row(
             "SELECT COUNT(*) FROM imports",[],|row|row.get(0)).unwrap();
         assert_eq!(count,0);
+    }
+
+    #[test]
+    fn refused_task_import_leaves_actor_timestamp_unchanged() {
+        let root = TestRoot(crate::test_state_base().join(format!("unified-import-{}-{}",
+            std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed))));
+        std::fs::create_dir(&root.0).unwrap();
+        let database = Arc::new(Mutex::new(CoreDatabase::initialize_new(&root.0.join("core.db")).unwrap()));
+        let actor = {
+            let mut db = database.lock().unwrap();
+            let conn = db.connection_mut();
+            agent_bridge_missions::task_room::init_schema(conn).unwrap();
+            agent_bridge_missions::create_context(conn).unwrap()
+        };
+        let binding = "example-workspace";
+        let (source, task) = task_source(&database, binding);
+        let old = "2000-01-01T00:00:00Z";
+        database.lock().unwrap().connection().execute(
+            "UPDATE agent_contexts SET last_seen=?1 WHERE context_id=?2", [old, &actor.context_id],
+        ).unwrap();
+        let seen = || database.lock().unwrap().connection().query_row(
+            "SELECT last_seen FROM agent_contexts WHERE context_id=?1", [&actor.context_id],
+            |row| row.get::<_, String>(0),
+        ).unwrap();
+        let mut args = json!({
+            "actor_context_handle":actor.context_handle,"context_id":"trctx_wrong",
+            "context_handle":source["context_handle"],"task_id":task["task"]["task_id"]
+        });
+        let refused = import_task(&database, binding, &args).unwrap_err();
+        assert_eq!(refused.to_string(), "IMPORT_SOURCE_CAPABILITY_MISMATCH");
+        assert_eq!(seen(), old);
+
+        args["context_id"] = source["context_id"].clone();
+        import_task(&database, binding, &args).unwrap();
+        assert_ne!(seen(), old);
     }
 
     #[test]

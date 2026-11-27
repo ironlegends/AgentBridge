@@ -121,7 +121,7 @@ pub fn dispatch_rpc(conn: &mut Connection, method: &str, request: &Value) -> Rpc
         check_rpc_request(request, method)?;
         let payload = &request["payload"];
         let actor = request.get("actor_context_handle").and_then(Value::as_str);
-        dispatch_core(conn, method, payload, actor)
+        dispatch_core(conn, method, payload, actor, |_| {})
     })();
     match result {
         Ok(result) => RpcReply::success(result),
@@ -142,9 +142,26 @@ pub fn dispatch_rpc_envelope(conn: &mut Connection, envelope: &Value) -> RpcRepl
     }
 }
 
+/// A registered mission actor authenticated without writing activity.
+pub struct AuthenticatedContext(String);
+
+impl AuthenticatedContext {
+    pub fn authenticate(conn: &Connection, handle: &str) -> Result<Self> {
+        verify_schema(conn)?;
+        Ok(Self(store::require_context(conn, handle)?))
+    }
+
+    /// Record activity on the same Core connection after the caller's operation succeeds.
+    pub fn observe_success(self, conn: &Connection, observe_context: impl FnOnce(&str)) {
+        if let Some(context_id) = store::note_context_use(conn, &self.0) {
+            observe_context(&context_id);
+        }
+    }
+}
+
 fn dispatch_core(
     conn: &mut Connection, method: &str, payload: &Value,
-    actor_handle: Option<&str>
+    actor_handle: Option<&str>, observe_context: impl FnOnce(&str),
 ) -> Result<Value> {
     // Always check the source-owned v7 schema BEFORE authorization or mutation.
     // No implicit migration, DB creation, or permission escalation.
@@ -156,15 +173,18 @@ fn dispatch_core(
         if required(payload, "actor_kind")? != "chatgpt" {
             return Err(invalid("Only the Agent Bridge chatgpt actor kind is supported."));
         }
-        return to_value(create_context(conn)?);
+        let context = create_context(conn)?;
+        let result = to_value(&context)?;
+        observe_context(&context.context_id);
+        return Ok(result);
     }
     let actor = actor_handle.ok_or_else(|| {
         BridgeError::new("SECURITY_DENIED", "A private actor_context_handle is required.")
     })?;
     // Even methods returning no mission data require a real registered context.
-    store::require_context(conn, actor)?;
+    let context = AuthenticatedContext(store::require_context(conn, actor)?);
 
-    match method {
+    let result = match method {
         "Mission.Create" => to_value(create_mission(conn, actor, decode::<CreateMissionRequest>(payload)?)?),
         "Mission.Get" => to_value(get_mission(conn, actor, required(payload, "mission_id")?)?),
         "Mission.List" => {
@@ -217,7 +237,9 @@ fn dispatch_core(
             Err(BridgeError::new("CAPABILITY_UNAVAILABLE",
                 "This isolated missions crate does not provide the requested host capability.")),
         _ => Err(BridgeError::new("METHOD_NOT_FOUND", "Unsupported Agent Bridge RPC method.")),
-    }
+    }?;
+    context.observe_success(conn, observe_context);
+    Ok(result)
 }
 
 fn tool_contract(name: &str) -> Result<(&'static str, &'static [&'static str])> {
@@ -265,6 +287,13 @@ fn tool_contract(name: &str) -> Result<(&'static str, &'static [&'static str])> 
 /// Returns the *result object* (not the MCP content wrapper); errors are typed.
 /// Network and transport adapters must not retry uncertain writes automatically.
 pub fn dispatch_tool(conn: &mut Connection, tool_name: &str, args: &Value) -> Result<Value> {
+    dispatch_tool_observed(conn, tool_name, args, |_| {})
+}
+
+/// Observe only the public ID of an authenticated context after a successful operation.
+pub fn dispatch_tool_observed(
+    conn: &mut Connection, tool_name: &str, args: &Value, observe_context: impl FnOnce(&str),
+) -> Result<Value> {
     let (method, allowed) = tool_contract(tool_name)?;
     let object = args.as_object().ok_or_else(|| invalid("Tool arguments must be a JSON object."))?;
     if object.keys().any(|key| !allowed.contains(&key.as_str())) {
@@ -320,7 +349,7 @@ pub fn dispatch_tool(conn: &mut Connection, tool_name: &str, args: &Value) -> Re
     }
     // Public context IDs used as target/assignee are validated within the
     // business APIs. Only the caller's raw registered handle authenticates.
-    dispatch_core(conn, method, &payload, actor)
+    dispatch_core(conn, method, &payload, actor, observe_context)
 }
 
 /// Convenience for JSON-only callers without allocating their own Value tree.
