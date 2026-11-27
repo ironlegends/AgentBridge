@@ -10,7 +10,7 @@ checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 
 [[package]]
 name = "agent-bridge"
-version = "2.2.0"
+version = "2.3.0"
 dependencies = [
  "agent-bridge-commands",
  "agent-bridge-core",
@@ -74,7 +74,7 @@ dependencies = [
 
 [[package]]
 name = "agent-bridge-desktop-app"
-version = "2.2.0"
+version = "2.3.0"
 dependencies = [
  "agent-bridge",
  "agent-bridge-core",
