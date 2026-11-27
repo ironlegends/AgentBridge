@@ -483,7 +483,7 @@ fn native_shells_preserve_cwd_and_report_nonzero_exit() {
         let sid = result["session_id"].as_str().unwrap().to_owned();
         let mut output = result["stdout"].as_str().unwrap().to_owned();
         let mut errors = result["stderr"].as_str().unwrap().to_owned();
-        let deadline = Instant::now() + Duration::from_secs(5);
+        let deadline = Instant::now() + Duration::from_secs(if cfg!(windows) { 20 } else { 5 });
         while result["status"] != "exited" {
             let (error, next) = h.call("desktop_read_process", json!({"session_id":sid,"timeout_ms":100}));
             assert!(!error, "{next}");

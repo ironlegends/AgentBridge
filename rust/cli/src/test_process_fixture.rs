@@ -1,17 +1,42 @@
 //! Test-only subprocess selection. Windows parents fail, rather than skip,
 //! when the separate example is not built. Unix keeps its existing routing.
 use std::path::PathBuf;
+#[cfg(windows)]
+pub(crate) fn debug_artifact(relative: impl AsRef<std::path::Path>) -> PathBuf {
+    let relative = relative.as_ref();
+    if let Some(dir) = std::env::var_os("AGENT_BRIDGE_TEST_DEBUG_DIR") {
+        let dir = PathBuf::from(dir);
+        assert!(dir.is_absolute(), "AGENT_BRIDGE_TEST_DEBUG_DIR must be an absolute path: {}", dir.display());
+        return dir.join(relative);
+    }
+    let test = std::env::current_exe().expect("test executable");
+    let default_dir = test.parent().and_then(|p| p.parent()).expect("Cargo deps path");
+    let candidate = default_dir.join(relative);
+    if candidate.is_file() {
+        return candidate;
+    }
+    if let Some(build_dir) = default_dir.parent().and_then(|p| p.parent()) {
+        if build_dir.file_name() == Some(std::ffi::OsStr::new("build")) {
+            if let Some(profile_dir) = build_dir.parent() {
+                let fallback = profile_dir.join(relative);
+                if fallback.is_file() {
+                    return fallback;
+                }
+            }
+        }
+    }
+    candidate
+}
+
 pub(crate) fn program()->PathBuf {
-    let test=std::env::current_exe().expect("test executable");
     #[cfg(windows)]
     {
-        let fixture=test.parent().and_then(|p|p.parent()).expect("Cargo deps path")
-            .join("examples").join("agent_bridge_process_fixture.exe");
+        let fixture=debug_artifact(std::path::Path::new("examples").join("agent_bridge_process_fixture.exe"));
         assert!(fixture.is_file(),"missing subprocess witness: cargo build -p agent-bridge --example agent_bridge_process_fixture");
         fixture
     }
     #[cfg(not(windows))]
-    {test}
+    {std::env::current_exe().expect("test executable")}
 }
 pub(crate) fn args(name:&str,tail:&[&str])->Vec<String>{
     #[cfg(windows)]
