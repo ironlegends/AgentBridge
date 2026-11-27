@@ -18,7 +18,7 @@ dependencies = [
  "agent-bridge-oauth-server",
  "agent-bridge-web-launch",
  "axum",
- "getrandom 0.2.17",
+ "getrandom 0.4.3",
  "libc",
  "regex",
  "serde",
@@ -33,7 +33,7 @@ dependencies = [
 name = "agent-bridge-commands"
 version = "0.1.0"
 dependencies = [
- "getrandom 0.2.17",
+ "getrandom 0.4.3",
  "serde",
  "sha2 0.10.9",
 ]
@@ -108,7 +108,7 @@ name = "agent-bridge-import"
 version = "0.1.0"
 dependencies = [
  "chrono",
- "getrandom 0.2.17",
+ "getrandom 0.4.3",
  "rusqlite",
  "serde",
  "serde_json",
@@ -132,7 +132,7 @@ dependencies = [
  "cap-fs-ext",
  "cap-std",
  "fs2",
- "getrandom 0.2.17",
+ "getrandom 0.4.3",
  "hex",
  "hmac",
  "libc",
@@ -171,7 +171,7 @@ dependencies = [
  "agent-bridge-oauth-compat",
  "base64 0.22.1",
  "fs2",
- "getrandom 0.2.17",
+ "getrandom 0.4.3",
  "libc",
  "serde",
  "serde_json",

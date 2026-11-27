@@ -6,7 +6,7 @@ license = "Apache-2.0"
 publish = false
 
 [dependencies]
-getrandom = "0.2"
+getrandom = "0.4"
 agent-bridge-import = { path = "../import" }
 agent-bridge-oauth-server = { path = "../oauth-server" }
 axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }
