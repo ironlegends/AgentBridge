@@ -359,7 +359,7 @@ fn validate_reply(value: Value, expected_id: &str, method: &str, params: &Value,
     if value["ok"] == true {
         let result = &value["result"];
         let valid = result.is_object() && !object.contains_key("error") && match method {
-            "init" => summary(result,session_id) && result["protocol_version"] == 2 && result["playwright_version"] == "1.63.0"
+            "init" => summary(result,session_id) && result["protocol_version"] == 2 && result["playwright_version"] == "1.65.1"
                 && result["node_version"] == "24.14.0" && result["worker_pid"].as_u64().is_some_and(|pid|pid > 0)
                 && result["session_usable"] == true && receipt["session_usable"] == true,
             "start" | "session" => summary(result,session_id) && receipt["session_usable"] == true

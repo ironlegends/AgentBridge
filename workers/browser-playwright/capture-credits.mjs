@@ -8,7 +8,7 @@ const profile = await mkdtemp(path.join(temporaryRoot, 'credits-'));
 let context;
 try {
   context = await chromium.launchPersistentContext(profile, { executablePath: executable, headless: true });
-  if (context.browser().version() !== '153.0.8010.12') throw new Error('Credits must come from the pinned Chromium distribution');
+  if (context.browser().version() !== '159.0.8154.6') throw new Error('Credits must come from the pinned Chromium distribution');
   const page = context.pages()[0];
   await page.goto('chrome://credits');
   const html = await page.content();
