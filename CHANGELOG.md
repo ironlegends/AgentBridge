@@ -4,6 +4,16 @@ User-visible changes are grouped by version and dated using the UTC publication 
 
 ## [Unreleased]
 
+## [2.3.1] - 2026-11-27
+
+### Changed
+
+- The foreground workspace now tells MCP clients whether project files are writable, how temporary artifacts differ from project files, and which mission tools record or read progress. Existing Windows workstation tool definitions are unchanged.
+
+### Security
+
+- The desktop GTK3 dependency graph now uses the upstream fix for GHSA-wrw7-89jp-8q8g, backported to the pinned glib 0.18.5 crate. The Windows x64 binary does not link glib.
+
 ## [2.3.0] - 2026-11-27
 
 ### Added

@@ -84,6 +84,22 @@ REVIEWED_RELEASE_INPUTS = {
     "scripts/rust/test_ci_scope.py",
     "scripts/rust/test_qualification_inventory.py",
 }
+VENDORED_GLIB_PREFIX = "app/src-tauri/patches/glib-0.18.5/"
+VENDORED_GLIB_EXACT = {
+    "app/src-tauri/patches/0001-glib-0.18.5-variant-str-iter-soundness.patch",
+    "app/src-tauri/patches/glib-0.18.5-PROVENANCE.json",
+    "app/src-tauri/patches/glib-0.18.5/Cargo.toml",
+    "app/src-tauri/patches/glib-0.18.5/Cargo.toml.orig",
+    "app/src-tauri/patches/glib-0.18.5/COPYRIGHT",
+    "app/src-tauri/patches/glib-0.18.5/Gir.toml",
+    "app/src-tauri/patches/glib-0.18.5/Gir_GObject.toml",
+    "app/src-tauri/patches/glib-0.18.5/LICENSE",
+    "app/src-tauri/patches/glib-0.18.5/README.md",
+    "app/src-tauri/patches/glib-0.18.5/src/auto/versions.txt",
+    "app/src-tauri/patches/glib-0.18.5/src/lib.rs",
+    "app/src-tauri/patches/glib-0.18.5/src/variant_iter.rs",
+}
+REVIEWED_RELEASE_INPUTS = {*REVIEWED_RELEASE_INPUTS, *VENDORED_GLIB_EXACT}
 EXACT = {*REVIEWED_RELEASE_INPUTS, "Cargo.toml", "Cargo.lock", "LICENSE", "NOTICE", "README.md", "CHANGELOG.md", "CONTRIBUTING.md", "SECURITY.md", "contracts/mission-tools-v1.json",
          "contracts/stdio-workspace-tool-docs.json", "contracts/workstation-tool-docs.json",
          "contracts/task-room-v1.json",
@@ -131,6 +147,12 @@ def is_allowed(path: str) -> bool:
         return True
     if path.startswith("app/src-tauri/icons/") and path.endswith((".png", ".ico", ".icns")):
         return True
+    if path.startswith(VENDORED_GLIB_PREFIX + "src/") and path.endswith(".rs"):
+        return True
+    if path.startswith(VENDORED_GLIB_PREFIX + "benches/") and path.endswith(".rs"):
+        return True
+    if path.startswith(VENDORED_GLIB_PREFIX + "tests/") and path.endswith((".rs", ".stderr")):
+        return True
     if path.startswith("app/ui/") and path.endswith((".html", ".js", ".css", ".svg", ".png", ".ico", ".woff", ".woff2")):
         return True
     if path.startswith("app/tests/") and path.endswith(".cjs"):
@@ -171,6 +193,8 @@ def read_index(repo: Path) -> list[tuple[str, str, str]]:
         if mode not in ("100644", "100755"):
             raise ValueError(f"symlink, gitlink, or unsupported mode {mode}: {path}")
         if is_allowed(path):
+            if path.startswith("app/src-tauri/patches/") and mode != "100644":
+                raise ValueError(f"unexpected executable mode {mode} in vendored patch: {path}")
             validate_relpath(path)
             selected.append((path, mode, sha))
     return selected

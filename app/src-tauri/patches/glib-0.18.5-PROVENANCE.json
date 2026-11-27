@@ -1,0 +1,40 @@
+{
+  "advisories": [
+    "GHSA-wrw7-89jp-8q8g",
+    "RUSTSEC-2024-0429"
+  ],
+  "backport_references": [
+    "https://github.com/gtk-rs/gtk-rs-core/pull/1343 (merge commit 05dff0ee696f9bcd8617cd48c4b812d046d440cb)",
+    "Debian rust-glib-0.18 0.18.5-7 patch 0007"
+  ],
+  "license": "MIT",
+  "license_files": {
+    "COPYRIGHT": "dae402989de65164815b7e2b6bc2b9576285434c3785934c8b6ece0fa055960d",
+    "LICENSE": "8cf56d10131ce201cf69ab74b111d3ebac1acca3833d7efb39ae357224b70edb"
+  },
+  "omitted_registry_metadata": {
+    "file": ".cargo_vcs_info.json",
+    "reason": "dotfile excluded by source-release win-safe path policy; git revision recorded here",
+    "sha256": "b301b45387ec3b66f1eace44a21991aaeac83e3140dab4faa0f6b9f7f0ec445b"
+  },
+  "package": "glib@0.18.5",
+  "patch_file": {
+    "path": "0001-glib-0.18.5-variant-str-iter-soundness.patch",
+    "sha256": "8eb6674027f126bdfac118d8644308d390c511e1cf88cf2857794c93a72a2e6f"
+  },
+  "patched_files": {
+    "src/variant_iter.rs": {
+      "after_sha256": "a0f5ee8acb8faa089bcdfbc9a57372609fce7654026ccef7d9a224d05a654ccc",
+      "before_sha256": "1fd02859333761c45321b32f28b24233446b97d0022a90d3a937ed162585b90e"
+    }
+  },
+  "registry": "registry+https://github.com/rust-lang/crates.io-index",
+  "schema": 1,
+  "upstream_crate_bytes": 267679,
+  "upstream_crate_sha256": "233daaf6e83ae6a12a52055f568f9d7cf4671dabb78ff9560ab6da230ce00ee5",
+  "upstream_crate_url": "https://static.crates.io/crates/glib/glib-0.18.5.crate",
+  "upstream_repository": "https://github.com/gtk-rs/gtk-rs-core",
+  "upstream_vcs_path": "glib",
+  "upstream_vcs_revision": "42b9caf98e03ded086362d9653ca58fe94dc8658",
+  "vendored_file_count": 120
+}
