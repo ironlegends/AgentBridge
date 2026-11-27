@@ -18,7 +18,7 @@ serde_json = "1"
 sha2 = "0.10"
 uuid = { version = "1", features = ["v4"] }
 # Official ZIP reader; minimal DEFLATE backend. STORE needs no feature.
-zip = { version = "=9.7.3", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+zip = { version = "=9.8.2", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "=0.61.2", features = ["Win32_Foundation", "Win32_Storage_FileSystem"] }
 
