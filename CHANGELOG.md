@@ -4,6 +4,14 @@ User-visible changes are grouped by version and dated using the UTC publication 
 
 ## [Unreleased]
 
+## [2.3.2] - 2026-11-27
+
+### Changed
+
+- Foreground MCP discovery distinguishes reading a mission record, checking an invitation, appending a checkpoint and listing checkpoint history. The existing unified Windows workstation catalogue continues to expose the same 46 tools.
+
+[Release notes](https://github.com/ironlegends/AgentBridge/releases/tag/v2.3.2)
+
 ## [2.3.1] - 2026-11-27
 
 ### Changed

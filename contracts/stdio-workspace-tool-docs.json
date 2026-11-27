@@ -30,10 +30,11 @@
     }
   },
   "agent_bridge_mission_get": {
-    "description": "Read one mission's goal, status, revision and timestamps as an attached member. Use mission_observe to check an invitation or identify the current owner; it also works before attachment.",
+    "description": "Read the goal, work status, revision and timestamps as an attached member. To check a pending invitation, use agent_bridge_mission_observe.",
     "annotations": {
       "readOnlyHint": true,
-      "openWorldHint": false
+      "openWorldHint": false,
+      "title": "Read mission record"
     },
     "parameters": {
       "actor_context_handle": "Private context_handle returned by agent_bridge_context_create. Authenticate as its owner; never share this value.",
@@ -41,10 +42,11 @@
     }
   },
   "agent_bridge_mission_observe": {
-    "description": "Check your invitation or membership before a handoff. Returns the mission revision, current owner's public ID, your role and attachment state. For the goal and work status, attached members can use mission_get.",
+    "description": "Check an invitation before attaching, or confirm membership before a handoff. Returns the caller's role, attachment state, owner ID and revision. Attached members can read the goal with agent_bridge_mission_get.",
     "annotations": {
       "readOnlyHint": true,
-      "openWorldHint": false
+      "openWorldHint": false,
+      "title": "Inspect mission membership"
     },
     "parameters": {
       "actor_context_handle": "Private context_handle returned by agent_bridge_context_create. Authenticate as its owner; never share this value.",
@@ -107,10 +109,11 @@
     }
   },
   "agent_bridge_mission_checkpoints": {
-    "description": "Read saved result summaries for a mission you have joined, newest revision first. Returns checkpoint IDs, summaries and revisions, including an empty list when none exist. To append a summary, use the singular mission_checkpoint tool.",
+    "description": "Read the saved progress summaries for a joined mission, newest revision first. Returns checkpoint IDs, summaries and revisions, or an empty list. Use agent_bridge_mission_checkpoint to add an entry.",
     "annotations": {
       "readOnlyHint": true,
-      "openWorldHint": false
+      "openWorldHint": false,
+      "title": "List checkpoint history"
     },
     "parameters": {
       "actor_context_handle": "Private context_handle returned by agent_bridge_context_create. Authenticate as its owner; never share this value.",
@@ -119,12 +122,13 @@
     }
   },
   "agent_bridge_mission_checkpoint": {
-    "description": "Append one durable progress summary to a mission you have joined. This advances the mission revision and returns the updated mission record. For history, or to check whether a write succeeded before retrying, use the plural mission_checkpoints tool.",
+    "description": "Save one progress summary as an attached member at the current mission revision. Returns the updated mission. If the reply is lost, read agent_bridge_mission_checkpoints before retrying.",
     "annotations": {
       "readOnlyHint": false,
       "openWorldHint": false,
       "destructiveHint": false,
-      "idempotentHint": false
+      "idempotentHint": false,
+      "title": "Append progress checkpoint"
     },
     "parameters": {
       "actor_context_handle": "Private context_handle returned by agent_bridge_context_create. Authenticate as its owner; never share this value.",
@@ -214,10 +218,11 @@
     }
   },
   "desktop_policy_status": {
-    "description": "Inspect the selected workspace's file access, enabled tools and operation limits before choosing a file operation. This reads policy; it does not change permissions. For gateway version and health, use agent_bridge_status.",
+    "description": "Check the current workspace's file permissions, enabled tools and limits. A read-only workspace allows file reads and searches. Use agent_bridge_status for gateway health and version.",
     "annotations": {
       "readOnlyHint": true,
-      "openWorldHint": false
+      "openWorldHint": false,
+      "title": "Inspect workspace access"
     }
   },
   "desktop_get_file_info": {
@@ -266,12 +271,13 @@
     }
   },
   "desktop_artifact_manage": {
-    "description": "Keep a temporary, checksum-verified copy of a workspace file for chunked reads. Publish returns artifact metadata; list finds stored IDs, get returns metadata, read returns a chunk and next offset, and delete removes the stored copy. Publishing and deleting require a writable profile. The source file is unchanged.",
+    "description": "List temporary file copies, get their metadata or read chunks by artifact ID. In a writable profile, publish a copy from a workspace file or delete the stored copy. The original file stays in place.",
     "annotations": {
       "readOnlyHint": false,
       "destructiveHint": true,
       "idempotentHint": false,
-      "openWorldHint": false
+      "openWorldHint": false,
+      "title": "Manage temporary file copies"
     },
     "parameters": {
       "action": "Operation to perform. Supply path for publish and artifact_id for get, read or delete; list accepts an optional limit.",
