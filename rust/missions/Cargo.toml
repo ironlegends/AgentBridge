@@ -10,7 +10,7 @@ publish = false
 agent-bridge-core = { path = "../core" }
 chrono.workspace = true
 rand = "0.8"
-rusqlite = { version = "0.37", features = ["bundled", "serde_json"] }
+rusqlite = { version = "0.43", features = ["bundled", "serde_json"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
