@@ -279,41 +279,42 @@ impl DesktopFiles {
         let mut tools = vec![
             spec(
                 "desktop_policy_status",
-                "Describe this crate's workspace capability and active restricted tool set.",
+                "Inspect the selected workspace's file access, enabled tools and operation limits before choosing a file operation. This reads policy; it does not change permissions. For gateway version and health, use agent_bridge_status.",
                 json!({}),
                 &[],
             ),
             spec(
                 "desktop_get_file_info",
-                "Inspect safe regular-file or directory metadata within the selected workspace.",
+                "Inspect one workspace entry without reading its contents. Returns its kind, file size when applicable, read-only flag and modification time when available. Use desktop_list_directory for children or desktop_read_file for text.",
                 json!({"path":path}),
                 &["path"],
             ),
             spec(
                 "desktop_list_directory",
-                "List directory entries without following links, with bounded depth and truncation.",
-                json!({"path":path,"depth":{"type":"integer","minimum":1,"maximum":4,"default":2}}),
+                "Browse children of a workspace directory. Returns entry metadata and a truncation flag when traversal reaches a limit. Use desktop_search to find names matching a pattern rather than enumerating a whole subtree.",
+                json!({"path":path,"depth":{"description":"Number of directory levels to traverse. Use 1 for immediate children.","type":"integer","minimum":1,"maximum":4,"default":2}}),
                 &["path"],
             ),
             spec(
                 "desktop_read_file",
-                "Read bounded UTF-8 text; issue a 5-minute, one-use instance-scoped observation_id.",
-                json!({"path":path,"offset":{"type":"integer","minimum":-MAX_SAFE_INTEGER,"maximum":MAX_SAFE_INTEGER,"default":0},
-                       "length":{"type":"integer","minimum":1,"maximum":5000,"default":1000}}),
+                "Read a window of lines from a UTF-8 file. Returns content, line counts, truncation, a SHA-256 digest and a five-minute observation ID for this instance. Reading leaves the file unchanged. Use desktop_get_file_info for metadata alone.",
+                json!({"path":{"type":"string","minLength":1,"maxLength":MAX_PATH_BYTES,
+                               "description":"Workspace-relative path to a regular UTF-8 file."},"offset":{"description":"Zero-based line index. A negative offset counts from the end of the file.","type":"integer","minimum":-MAX_SAFE_INTEGER,"maximum":MAX_SAFE_INTEGER,"default":0},
+                       "length":{"description":"Maximum number of text lines to return.","type":"integer","minimum":1,"maximum":5000,"default":1000}}),
                 &["path"],
             ),
             spec(
                 "desktop_search",
-                "Bounded one-shot filename or UTF-8 content search; no hidden traversal by default.",
+                "Find matching filenames or UTF-8 text under a workspace directory in a single bounded search. Returns matches and a truncation flag. Narrow the path or filename filter for incomplete results; use desktop_read_file to inspect a match.",
                 json!({"path":path,
-                       "pattern":{"type":"string","minLength":1,"maxLength":MAX_PATTERN_CHARS},
-                       "search_type":{"type":"string","enum":["files","content"],"default":"files"},
-                       "file_pattern":{"type":"string","minLength":1,"maxLength":256},
-                       "ignore_case":{"type":"boolean","default":true},
-                       "include_hidden":{"type":"boolean","default":false},
-                       "literal_search":{"type":"boolean","default":false},
-                       "max_results":{"type":"integer","minimum":1,"maximum":100,"default":50},
-                       "timeout_ms":{"type":"integer","minimum":500,"maximum":10000,"default":5000}}),
+                       "pattern":{"description":"Expression to match against a filename or a line of text. Interpreted as a regex unless literal_search is true.","type":"string","minLength":1,"maxLength":MAX_PATTERN_CHARS},
+                       "search_type":{"description":"Match filenames with files, or text lines with content when the active profile permits it.","type":"string","enum":["files","content"],"default":"files"},
+                       "file_pattern":{"description":"Optional filename glob restricting the files examined.","type":"string","minLength":1,"maxLength":256},
+                       "ignore_case":{"description":"Match regardless of letter case when true.","type":"boolean","default":true},
+                       "include_hidden":{"description":"Include hidden entries only when supported by the workspace policy.","type":"boolean","default":false},
+                       "literal_search":{"description":"Treat pattern as literal text instead of a regular expression.","type":"boolean","default":false},
+                       "max_results":{"description":"Stop collecting after this many matches.","type":"integer","minimum":1,"maximum":100,"default":50},
+                       "timeout_ms":{"description":"Search time budget in milliseconds; a partial result can be truncated.","type":"integer","minimum":500,"maximum":10000,"default":5000}}),
                 &["path", "pattern"],
             ),
             artifacts::tool_spec(),
@@ -323,16 +324,17 @@ impl DesktopFiles {
             for tool in &mut tools {
                 match tool.name {
                     "desktop_list_directory" => {
+                        tool.description = "List immediate children visible under a workspace directory. Returns the path, depth and entries. Use desktop_search to find visible filenames.";
                         tool.input_schema["properties"]["depth"] = json!({
-                            "type":"integer","minimum":1,"maximum":1,"default":1
+                            "description":"This web profile lists immediate children only.","type":"integer","minimum":1,"maximum":1,"default":1
                         });
                     }
                     "desktop_search" => {
                         tool.input_schema["properties"]["search_type"] = json!({
-                            "type":"string","enum":["files"],"default":"files"
+                            "description":"This web profile searches filenames only.","type":"string","enum":["files"],"default":"files"
                         });
                         tool.input_schema["properties"]["include_hidden"] = json!({
-                            "type":"boolean","const":false,"default":false
+                            "description":"Hidden entries are excluded in this web profile.","type":"boolean","const":false,"default":false
                         });
                     }
                     _ => {}

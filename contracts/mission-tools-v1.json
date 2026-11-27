@@ -1,41 +1,54 @@
 [
   {
     "name": "agent_bridge_status",
-    "description": "Read isolated Agent Bridge gateway status.",
+    "description": "Check the gateway's version, Rust backend, database schema, and active desktop profile before diagnosing a connection. Use desktop_policy_status for workspace limits and permitted file operations.",
     "inputSchema": {
       "type": "object",
       "additionalProperties": false,
       "properties": {}
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "openWorldHint": false
     }
   },
   {
     "name": "agent_bridge_context_create",
-    "description": "Create an Agent Bridge actor context on the explicitly configured local development Core.",
+    "description": "Register a new actor before creating or joining a mission. Returns a public context_id for invitations and a private context_handle for subsequent calls. Keep the handle secret and reuse it; another call creates a different identity.",
     "inputSchema": {
       "type": "object",
       "additionalProperties": false,
       "properties": {}
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "openWorldHint": false,
+      "destructiveHint": false,
+      "idempotentHint": false
     }
   },
   {
     "name": "agent_bridge_mission_create",
-    "description": "Create one durable Agent Bridge mission. Supply a stable idempotency_key for safe retry.",
+    "description": "Start a durable mission owned by your context. Returns the mission ID, goal, status and revision. Use mission_list to find existing work. For a retry, reuse the original goal and idempotency key.",
     "inputSchema": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
         "actor_context_handle": {
-          "type": "string"
+          "type": "string",
+          "description": "Private context_handle returned by agent_bridge_context_create. Authenticate as its owner; never share this value."
         },
         "goal": {
           "type": "string",
           "minLength": 1,
-          "maxLength": 16384
+          "maxLength": 16384,
+          "description": "Work to be accomplished, written for the agents participating in this mission."
         },
         "idempotency_key": {
           "type": "string",
           "minLength": 1,
-          "maxLength": 256
+          "maxLength": 256,
+          "description": "Caller-chosen key for this operation. Reuse it only with the same arguments when retrying."
         }
       },
       "required": [
@@ -43,68 +56,89 @@
         "goal",
         "idempotency_key"
       ]
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "openWorldHint": false,
+      "destructiveHint": false,
+      "idempotentHint": true
     }
   },
   {
     "name": "agent_bridge_mission_get",
-    "description": "Read a durable mission by existing context handle.",
+    "description": "Read one mission's goal, status, revision and timestamps as an attached member. Use mission_observe to check an invitation or identify the current owner; it also works before attachment.",
     "inputSchema": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
         "actor_context_handle": {
-          "type": "string"
+          "type": "string",
+          "description": "Private context_handle returned by agent_bridge_context_create. Authenticate as its owner; never share this value."
         },
         "mission_id": {
-          "type": "string"
+          "type": "string",
+          "description": "ID of the target mission, returned by mission_create or mission_list."
         }
       },
       "required": [
         "actor_context_handle",
         "mission_id"
       ]
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "openWorldHint": false
     }
   },
   {
     "name": "agent_bridge_mission_observe",
-    "description": "Read the current owner context ID, your role and invitation state, and the mission revision. Available to invitees and attached members.",
+    "description": "Check your invitation or membership before a handoff. Returns the mission revision, current owner's public ID, your role and attachment state. For the goal and work status, attached members can use mission_get.",
     "inputSchema": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
         "actor_context_handle": {
-          "type": "string"
+          "type": "string",
+          "description": "Private context_handle returned by agent_bridge_context_create. Authenticate as its owner; never share this value."
         },
         "mission_id": {
-          "type": "string"
+          "type": "string",
+          "description": "ID of the target mission, returned by mission_create or mission_list."
         }
       },
       "required": [
         "actor_context_handle",
         "mission_id"
       ]
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "openWorldHint": false
     }
   },
   {
     "name": "agent_bridge_mission_grant",
-    "description": "As current owner, invite a distinct context at the observed revision. If the reply is uncertain, the invitee can observe their state.",
+    "description": "Invite another context to an existing mission as its current owner. This records an invitation; the target must call mission_attach to join. Use the mission revision from mission_observe and reconcile an uncertain reply before retrying.",
     "inputSchema": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
         "actor_context_handle": {
-          "type": "string"
+          "type": "string",
+          "description": "Private context_handle returned by agent_bridge_context_create. Authenticate as its owner; never share this value."
         },
         "mission_id": {
-          "type": "string"
+          "type": "string",
+          "description": "ID of the target mission, returned by mission_create or mission_list."
         },
         "if_revision": {
           "type": "integer",
-          "minimum": 1
+          "minimum": 1,
+          "description": "Current mission revision from mission_observe. A stale revision is rejected."
         },
         "target_context_id": {
           "type": "string",
-          "description": "Public context ID of the recipient."
+          "description": "Public context_id of the other actor. A private context_handle is not accepted here."
         }
       },
       "required": [
@@ -113,24 +147,33 @@
         "if_revision",
         "target_context_id"
       ]
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "openWorldHint": false,
+      "destructiveHint": false,
+      "idempotentHint": false
     }
   },
   {
     "name": "agent_bridge_mission_attach",
-    "description": "Accept your invitation using its observed revision. Observe your state before any retry after an uncertain reply.",
+    "description": "Accept an existing invitation as the invited context. This changes membership to attached and returns the updated mission. Check mission_observe for your invitation state and current revision before retrying.",
     "inputSchema": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
         "actor_context_handle": {
-          "type": "string"
+          "type": "string",
+          "description": "Private context_handle returned by agent_bridge_context_create. Authenticate as its owner; never share this value."
         },
         "mission_id": {
-          "type": "string"
+          "type": "string",
+          "description": "ID of the target mission, returned by mission_create or mission_list."
         },
         "if_revision": {
           "type": "integer",
-          "minimum": 1
+          "minimum": 1,
+          "description": "Current mission revision from mission_observe. A stale revision is rejected."
         }
       },
       "required": [
@@ -138,28 +181,37 @@
         "mission_id",
         "if_revision"
       ]
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "openWorldHint": false,
+      "destructiveHint": false,
+      "idempotentHint": false
     }
   },
   {
     "name": "agent_bridge_mission_transfer",
-    "description": "As current owner, transfer ownership to a distinct attached member at the observed revision. Observe the current owner after an uncertain reply.",
+    "description": "Transfer ownership to a different, already attached member. This changes who can assign work or complete the mission. Check the owner and revision with mission_observe after an uncertain reply.",
     "inputSchema": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
         "actor_context_handle": {
-          "type": "string"
+          "type": "string",
+          "description": "Private context_handle returned by agent_bridge_context_create. Authenticate as its owner; never share this value."
         },
         "mission_id": {
-          "type": "string"
+          "type": "string",
+          "description": "ID of the target mission, returned by mission_create or mission_list."
         },
         "if_revision": {
           "type": "integer",
-          "minimum": 1
+          "minimum": 1,
+          "description": "Current mission revision from mission_observe. A stale revision is rejected."
         },
         "target_context_id": {
           "type": "string",
-          "description": "Public context ID of the recipient."
+          "description": "Public context_id of the other actor. A private context_handle is not accepted here."
         }
       },
       "required": [
@@ -168,75 +220,98 @@
         "if_revision",
         "target_context_id"
       ]
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "openWorldHint": false,
+      "destructiveHint": true,
+      "idempotentHint": false
     }
   },
   {
     "name": "agent_bridge_mission_list",
-    "description": "List at most 100 durable missions visible to this context.",
+    "description": "Find missions to which your context is attached, most recently created first. Returns up to the requested number of mission records. For one known mission, use mission_get.",
     "inputSchema": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
         "actor_context_handle": {
-          "type": "string"
+          "type": "string",
+          "description": "Private context_handle returned by agent_bridge_context_create. Authenticate as its owner; never share this value."
         },
         "limit": {
           "type": "integer",
           "minimum": 1,
-          "maximum": 100
+          "maximum": 100,
+          "description": "Maximum number of records to return; defaults to 20."
         }
       },
       "required": [
         "actor_context_handle"
       ]
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "openWorldHint": false
     }
   },
   {
     "name": "agent_bridge_mission_checkpoints",
-    "description": "Read bounded durable result checkpoints without replay.",
+    "description": "Read saved result summaries for a mission you have joined, newest revision first. Returns checkpoint IDs, summaries and revisions, including an empty list when none exist. To append a summary, use the singular mission_checkpoint tool.",
     "inputSchema": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
         "actor_context_handle": {
-          "type": "string"
+          "type": "string",
+          "description": "Private context_handle returned by agent_bridge_context_create. Authenticate as its owner; never share this value."
         },
         "mission_id": {
-          "type": "string"
+          "type": "string",
+          "description": "ID of the target mission, returned by mission_create or mission_list."
         },
         "limit": {
           "type": "integer",
           "minimum": 1,
-          "maximum": 100
+          "maximum": 100,
+          "description": "Maximum number of records to return; defaults to 20."
         }
       },
       "required": [
         "actor_context_handle",
         "mission_id"
       ]
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "openWorldHint": false
     }
   },
   {
     "name": "agent_bridge_mission_checkpoint",
-    "description": "Persist a result summary at observed revision. Read before any retry after an uncertain reply.",
+    "description": "Append one durable progress summary to a mission you have joined. This advances the mission revision and returns the updated mission record. For history, or to check whether a write succeeded before retrying, use the plural mission_checkpoints tool.",
     "inputSchema": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
         "actor_context_handle": {
-          "type": "string"
+          "type": "string",
+          "description": "Private context_handle returned by agent_bridge_context_create. Authenticate as its owner; never share this value."
         },
         "mission_id": {
-          "type": "string"
+          "type": "string",
+          "description": "ID of the target mission, returned by mission_create or mission_list."
         },
         "summary": {
           "type": "string",
           "minLength": 1,
-          "maxLength": 4096
+          "maxLength": 4096,
+          "description": "Progress or result to record for this mission."
         },
         "if_revision": {
           "type": "integer",
-          "minimum": 1
+          "minimum": 1,
+          "description": "Current mission revision from mission_observe. A stale revision is rejected."
         }
       },
       "required": [
@@ -245,34 +320,44 @@
         "summary",
         "if_revision"
       ]
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "openWorldHint": false,
+      "destructiveHint": false,
+      "idempotentHint": false
     }
   },
   {
     "name": "agent_bridge_mission_subtask_create",
-    "description": "As current mission owner, create a durable web-agent subtask. Optionally assign it to an attached context. Use a stable idempotency key.",
+    "description": "Create one unit of work inside a mission you own. Leave it unassigned or name an attached member. Returns the subtask and a replay indicator. Reuse the same key and arguments for a retry.",
     "inputSchema": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
         "actor_context_handle": {
-          "type": "string"
+          "type": "string",
+          "description": "Private context_handle returned by agent_bridge_context_create. Authenticate as its owner; never share this value."
         },
         "mission_id": {
-          "type": "string"
+          "type": "string",
+          "description": "ID of the target mission, returned by mission_create or mission_list."
         },
         "goal": {
           "type": "string",
           "minLength": 1,
-          "maxLength": 2048
+          "maxLength": 2048,
+          "description": "Specific assignment to create within the mission."
         },
         "assignee_context_id": {
           "type": "string",
-          "description": "Public context ID of an attached mission member."
+          "description": "Public context_id of an attached mission member who should perform this work."
         },
         "idempotency_key": {
           "type": "string",
           "minLength": 1,
-          "maxLength": 256
+          "maxLength": 256,
+          "description": "Caller-chosen key for this operation. Reuse it only with the same arguments when retrying."
         }
       },
       "required": [
@@ -281,38 +366,48 @@
         "goal",
         "idempotency_key"
       ]
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "openWorldHint": false,
+      "destructiveHint": false,
+      "idempotentHint": true
     }
   },
   {
     "name": "agent_bridge_mission_subtask_assign",
-    "description": "As current mission owner, assign pending or blocked work to an attached context using the subtask revision and a stable idempotency key.",
+    "description": "Assign pending or blocked work to an attached member as the mission owner. Supply the subtask revision from mission_subtask_list. Returns the updated subtask and a replay indicator.",
     "inputSchema": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
         "actor_context_handle": {
-          "type": "string"
+          "type": "string",
+          "description": "Private context_handle returned by agent_bridge_context_create. Authenticate as its owner; never share this value."
         },
         "mission_id": {
-          "type": "string"
+          "type": "string",
+          "description": "ID of the target mission, returned by mission_create or mission_list."
         },
         "subtask_id": {
           "type": "string",
-          "pattern": "^sub_[0-9a-f]{32}$"
+          "pattern": "^sub_[0-9a-f]{32}$",
+          "description": "ID of the assignment returned by mission_subtask_create or mission_subtask_list."
         },
         "idempotency_key": {
           "type": "string",
           "minLength": 1,
-          "maxLength": 256
+          "maxLength": 256,
+          "description": "Caller-chosen key for this operation. Reuse it only with the same arguments when retrying."
         },
         "if_revision": {
           "type": "integer",
           "minimum": 1,
-          "description": "Current subtask revision."
+          "description": "Current revision of this subtask from mission_subtask_list, distinct from the mission revision."
         },
         "assignee_context_id": {
           "type": "string",
-          "description": "Public context ID of an attached mission member."
+          "description": "Public context_id of an attached mission member who should perform this work."
         }
       },
       "required": [
@@ -323,67 +418,86 @@
         "idempotency_key",
         "assignee_context_id"
       ]
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "openWorldHint": false,
+      "destructiveHint": true,
+      "idempotentHint": true
     }
   },
   {
     "name": "agent_bridge_mission_subtask_list",
-    "description": "As an attached member, read current subtask assignments and results in creation order. Read after an uncertain reply before taking further action.",
+    "description": "Read a mission's assignments, progress and result summaries as an attached member. Use a subtask ID for one assignment, or page through creation order with the returned cursor.",
     "inputSchema": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
         "actor_context_handle": {
-          "type": "string"
+          "type": "string",
+          "description": "Private context_handle returned by agent_bridge_context_create. Authenticate as its owner; never share this value."
         },
         "mission_id": {
-          "type": "string"
+          "type": "string",
+          "description": "ID of the target mission, returned by mission_create or mission_list."
         },
         "subtask_id": {
           "type": "string",
-          "pattern": "^sub_[0-9a-f]{32}$"
+          "pattern": "^sub_[0-9a-f]{32}$",
+          "description": "Return only this assignment. Omit to list the mission's assignments."
         },
         "limit": {
           "type": "integer",
           "minimum": 1,
-          "maximum": 20
+          "maximum": 20,
+          "description": "Maximum number of records to return; defaults to 20."
         },
         "after_created_revision": {
           "type": "integer",
-          "minimum": 0
+          "minimum": 0,
+          "description": "Pagination cursor. Pass next_after_created_revision from the previous page to continue."
         }
       },
       "required": [
         "actor_context_handle",
         "mission_id"
       ]
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "openWorldHint": false
     }
   },
   {
     "name": "agent_bridge_mission_subtask_update",
-    "description": "As the assigned context, record in_progress before starting, or record blocked or completed with a summary. A replayed acknowledgement is for reconciliation only.",
+    "description": "Update your assigned work using its current subtask revision. Start with in_progress, then record blocked or completed with a summary. The mission owner can also release another assignee's in-progress work as blocked. Returns the subtask and a replay indicator.",
     "inputSchema": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
         "actor_context_handle": {
-          "type": "string"
+          "type": "string",
+          "description": "Private context_handle returned by agent_bridge_context_create. Authenticate as its owner; never share this value."
         },
         "mission_id": {
-          "type": "string"
+          "type": "string",
+          "description": "ID of the target mission, returned by mission_create or mission_list."
         },
         "subtask_id": {
           "type": "string",
-          "pattern": "^sub_[0-9a-f]{32}$"
+          "pattern": "^sub_[0-9a-f]{32}$",
+          "description": "ID of the assignment returned by mission_subtask_create or mission_subtask_list."
         },
         "idempotency_key": {
           "type": "string",
           "minLength": 1,
-          "maxLength": 256
+          "maxLength": 256,
+          "description": "Caller-chosen key for this operation. Reuse it only with the same arguments when retrying."
         },
         "if_revision": {
           "type": "integer",
           "minimum": 1,
-          "description": "Current subtask revision."
+          "description": "Current revision of this subtask from mission_subtask_list, distinct from the mission revision."
         },
         "status": {
           "type": "string",
@@ -391,12 +505,14 @@
             "in_progress",
             "blocked",
             "completed"
-          ]
+          ],
+          "description": "Next state of this assignment. Start work with in_progress before reporting blocked or completed."
         },
         "summary": {
           "type": "string",
           "minLength": 1,
-          "maxLength": 4096
+          "maxLength": 4096,
+          "description": "Required for blocked or completed work. Describe the blocker, reason for release or result. Optional for in_progress."
         }
       },
       "required": [
@@ -407,29 +523,39 @@
         "idempotency_key",
         "status"
       ]
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "openWorldHint": false,
+      "destructiveHint": true,
+      "idempotentHint": true
     }
   },
   {
     "name": "agent_bridge_mission_complete",
-    "description": "Complete a mission using its observed revision and stable idempotency key.",
+    "description": "Close a mission you own at its current revision. This changes the mission status to completed and returns the mission record. Use mission_subtask_update to finish only one assignment; reuse the original key and arguments for a retry.",
     "inputSchema": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
         "actor_context_handle": {
-          "type": "string"
+          "type": "string",
+          "description": "Private context_handle returned by agent_bridge_context_create. Authenticate as its owner; never share this value."
         },
         "mission_id": {
-          "type": "string"
+          "type": "string",
+          "description": "ID of the target mission, returned by mission_create or mission_list."
         },
         "if_revision": {
           "type": "integer",
-          "minimum": 1
+          "minimum": 1,
+          "description": "Current mission revision from mission_observe. A stale revision is rejected."
         },
         "idempotency_key": {
           "type": "string",
           "minLength": 1,
-          "maxLength": 256
+          "maxLength": 256,
+          "description": "Caller-chosen key for this operation. Reuse it only with the same arguments when retrying."
         }
       },
       "required": [
@@ -438,6 +564,12 @@
         "if_revision",
         "idempotency_key"
       ]
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "openWorldHint": false,
+      "destructiveHint": true,
+      "idempotentHint": true
     }
   }
 ]

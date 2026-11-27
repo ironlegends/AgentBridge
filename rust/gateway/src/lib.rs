@@ -240,6 +240,8 @@ pub struct ToolDefinition {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
     pub input_schema: Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub annotations: Option<Value>,
 }
 
 impl ToolDefinition {
@@ -251,6 +253,7 @@ impl ToolDefinition {
         Self {
             name: name.into(),
             title: None,
+            annotations: None,
             description,
             input_schema,
         }

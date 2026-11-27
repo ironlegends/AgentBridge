@@ -202,9 +202,7 @@ pub fn project_read_router(
             serde_json::from_value(result)
                 .map_err(|_| ToolDispatchError::internal("PROJECT_READ_UNAVAILABLE"))
         });
-        catalog.push(ToolDefinition::new(
-            name, Some(spec.description.to_owned()), spec.input_schema,
-        ));
+        catalog.push(desktop_definition(spec));
     }
     if catalog.len() != READ_TOOLS.len() {
         return Err("Required read-only DesktopFiles tools are unavailable".into());
@@ -271,6 +269,20 @@ struct DesktopSurface {
     settings_tools: bool,
     terminal_tool: bool,
     processes: bool,
+}
+
+fn desktop_definition(spec: agent_bridge_desktop::ToolSpec) -> ToolDefinition {
+    let mut tool = ToolDefinition::new(spec.name, Some(spec.description.into()), spec.input_schema);
+    tool.annotations = match spec.name {
+        "desktop_get_file_info" | "desktop_list_directory" | "desktop_search" | "desktop_policy_status" =>
+            Some(json!({"readOnlyHint": true, "openWorldHint": false})),
+        // A read may issue an instance-local observation. Artifact actions can publish or delete.
+        "desktop_read_file" => Some(json!({"openWorldHint": false})),
+        "desktop_artifact_manage" => Some(json!({"readOnlyHint": false, "destructiveHint": true,
+            "idempotentHint": false, "openWorldHint": false})),
+        _ => None,
+    };
+    tool
 }
 
 /// Reuse the *same* DesktopFiles, Task Room, skill, extension and terminal
@@ -432,7 +444,7 @@ fn attach_desktop_surface(
             serde_json::from_value(response)
                 .map_err(|_| ToolDispatchError::internal("Invalid workstation tool response"))
         });
-        catalog.push(ToolDefinition::new(name,Some(tool.description.to_owned()),tool.input_schema));
+        catalog.push(desktop_definition(tool));
     }
     if selection.web_read_only
         && catalog.iter().filter(|tool| tool.name.starts_with("desktop_")).count() != 4
