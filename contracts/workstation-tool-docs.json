@@ -460,5 +460,54 @@
       "openWorldHint": false
     },
     "description": "Inspect the workstation version, selected tool count, capability identity, active profile and component qualification. Use desktop_policy_status for filesystem limits."
+  },
+  "agent_bridge_mission_get": {
+    "description": "Read one mission's goal, status, revision and timestamps as an attached member. Use mission_observe to check an invitation or identify the current owner; it also works before attachment.",
+    "annotations": {
+      "readOnlyHint": true,
+      "openWorldHint": false
+    },
+    "parameters": {
+      "actor_context_handle": "Private context_handle returned by agent_bridge_context_create. Authenticate as its owner; never share this value.",
+      "mission_id": "ID of the target mission, returned by mission_create or mission_list."
+    }
+  },
+  "agent_bridge_mission_observe": {
+    "description": "Check your invitation or membership before a handoff. Returns the mission revision, current owner's public ID, your role and attachment state. For the goal and work status, attached members can use mission_get.",
+    "annotations": {
+      "readOnlyHint": true,
+      "openWorldHint": false
+    },
+    "parameters": {
+      "actor_context_handle": "Private context_handle returned by agent_bridge_context_create. Authenticate as its owner; never share this value.",
+      "mission_id": "ID of the target mission, returned by mission_create or mission_list."
+    }
+  },
+  "agent_bridge_mission_checkpoint": {
+    "description": "Append one durable progress summary to a mission you have joined. This advances the mission revision and returns the updated mission record. For history, or to check whether a write succeeded before retrying, use the plural mission_checkpoints tool.",
+    "annotations": {
+      "readOnlyHint": false,
+      "openWorldHint": false,
+      "destructiveHint": false,
+      "idempotentHint": false
+    },
+    "parameters": {
+      "actor_context_handle": "Private context_handle returned by agent_bridge_context_create. Authenticate as its owner; never share this value.",
+      "mission_id": "ID of the target mission, returned by mission_create or mission_list.",
+      "summary": "Progress or result to record for this mission.",
+      "if_revision": "Current mission revision from mission_observe. A stale revision is rejected."
+    }
+  },
+  "agent_bridge_mission_checkpoints": {
+    "description": "Read saved result summaries for a mission you have joined, newest revision first. Returns checkpoint IDs, summaries and revisions, including an empty list when none exist. To append a summary, use the singular mission_checkpoint tool.",
+    "annotations": {
+      "readOnlyHint": true,
+      "openWorldHint": false
+    },
+    "parameters": {
+      "actor_context_handle": "Private context_handle returned by agent_bridge_context_create. Authenticate as its owner; never share this value.",
+      "mission_id": "ID of the target mission, returned by mission_create or mission_list.",
+      "limit": "Maximum number of records to return; defaults to 20."
+    }
   }
 }
