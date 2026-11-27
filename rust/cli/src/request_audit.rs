@@ -124,7 +124,7 @@ pub(crate) struct RequestAudit {
 impl RequestAudit {
     pub(crate) fn new() -> Result<Self, RuntimeError> {
         let mut boot_bytes = [0u8; 16];
-        getrandom::getrandom(&mut boot_bytes).map_err(|_| "Request audit randomness unavailable")?;
+        getrandom::fill(&mut boot_bytes).map_err(|_| "Request audit randomness unavailable")?;
         Ok(Self {
             boot_id: boot_bytes.iter().map(|byte| format!("{byte:02x}")).collect(),
             sessions: ClientSessions::default(),
@@ -316,7 +316,7 @@ impl RequestDetails {
             ConnectorClient::Gemini => "gemini",
             ConnectorClient::ChatGpt => "chatgpt",
         };
-        let client_hash = format!("{:x}", Sha256::digest(identity.client_id.as_bytes()));
+        let client_hash: String = Sha256::digest(identity.client_id.as_bytes()).iter().map(|b| format!("{b:02x}")).collect();
         self.update(|record| {
             record.provider = Some(provider);
             record.client_id_sha256 = Some(client_hash.clone());

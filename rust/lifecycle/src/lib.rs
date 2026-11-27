@@ -33,7 +33,7 @@ pub mod unix_project_handle;
 pub mod git_revision_windows;
 
 use fs2::FileExt;
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
@@ -242,7 +242,7 @@ fn check_id(id: &str) -> Result<()> {
 }
 fn random_hex() -> Result<String> {
     let mut bytes = [0u8; 32];
-    getrandom::getrandom(&mut bytes)
+    getrandom::fill(&mut bytes)
         .map_err(|_| LifecycleError::Uncertain("system randomness unavailable"))?;
     Ok(hex::encode(bytes))
 }

@@ -140,7 +140,7 @@ pub(super) fn random_id() -> io::Result<String> {
 #[cfg(unix)]
 pub(super) fn random_id() -> io::Result<String> {
     let mut bytes = [0u8; 16];
-    getrandom::getrandom(&mut bytes).map_err(|_| unavailable())?;
+    getrandom::fill(&mut bytes).map_err(|_| unavailable())?;
     bytes[6] = (bytes[6] & 0x0f) | 0x40;
     bytes[8] = (bytes[8] & 0x3f) | 0x80;
     Ok(format!(

@@ -116,7 +116,7 @@ fn digest(file: &mut File, maximum: u64) -> Result<(u64, String), RuntimeError> 
         bytes = bytes.checked_add(count as u64).filter(|size| *size <= maximum).ok_or("NATIVE_RESOURCE_SIZE_LIMIT")?;
         hash.update(&buffer[..count]);
     }
-    Ok((bytes, format!("{:x}", hash.finalize())))
+    Ok((bytes, hash.finalize().iter().map(|b| format!("{b:02x}")).collect()))
 }
 // No exact-passive NativeAOT image has yet been independently packaged,
 // reviewed and pinned. Never infer support from command-line parsing or a
@@ -135,7 +135,7 @@ impl Resources {
         let mut manifest_file = pin(&manifest_path, false)?;
         if manifest_file.metadata()?.len() > 65536 { return Err("NATIVE_MANIFEST_LIMIT".into()); }
         let mut bytes = Vec::new(); manifest_file.read_to_end(&mut bytes)?;
-        if format!("{:x}", Sha256::digest(&bytes)) != seal.to_ascii_lowercase() { return Err("NATIVE_MANIFEST_CHANGED".into()); }
+        if Sha256::digest(&bytes).iter().map(|b| format!("{b:02x}")).collect::<String>() != seal.to_ascii_lowercase() { return Err("NATIVE_MANIFEST_CHANGED".into()); }
         let manifest: Manifest = serde_json::from_slice(&bytes)?;
         if manifest.schema != 1 || manifest.platform != "windows-x64" || manifest.protocol != 1
             || manifest.winapp_version != "0.5.0-agentbridge.2" || manifest.vda_commit != "8172097993b1194e3d5e2ff38421ebb06f867b6c" {
@@ -186,7 +186,7 @@ impl Resources {
 }
 
 pub(crate) fn uuid() -> Result<String, RuntimeError> {
-    let mut bytes = [0u8; 16]; getrandom::getrandom(&mut bytes).map_err(|_| "NATIVE_RANDOM_UNAVAILABLE")?;
+    let mut bytes = [0u8; 16]; getrandom::fill(&mut bytes).map_err(|_| "NATIVE_RANDOM_UNAVAILABLE")?;
     bytes[6] = bytes[6] & 15 | 64; bytes[8] = bytes[8] & 63 | 128;
     let hex: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
     Ok(format!("{}-{}-{}-{}-{}", &hex[..8], &hex[8..12], &hex[12..16], &hex[16..20], &hex[20..]))

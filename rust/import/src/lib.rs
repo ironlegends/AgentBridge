@@ -22,7 +22,7 @@
 //! checksums before opening this SQLite connection for import.
 
 use chrono::Utc;
-use getrandom::getrandom;
+use getrandom::fill as getrandom_fill;
 use rusqlite::{params, Connection, Error as SqlError, ErrorCode, OptionalExtension, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -338,7 +338,7 @@ fn identity_key(provider: &str, context: &str, task: &str) -> String {
 }
 fn mission_id() -> Result<String> {
     let mut raw = [0u8; 16];
-    getrandom(&mut raw).map_err(|_| ImportError::new(
+    getrandom_fill(&mut raw).map_err(|_| ImportError::new(
         "INTERNAL_ERROR", "Secure random mission ID generation failed."
     ))?;
     let mut id = String::from("mis_");

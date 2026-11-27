@@ -94,7 +94,7 @@ impl Source {
         destination.flush()?;
         destination.sync_all()?;
         destination.seek(SeekFrom::Start(0))?;
-        Ok(Copied { bytes, sha256: format!("{:x}", digest.finalize()), blocks })
+        Ok(Copied { bytes, sha256: digest.finalize().iter().map(|b| format!("{b:02x}")).collect(), blocks })
     }
 }
 

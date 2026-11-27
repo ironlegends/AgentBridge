@@ -583,7 +583,7 @@ fn skills_remote_provider_verified_sha256_and_mismatch_regressions() {
         )],
     );
     let zip_bytes = fs::read(&zip_path).unwrap();
-    let expected_sha = format!("{:x}", Sha256::digest(&zip_bytes));
+    let expected_sha: String = Sha256::digest(&zip_bytes).iter().map(|b| format!("{b:02x}")).collect();
     let url = "https://skills.example.test/packages/remote-demo.zip";
 
     let files = DesktopFiles::open(

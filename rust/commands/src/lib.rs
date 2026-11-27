@@ -164,7 +164,7 @@ pub struct RequestId(String);
 impl RequestId {
     fn generate() -> Result<Self, CommandError> {
         let mut raw = [0u8; 16];
-        getrandom::getrandom(&mut raw).map_err(|_| CommandError::EntropyUnavailable)?;
+        getrandom::fill(&mut raw).map_err(|_| CommandError::EntropyUnavailable)?;
         const HEX: &[u8; 16] = b"0123456789abcdef";
         let mut s = String::with_capacity(32);
         for b in raw {

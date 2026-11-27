@@ -1324,7 +1324,7 @@ mod restricted_access_layers {
         assert_eq!(workspace_access::project_read_sid(&root).unwrap(),std::env::var("AB_LOW_IL_EXPECTED_SID").unwrap());
         let expected_hash=std::env::var("AB_LOW_IL_SHA256").unwrap();
         assert!(fs::metadata(&exe).unwrap().len()<=MAX_IMAGE);
-        assert_eq!(format!("{:x}",Sha256::digest(fs::read(&exe).unwrap())),expected_hash);
+        assert_eq!(hex::encode(Sha256::digest(fs::read(&exe).unwrap())),expected_hash);
         let primary=workspace_access::primary_restricted_token(&pinned).unwrap();
         let primary_stats=token_stats(primary.raw()).unwrap();
         let auth=(primary_stats.AuthenticationId.HighPart,primary_stats.AuthenticationId.LowPart);
@@ -1376,7 +1376,7 @@ mod restricted_access_layers {
         }).unwrap();
         for (name,win32,nt) in observed {println!("LOW_IL_KERNEL {name} restricted_win32={win32:?} restricted_nt_open=(0x{:08X},dos={},identity={})",nt.0,nt.1,nt.2);}
         assert_eq!(workspace_access::project_read_sid(&root).unwrap(),std::env::var("AB_LOW_IL_EXPECTED_SID").unwrap());
-        assert_eq!(format!("{:x}",Sha256::digest(fs::read(&exe).unwrap())),expected_hash);
+        assert_eq!(hex::encode(Sha256::digest(fs::read(&exe).unwrap())),expected_hash);
         drop(handles);
         println!("LOW_IL_KERNEL diagnostic_only=true ACL_modified=false child_started=false identity_rechecked=true");
     }
@@ -1390,7 +1390,7 @@ mod restricted_access_layers {
         let expected=std::env::var("AB_LOW_IL_EXPECTED_SID").expect("approved SID");
         assert_eq!(workspace_access::project_read_sid(&root).unwrap(),expected);
         let expected_hash=std::env::var("AB_LOW_IL_SHA256").expect("approved image hash");
-        let hash=format!("{:x}",Sha256::digest(fs::read(&exe).unwrap()));
+        let hash=hex::encode(Sha256::digest(fs::read(&exe).unwrap()));
         assert_eq!(hash,expected_hash);
         let primary=workspace_access::primary_restricted_token(&pinned).unwrap();
         let mut duplicate=ptr::null_mut();
@@ -1418,7 +1418,7 @@ mod restricted_access_layers {
         }).unwrap();
         for (label,mode,result) in results {println!("LOW_IL_LAYERS {label} {mode} restricted_open={result:?}");}
         assert_eq!(workspace_access::project_read_sid(&root).unwrap(),expected);
-        assert_eq!(format!("{:x}",Sha256::digest(fs::read(&exe).unwrap())),expected_hash);
+        assert_eq!(hex::encode(Sha256::digest(fs::read(&exe).unwrap())),expected_hash);
         println!("LOW_IL_LAYERS diagnostic_only=true ACL_modified=false child_started=false identity_rechecked=true");
     }
 }

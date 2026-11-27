@@ -17,7 +17,7 @@ fn config() -> WindowsToolsConfig {
     let root = PathBuf::from(std::env::var_os("AGENT_BRIDGE_NATIVE_TEST_BUNDLE").expect("native bundle test selection"));
     let manifest = std::fs::read(root.join("manifest.json")).unwrap();
     use sha2::{Digest, Sha256};
-    let seal=format!("{:x}",Sha256::digest(manifest));
+    let seal:String=Sha256::digest(manifest).iter().map(|b|format!("{b:02x}")).collect();
     assert_eq!(seal,std::env::var("AGENT_BRIDGE_NATIVE_TEST_MANIFEST_SHA256").expect("externally pinned native manifest"));
     WindowsToolsConfig { bundle_root: root, manifest_sha256: seal,
         state_root: std::env::temp_dir().join(format!("ab-native-tests-{}-{}", std::process::id(), TEST_ID.fetch_add(1,Ordering::Relaxed))) }
@@ -282,7 +282,7 @@ fn verify_passive_desktop(include_capture:bool) {
     let mut digest=Sha256::new();let mut buf=[0u8;65536];let mut size=0u64;
     loop {let n=fixture_pin.read(&mut buf).unwrap();if n==0{break;}size+=n as u64;
         assert!(size<=512*1024*1024);digest.update(&buf[..n]);}
-    assert_eq!(format!("{:x}",digest.finalize()),expected_fixture);
+    assert_eq!(digest.finalize().iter().map(|b|format!("{b:02x}")).collect::<String>(),expected_fixture);
     let creator=Rig::new(vec![]); let before=creator.desktops.current_desktop().unwrap();
     let binding=creator.desktops.local_create_desktop().unwrap();
     let mut dedicated=DedicatedDesktop{handle:creator.desktops.clone(),binding:binding.clone(),fixture:None};

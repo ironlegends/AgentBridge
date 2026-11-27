@@ -283,8 +283,8 @@ async fn request_audit_correlates_status_with_discovery_and_verified_oauth_ident
     let snapshot = serde_json::to_value(fixture.app.request_audit.snapshot()).unwrap();
     let records = snapshot["records"].as_array().unwrap();
     assert_eq!(records.len(), 4);
-    let gemini_hash = format!("{:x}", Sha256::digest(gemini_id.as_bytes()));
-    let chatgpt_hash = format!("{:x}", Sha256::digest(chatgpt_id.as_bytes()));
+    let gemini_hash: String = Sha256::digest(gemini_id.as_bytes()).iter().map(|b| format!("{b:02x}")).collect();
+    let chatgpt_hash: String = Sha256::digest(chatgpt_id.as_bytes()).iter().map(|b| format!("{b:02x}")).collect();
     for (index, (record, method)) in records.iter().zip(["initialize", "tools/list", "tools/call", "tools/call"]).enumerate() {
         assert_eq!(record["sequence"], index + 1);
         assert!(record["timestamp_unix_ms"].as_u64().unwrap() > 0);
@@ -738,7 +738,7 @@ async fn modern_requests_keep_oauth_and_selected_catalogue_and_refuse_mismatched
     let records = snapshot["records"].as_array().unwrap();
     assert_eq!(records.len(), 9);
     assert_eq!(records[0]["provider"], Value::Null);
-    let expected_client_hash = format!("{:x}", Sha256::digest(fixture.unified_client_id.as_bytes()));
+    let expected_client_hash: String = Sha256::digest(fixture.unified_client_id.as_bytes()).iter().map(|b| format!("{b:02x}")).collect();
     for record in &records[1..6] {
         assert_eq!(record["provider"], "gemini");
         assert_eq!(record["client_id_sha256"], expected_client_hash);
@@ -805,7 +805,7 @@ pub(crate) async fn assert_audited_unified_status(
     assert_eq!(records.len(), 1);
     let record = &records[0];
     assert_eq!(record["provider"], "gemini");
-    assert_eq!(record["client_id_sha256"], format!("{:x}", Sha256::digest(client_id.as_bytes())));
+    assert_eq!(record["client_id_sha256"], Sha256::digest(client_id.as_bytes()).iter().map(|b| format!("{b:02x}")).collect::<String>());
     assert_eq!(record["catalogue_sha256"], expected_digest);
     assert_eq!(record["method"], "tools/call");
     assert_eq!(record["tool_name"], "agent_bridge_status");

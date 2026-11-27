@@ -168,7 +168,7 @@ fn session_id(args: &Map<String, Value>) -> ProcessResult<&str> {
 
 fn new_session_id() -> io::Result<String> {
     let mut bytes = [0u8; 16];
-    getrandom::getrandom(&mut bytes).map_err(|_| io::Error::other("OS session randomness unavailable"))?;
+    getrandom::fill(&mut bytes).map_err(|_| io::Error::other("OS session randomness unavailable"))?;
     bytes[6] = (bytes[6] & 0x0f) | 0x40;
     bytes[8] = (bytes[8] & 0x3f) | 0x80;
     let hex: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();

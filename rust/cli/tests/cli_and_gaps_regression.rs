@@ -71,7 +71,7 @@ impl Drop for TempSandbox {
 
 fn sha256_file(path: &Path) -> String {
     let bytes = fs::read(path).expect("read binary for sha256");
-    format!("{:x}", Sha256::digest(&bytes))
+    Sha256::digest(&bytes).iter().map(|b| format!("{b:02x}")).collect()
 }
 
 struct StdioMcp {

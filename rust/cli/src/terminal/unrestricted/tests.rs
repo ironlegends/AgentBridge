@@ -934,7 +934,7 @@ mod unified_windows {
         let bundle = PathBuf::from(std::env::var_os("AGENT_BRIDGE_NATIVE_TEST_BUNDLE").unwrap());
         let (executable,_fixture_pin)=crate::test_process_fixture::native_gui_fixture();
         let manifest = std::fs::read(bundle.join("manifest.json")).unwrap();
-        let seal = format!("{:x}", Sha256::digest(manifest));
+        let seal: String = Sha256::digest(manifest).iter().map(|b| format!("{b:02x}")).collect();
         assert_eq!(seal,std::env::var("AGENT_BRIDGE_NATIVE_TEST_MANIFEST_SHA256").expect("externally pinned manifest"));
         let _bundle_pin=crate::windows_tools::bundle::Resources::verify(&bundle,&seal).unwrap();
         #[link(name="user32")]

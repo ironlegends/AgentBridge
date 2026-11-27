@@ -88,7 +88,7 @@ pub(super) fn safe_relative_dir(input:&str)->bool{
         && !input.is_empty() && input.split('/').all(|p|p!="."&&p!="..")
 }
 pub(super) fn sha(bytes:&[u8])->String {
-    format!("{:x}",Sha256::digest(bytes))
+    Sha256::digest(bytes).iter().map(|b| format!("{b:02x}")).collect()
 }
 fn bounded_read(mut file:&File, cap:usize)->io::Result<Vec<u8>>{
     let mut bytes=Vec::new();

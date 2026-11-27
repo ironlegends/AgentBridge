@@ -321,7 +321,7 @@ fn migration_source(source: &str) -> &str {
 }
 
 fn checksum(sql: &str) -> String {
-    format!("{:x}", Sha256::digest(sql.as_bytes()))
+    Sha256::digest(sql.as_bytes()).iter().map(|b| format!("{b:02x}")).collect()
 }
 
 pub fn migration_checksum_matches(version: i64, recorded: &str) -> bool {
