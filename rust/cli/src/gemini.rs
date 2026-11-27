@@ -68,14 +68,14 @@ struct Gateway {
 }
 
 impl Gateway {
-    fn observe_identity(&self, audit: &RequestDetails, identity: &AuthorizedIdentity) {
+    fn observe_identity(&self, audit: &RequestDetails, identity: &AuthorizedIdentity) -> crate::client_sessions::Client {
         let digest = match &identity.capability {
             CapabilityIdentity::Legacy => Some(self.legacy_catalogue_sha256.as_ref()),
             CapabilityIdentity::UnifiedV1 { catalogue_sha256, .. } => self.unified.as_ref()
                 .filter(|route| route.identity == identity.capability)
                 .map(|_| catalogue_sha256.as_str()),
         };
-        audit.observe_identity(identity, digest);
+        audit.observe_identity(identity, digest)
     }
 }
 
@@ -231,7 +231,7 @@ async fn handle_request(app: Gateway, request: Request, is_mcp: bool, audit: &Re
                     audit, StatusCode::INTERNAL_SERVER_ERROR, "invalid_oauth_response", "invalid OAuth response"))
             }
             HttpAction::McpAuthorized(first) => {
-                app.observe_identity(audit, &first);
+                let client = app.observe_identity(audit, &first);
                 if parts.method != axum::http::Method::POST {
                     return refuse(audit, StatusCode::METHOD_NOT_ALLOWED, "post_required", "use POST for MCP requests");
                 }
@@ -299,16 +299,14 @@ async fn handle_request(app: Gateway, request: Request, is_mcp: bool, audit: &Re
                             .body(Body::from(body)).expect("fixed MCP refusal");
                     }
                 };
-                let routed = router.handle_str(frame);
-                let routed = if app.audience == Audience::Workstation
-                    && first.provider == ConnectorClient::ChatGpt
-                {
-                    routed.map(|result| {
-                        adapt_chatgpt_file_read_result(frame, &result).unwrap_or(result)
-                    })
-                } else {
-                    routed
-                };
+                let routed = app.request_audit.sessions.dispatch(client, router, frame, response_limit, || {
+                    let routed = router.handle_str(frame);
+                    if app.audience == Audience::Workstation && first.provider == ConnectorClient::ChatGpt {
+                        routed.map(|result| adapt_chatgpt_file_read_result(frame, &result).unwrap_or(result))
+                    } else {
+                        routed
+                    }
+                });
                 match routed {
                     Some(result) if result.len() <= response_limit => {
                         let metadata = ResponseMetadata::read(&result);

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-get-sessions"
+description = "Enables the get_sessions command without any pre-configured scope."
+commands.allow = ["get_sessions"]
+
+[[permission]]
+identifier = "deny-get-sessions"
+description = "Denies the get_sessions command without any pre-configured scope."
+commands.deny = ["get_sessions"]

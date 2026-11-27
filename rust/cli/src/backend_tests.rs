@@ -379,6 +379,8 @@ async fn request_audit_public_listener_refuses_diagnostics_with_valid_mcp_bearer
     let ping = send("POST", "/mcp", r#"{"jsonrpc":"2.0","id":1,"method":"ping"}"#).await.unwrap();
     let before = operator.get(OperatorRead::Diagnostics).await.unwrap();
     let public = send("GET", "/api/diagnostics", "").await.unwrap();
+    let public_sessions = send("GET", "/api/sessions", "").await.unwrap();
+    let sessions = operator.get(OperatorRead::Sessions).await.unwrap();
     let after = operator.get(OperatorRead::Diagnostics).await.unwrap();
     assert!(running.shutdown().await.unwrap().clean);
 
@@ -396,6 +398,14 @@ async fn request_audit_public_listener_refuses_diagnostics_with_valid_mcp_bearer
     let (_, body) = public.split_once("\r\n\r\n").unwrap();
     assert_eq!(serde_json::from_str::<serde_json::Value>(body).unwrap(),
         serde_json::json!({"error":"not_found"}));
+    assert!(public_sessions.starts_with("HTTP/1.1 404 "));
+    let (_, body) = public_sessions.split_once("\r\n\r\n").unwrap();
+    assert_eq!(serde_json::from_str::<serde_json::Value>(body).unwrap(),
+        serde_json::json!({"error":"not_found"}));
+    assert_eq!(sessions.status, 200);
+    assert_eq!(sessions.body["totals"], serde_json::json!({"live":1,"connected":1}));
+    assert_eq!(sessions.body["sessions"][0]["provider"], "gemini");
+    assert!(!sessions.body.to_string().contains(&token));
     assert_eq!(after.status, 200);
     assert_eq!(after.body["mcp_request_audit"], *audit);
 }

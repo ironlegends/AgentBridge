@@ -1,6 +1,7 @@
 //! Operator-only diagnostics for requests reaching the OAuth MCP listener.
 
 use crate::capability_manifest::COMPLETE_TOOL_NAMES;
+use crate::client_sessions::{Client, ClientSessions};
 use crate::runtime::RuntimeError;
 use agent_bridge_http::modern::ResponseMetadata;
 use agent_bridge_oauth_server::{AuthorizedIdentity, ConnectorClient};
@@ -115,7 +116,8 @@ impl Ring {
 
 #[derive(Debug)]
 pub(crate) struct RequestAudit {
-    boot_id: String,
+    pub(crate) boot_id: String,
+    pub(crate) sessions: ClientSessions,
     ring: Mutex<Ring>,
 }
 
@@ -125,6 +127,7 @@ impl RequestAudit {
         getrandom::getrandom(&mut boot_bytes).map_err(|_| "Request audit randomness unavailable")?;
         Ok(Self {
             boot_id: boot_bytes.iter().map(|byte| format!("{byte:02x}")).collect(),
+            sessions: ClientSessions::default(),
             ring: Mutex::new(Ring {
                 verified: RecordBuffer::new(VERIFIED_CAPACITY),
                 unverified: RecordBuffer::new(UNVERIFIED_CAPACITY),
@@ -222,6 +225,11 @@ struct CallParams<'a> {
     name: Option<Cow<'a, str>>,
 }
 
+pub(crate) fn requested_tool(frame: &str) -> Option<String> {
+    let JsonObject(call) = serde_json::from_str::<JsonObject<CallFrame<'_>>>(frame).ok()?;
+    call.params?.0.name.map(Cow::into_owned)
+}
+
 fn allowlisted(value: Option<&str>, names: &[&'static str]) -> &'static str {
     names.iter().copied().find(|name| Some(*name) == value).unwrap_or("other")
 }
@@ -303,15 +311,18 @@ impl RequestDetails {
         }
     }
 
-    pub(crate) fn observe_identity(&self, identity: &AuthorizedIdentity, catalogue_sha256: Option<&str>) {
+    pub(crate) fn observe_identity(&self, identity: &AuthorizedIdentity, catalogue_sha256: Option<&str>) -> Client {
+        let provider = match identity.provider {
+            ConnectorClient::Gemini => "gemini",
+            ConnectorClient::ChatGpt => "chatgpt",
+        };
+        let client_hash = format!("{:x}", Sha256::digest(identity.client_id.as_bytes()));
         self.update(|record| {
-            record.provider = Some(match identity.provider {
-                ConnectorClient::Gemini => "gemini",
-                ConnectorClient::ChatGpt => "chatgpt",
-            });
-            record.client_id_sha256 = Some(format!("{:x}", Sha256::digest(identity.client_id.as_bytes())));
+            record.provider = Some(provider);
+            record.client_id_sha256 = Some(client_hash.clone());
             record.catalogue_sha256 = catalogue_sha256.map(str::to_owned);
         });
+        Client::OAuth { provider, client_hash }
     }
 
     pub(crate) fn refuse(&self, code: ErrorCode) {

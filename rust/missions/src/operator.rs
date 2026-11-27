@@ -1,11 +1,16 @@
 //! Read-only operator inspection helpers for the local Agent Bridge UI and
 //! cryptographic token generation. Never returns raw handles or handle hashes.
 
+use chrono::{DateTime, SecondsFormat, Utc};
 use rand::{rngs::OsRng, RngCore};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::{json, Value};
+use std::collections::BTreeSet;
+use std::time::SystemTime;
 
 use crate::store::{invalid, verify_schema, Result, SCHEMA_VERSION};
+
+const MAX_SESSION_DISPLAY_TEXT: usize = 200;
 
 /// Generate a cryptographically random lowercase hexadecimal token with
 /// `byte_len` bytes of OS entropy (resulting in `2 * byte_len` hex chars).
@@ -14,6 +19,130 @@ pub fn random_token_hex(byte_len: usize) -> String {
     let mut bytes = vec![0u8; len];
     OsRng.fill_bytes(&mut bytes);
     bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+pub fn utc_timestamp(time: SystemTime) -> String {
+    DateTime::<Utc>::from(time).to_rfc3339_opts(SecondsFormat::Millis, true)
+}
+
+/// Return linked contexts in input order and up to 20 eligible earlier contexts.
+/// The byte budget shares the operator transport limit across all context rows.
+/// For the local authenticated view, project only the bounded mission goal and
+/// subtask title as free-form display text, alongside their status metadata.
+pub fn inspect_session_contexts(
+    conn: &Connection,
+    linked: &[String],
+    seen: Option<&BTreeSet<String>>,
+    byte_budget: usize,
+) -> Result<(Vec<Option<Value>>, Vec<Value>)> {
+    verify_schema(conn)?;
+    let tx = conn.unchecked_transaction()?;
+    let mut earlier_ids = Vec::new();
+    if let Some(seen) = seen {
+        let mut stmt = tx.prepare(
+            "SELECT a.context_id FROM agent_contexts a
+             WHERE a.context_id NOT IN (SELECT value FROM json_each(?1))
+               AND EXISTS (
+                   SELECT 1 FROM mission_memberships mm JOIN missions m USING (mission_id)
+                   WHERE mm.context_hash=a.handle_hash AND mm.state='attached'
+                     AND m.status IN ('active','blocked')
+               )
+             ORDER BY julianday(a.last_seen) DESC, julianday(a.attached_at) DESC, a.context_id
+             LIMIT 20",
+        )?;
+        let excluded = serde_json::to_string(seen)?;
+        earlier_ids = stmt.query_map([excluded], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<_>>()?;
+    }
+
+    let per_context = byte_budget / (linked.len() + earlier_ids.len()).max(1);
+    let mut context_stmt = tx.prepare(
+        "SELECT actor_kind, attached_at, last_seen FROM agent_contexts WHERE context_id=?1",
+    )?;
+    let mut mission_stmt = tx.prepare(
+        "SELECT m.mission_id, m.goal, m.status, m.current_revision, m.updated_at, mm.role
+         FROM agent_contexts a JOIN mission_memberships mm ON mm.context_hash=a.handle_hash
+         JOIN missions m ON m.mission_id=mm.mission_id
+         WHERE a.context_id=?1 AND mm.state='attached'
+         ORDER BY m.updated_at DESC, m.mission_id LIMIT 20",
+    )?;
+    let mut subtask_stmt = tx.prepare(
+        "WITH latest AS (
+             SELECT MAX(event_seq) AS event_seq FROM events
+             WHERE mission_id=?1 AND event_type=?3 GROUP BY payload_redacted
+             ORDER BY event_seq DESC LIMIT 20
+         )
+         SELECT json_extract(o.result_json,'$.subtask_id'),
+                json_extract(o.result_json,'$.goal'),
+                json_extract(o.result_json,'$.status'),
+                json_extract(o.result_json,'$.assignee_context_id') IS ?2
+         FROM latest JOIN events e USING (event_seq)
+         JOIN operations o ON o.operation_id=e.operation_id AND o.mission_id=e.mission_id
+         ORDER BY e.event_seq DESC",
+    )?;
+    let mut read_context = |id: &str| -> Result<Option<Value>> {
+        let row = context_stmt.query_row([id], |row| {
+            Ok(json!({
+                "context_id": cap(id, 64),
+                "actor_kind": cap(&row.get::<_, String>(0)?, 64),
+                "attached_at": row.get::<_, Option<String>>(1)?.map(|s| cap(&s, 64)),
+                "last_seen": row.get::<_, Option<String>>(2)?.map(|s| cap(&s, 64)),
+                "missions": [],
+            }))
+        }).optional()?;
+        let Some(mut context) = row else { return Ok(None); };
+        let Some(mut remaining) = per_context.checked_sub(serde_json::to_vec(&context)?.len() + 1) else {
+            return Ok(None);
+        };
+        let mut missions = Vec::new();
+        let mission_rows = mission_stmt.query_map([id], |row| {
+            let mission_id: String = row.get(0)?;
+            let view = json!({
+                "mission_id": cap(&mission_id, 64),
+                "goal": cap(&row.get::<_, String>(1)?, MAX_SESSION_DISPLAY_TEXT),
+                "status": cap(&row.get::<_, String>(2)?, 32),
+                "revision": row.get::<_, i64>(3)?,
+                "updated_at": cap(&row.get::<_, String>(4)?, 64),
+                "role": cap(&row.get::<_, String>(5)?, 32),
+                "subtasks": [],
+            });
+            Ok((mission_id, view))
+        })?;
+        for mission in mission_rows {
+            let (mission_id, mut view) = mission?;
+            let size = serde_json::to_vec(&view)?.len() + 1;
+            if size > remaining { break; }
+            remaining -= size;
+            let tasks = subtask_stmt.query_map(params![mission_id, id, crate::subtask::SUBTASK_EVENT], |row| {
+                Ok(json!({
+                    "id": cap(&row.get::<_, String>(0)?, 64),
+                    "title": cap(&row.get::<_, String>(1)?, MAX_SESSION_DISPLAY_TEXT),
+                    "status": cap(&row.get::<_, String>(2)?, 32),
+                    "assigned_to_context": row.get::<_, bool>(3)?,
+                }))
+            })?;
+            let mut subtasks = Vec::new();
+            for task in tasks {
+                let task = task?;
+                let size = serde_json::to_vec(&task)?.len() + 1;
+                if size > remaining { break; }
+                remaining -= size;
+                subtasks.push(task);
+            }
+            view["subtasks"] = Value::Array(subtasks);
+            missions.push(view);
+        }
+        context["missions"] = Value::Array(missions);
+        Ok(Some(context))
+    };
+    let current = linked.iter().map(|id| read_context(id)).collect::<Result<_>>()?;
+    let earlier = earlier_ids.iter().map(|id| read_context(id))
+        .collect::<Result<Vec<_>>>()?.into_iter().flatten().collect();
+    Ok((current, earlier))
+}
+
+fn cap(text: &str, limit: usize) -> String {
+    text.chars().take(limit).collect()
 }
 
 /// Produce a bounded, read-only operator snapshot of durable missions, their

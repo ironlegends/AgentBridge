@@ -259,6 +259,7 @@ struct InputQueue {
 struct Session {
     id: String,
     program: String,
+    command: Option<Arc<crate::client_sessions::CommandRecord>>,
     cwd: PathBuf,
     started: Instant,
     capture: SharedCapture,
@@ -293,6 +294,8 @@ impl Session {
         let worker_stop = Arc::clone(&stop);
         let worker_retained = Arc::clone(&retained);
         let (program, cwd) = (spec.program.clone(), spec.cwd.clone());
+        let command = crate::client_sessions::CommandRecord::for_request("Process");
+        let worker_command = command.clone();
         // Start the worker before creating any child. A thread-creation
         // failure therefore never drops an owner without observing cleanup.
         let worker = thread::Builder::new().name("agent-bridge-unlocked-process".into()).spawn(move || {
@@ -334,8 +337,13 @@ impl Session {
             state.finished_at = Some(Instant::now());
             state.stdin_closed = true;
             match result {
-                Ok(()) => state.temp_cleanup_error = owned.temp.take()
-                    .and_then(|temp| temp.cleanup().err().map(|error| error.to_string())),
+                Ok(()) => {
+                    if let Some(command) = &worker_command {
+                        command.finish(state.exit_code);
+                    }
+                    state.temp_cleanup_error = owned.temp.take()
+                        .and_then(|temp| temp.cleanup().err().map(|error| error.to_string()));
+                }
                 Err(error) => {
                     *worker_retained.lock().unwrap_or_else(|error| error.into_inner()) = Some(owned);
                     state.cleanup_error = Some(error.to_string());
@@ -350,7 +358,7 @@ impl Session {
             return Err(error);
         }
         Ok(Arc::new(Self {
-            id, program, cwd, started: Instant::now(), capture,
+            id, program, command, cwd, started: Instant::now(), capture,
             input: Mutex::new(InputQueue { sender: Some(sender), next_id: 1, eof_queued: false }),
             stop, worker: Mutex::new(Some(worker)), retained,
         }))
@@ -481,6 +489,9 @@ impl Session {
         let mut state = lock.lock().unwrap_or_else(|error| error.into_inner());
         match retry {
             Ok(()) => {
+                if let Some(command) = &self.command {
+                    command.finish(state.exit_code);
+                }
                 state.temp_cleanup_error = owned.temp.take()
                     .and_then(|temp| temp.cleanup().err().map(|error| error.to_string()));
                 state.cleanup_error = None;
@@ -774,6 +785,7 @@ impl Manager {
                 .map_err(|error| format!("PROCESS_START_FAILED: {error}"))?;
             registry.sessions.insert(id, Arc::clone(&session));
         }
+        crate::client_sessions::link_command(session.command.as_ref());
         if let Err(error) = session.await_placement(wait) {
             session.request_stop();
             // Keep the owned Job and its diagnostics registered while the

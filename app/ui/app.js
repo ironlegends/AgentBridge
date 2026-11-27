@@ -7,24 +7,24 @@
   const PROFILES = ["read-only", "workspace-write", "full-control", "fully-unlocked"];
   const PROFILE_META = {
     "read-only": {
-      badge: "READ",
+      label: "Read",
       cls: "",
-      hint: "Read files only",
+      hint: "AI can view files in the workspace.",
     },
     "workspace-write": {
-      badge: "WRITE",
+      label: "Write",
       cls: "",
-      hint: "Read and edit workspace files",
+      hint: "AI can view and edit files in the workspace.",
     },
     "full-control": {
-      badge: "FULL",
+      label: "Full",
       cls: "warn",
-      hint: "Approved commands and window tools",
+      hint: "Adds approved commands and window control.",
     },
     "fully-unlocked": {
-      badge: "UNLOCK",
+      label: "Unlock",
       cls: "danger",
-      hint: "Direct commands when enabled; OS account access",
+      hint: "Your Windows account's access, and direct commands when enabled.",
     },
   };
   const THEMES = ["system", "light", "dark"];
@@ -54,6 +54,11 @@
   let approvalsSnapshotKey = null;
   let missionsRead = 0;
   let missionsInFlight = 0;
+  // Sessions are shaped and classified (live, bounds, redaction) by the Rust get_sessions command; the page only renders them.
+  let sessionsRead = 0;
+  let sessionsInFlight = 0;
+  let sessionsSnapshot = null;
+  let selectedSessionKey = null;
   let diagnosticsRead = 0;
   let diagnosticsInFlight = 0;
   let diagnosticsMutation = false;
@@ -79,9 +84,9 @@
 
   function renderCapability(capability) {
     const marker = capability || { kind: "legacy" };
-    const title = marker.kind === "unified-v1" ? "Unified tools · policy " + marker.policy_version
-      : marker.kind === "legacy" ? "Legacy tools" : "Unknown contract";
-    return '<details class="extension-proposal"><summary>Contract: ' + escapeHtml(title) +
+    const title = marker.kind === "unified-v1" ? "unified, policy " + marker.policy_version
+      : marker.kind === "legacy" ? "legacy" : "unknown";
+    return '<details class="extension-proposal"><summary>Tool contract: ' + escapeHtml(title) +
       '</summary><pre class="extension-payload">' +
       escapeHtml(JSON.stringify(marker, null, 2)) + '</pre></details>';
   }
@@ -94,18 +99,18 @@
     }
     const scope = selection.filesystem && selection.filesystem.kind;
     const scopeLabels = {
-      workspace: "Selected workspace",
-      "allowed-roots": "Selected folders",
-      "os-user": "Current Windows user; paths outside the workspace require Unlock",
+      workspace: "workspace only",
+      "allowed-roots": "allowed folders",
+      "os-user": "your Windows account (outside the workspace needs Unlock)",
     };
     const count = Number.isInteger(selection.total_tools) ? selection.total_tools : null;
     let html = '<div class="item-meta">';
     if (count !== null) html += '<strong>' + count + ' tools</strong>';
-    if (scopeLabels[scope]) html += (count !== null ? " · " : "") + escapeHtml(scopeLabels[scope]);
+    if (scopeLabels[scope]) html += (count !== null ? ", " : "Files: ") + escapeHtml(scopeLabels[scope]);
     html += "</div>";
     if (typeof selection.allow_import === "boolean") {
-      html += '<div class="item-meta">Historical Task Room import: ' +
-        (selection.allow_import ? "locally authorized" : "disabled") + "</div>";
+      html += '<div class="item-meta">Old Task Room import: ' +
+        (selection.allow_import ? "allowed on this computer" : "off") + "</div>";
     }
     return html + '<details class="extension-proposal"><summary>Permissions and resources</summary>' +
       '<pre class="extension-payload">' + escapeHtml(JSON.stringify(selection, null, 2)) + "</pre></details>";
@@ -195,8 +200,7 @@
       btn.setAttribute("aria-pressed", String(active));
     });
     const meta = known ? PROFILE_META[profile] : null;
-    $("profileBadge").textContent = meta ? meta.badge : "-";
-    $("profileBadge").className = "profile-badge " + (meta ? meta.cls : "");
+    $("profileSelector").className = "seg-shell seg-4 " + (meta ? meta.cls : "");
     $("profileHint").textContent = meta ? meta.hint : "Waiting for Bridge";
   }
 
@@ -209,20 +213,23 @@
       ? (connected ? runtime.activeProfile : null)
       : (state && !stateError ? state.settings.profile : null);
     applyProfileVisual(active);
-    $("profileTitle").textContent = configured ? "Active mode" : "Saved preference";
+    $("profileTitle").textContent = configured ? "Access" : "Access (saved preference)";
+    // The confirmed session ceiling is always shown, including Unlock, so a missing value is never read as "no limit".
     $("profileCeiling").classList.toggle("hidden", !configured);
-    $("profileCeiling").textContent = connected
-      ? "Max: " + PROFILE_META[runtime.maxProfile].badge
-      : "Session ceiling unavailable";
+    $("profileCeiling").textContent = !configured ? ""
+      : connected ? "Up to " + PROFILE_META[runtime.maxProfile].label + " this session"
+      : "Session limit unavailable";
     const error = stateError || profileError || (runtime && runtime.error);
     const phase = gatewayControls().phase;
-    $("profileStatus").textContent = phase
-      ? "Bridge is " + phase + ". Mode changes are unavailable."
-      : profileChanging ? "Applying mode…"
+    const status = phase
+      ? "Access changes are paused while Bridge is " + phase + "."
+      : profileChanging ? "Applying…"
       : (error || (configured
-        ? (connected ? "Changes apply live."
-          : isNativeStopped() ? "Start Bridge to change modes." : "Waiting for Bridge.")
-        : (state ? "Attach a workstation to apply live." : "Connecting to Agent Bridge…")));
+        ? (connected ? ""
+          : isNativeStopped() ? "Start Bridge to change access." : "Waiting for Bridge.")
+        : (state ? "Attach a workstation to apply it live." : "Connecting to Agent Bridge…")));
+    $("profileStatus").textContent = status;
+    $("profileStatus").classList.toggle("hidden", !status);
     $("profileStatus").classList.toggle("error", Boolean(error && !profileChanging));
     $("profileSelector").setAttribute("aria-busy", String(profileChanging));
     document.querySelectorAll("[data-profile]").forEach((btn) => {
@@ -232,11 +239,26 @@
         && PROFILES.indexOf(profile) <= PROFILES.indexOf(runtime.maxProfile);
       btn.disabled = mutationsBlocked() || (configured && !allowed);
       btn.title = configured && !connected
-        ? "The running Bridge is unavailable"
+        ? "Bridge is not connected"
         : (configured && !allowed
-          ? "Unavailable above this session's ceiling"
+          ? "Above this session's limit"
           : PROFILE_META[profile].hint);
     });
+  }
+
+  function renderStatus(controls) {
+    const unavailable = Boolean(stateError) || (state && usesLiveWorkstation() && !isNativeStopped()
+      && (!state.liveProfile || !state.liveProfile.connected));
+    const live = Boolean(state) && !unavailable && Boolean(state.gateway && state.gateway.live);
+    const phaseLabel = { starting: "Starting…", stopping: "Stopping…", restarting: "Restarting…" }[controls.phase];
+    const label = controls.phase ? (phaseLabel || "Busy…")
+      : !state ? "Checking…" : live ? "Running" : (unavailable ? "Unavailable" : "Stopped");
+    const tone = controls.phase ? "busy" : live ? "on" : (unavailable ? "error" : "off");
+    $("gwStatus").textContent = label;
+    $("gwStatus").title = live ? "Local port " + state.gateway.port : "";
+    $("gwDot").className = "dot " + ({ on: "ok", busy: "warn", error: "danger", off: "" }[tone]);
+    $("statusCard").setAttribute("data-tone", tone);
+    return live;
   }
 
   function renderControls() {
@@ -254,34 +276,35 @@
     document.querySelectorAll("[data-theme-choice]").forEach((btn) => { btn.disabled = busy; });
     document.querySelectorAll("[data-recent]").forEach((btn) => { btn.disabled = busy || external; });
     document.querySelectorAll("[data-skill-rb]").forEach((btn) => { btn.disabled = operatorMutationsBlocked() || diagnosticsMutation; });
+    renderStatus(controls);
     $("powerBtn").disabled = busy || !(live ? controls.canRestart : controls.canStart);
     $("stopBtn").disabled = busy || !controls.canStop;
     $("powerBtn").textContent = controls.phase
       ? ({ starting: "Starting Bridge…", stopping: "Stopping Bridge…", restarting: "Restarting Bridge…" }[controls.phase] || "Bridge is busy…")
       : (live ? "Restart Bridge" : "Start Bridge");
+    // Restart is a maintenance action; only Start is the screen's primary call to action.
+    $("powerBtn").className = live || controls.phase ? "ghost-btn" : "action-btn";
     $("gatewayActions").classList.toggle("hidden", external
       && !controls.canStart && !controls.canStop && !controls.canRestart && !controls.phase);
     $("stopBtn").classList.toggle("hidden", !controls.canStop
       && controls.phase !== "stopping" && controls.phase !== "restarting");
     $("externalGatewayNotice").classList.toggle("hidden", !external);
+    // The status heading already names the state; the notice adds only what it cannot say.
     const notice = [];
-    if (controls.phase) notice.push("Bridge is " + controls.phase + ". Other changes are unavailable.");
-    else if (isNativeStopped() && !stateError) notice.push("Bridge is stopped.");
+    if (controls.phase) notice.push("Bridge is " + controls.phase + "…");
+    else if (isNativeStopped() && !stateError) notice.push("Start it to connect your AI.");
     else if (!state || !state.liveProfile || !state.liveProfile.connected || stateError) {
-      notice.push("The configured session is unavailable.");
-    } else notice.push(isNative()
-      ? "Managed locally."
-      : "Connected to an independent Bridge.");
+      notice.push("The configured Bridge session is unavailable.");
+    } else if (!isNative()) notice.push("Run by an independent Bridge.");
     if (isNative() && state.tunnel && state.tunnel.configured) {
-      if (state.tunnel.error) notice.push("Tunnel unavailable: " + state.tunnel.error);
-      else if (state.tunnel.childRunning) notice.push("Tunnel running. Remote connectivity not verified.");
-      else notice.push("Tunnel stopped. Remote connectivity unavailable.");
+      if (state.tunnel.error) notice.push("Web tunnel unavailable: " + state.tunnel.error);
+      else if (state.tunnel.childRunning) notice.push("Web tunnel running (remote access not verified).");
+      else notice.push("Web tunnel stopped. Web chats cannot connect.");
     }
     $("quitAppBtn").textContent = isNative() ? "Quit and stop Bridge" : "Quit";
     if (controls.reason) notice.push(controls.reason);
-    if (controls.canStart || controls.canRestart) {
-      notice.push("Restart uses the startup profile.");
-    }
+    if (controls.canRestart && live) notice.push("Restart resets access to the startup profile.");
+    else if (controls.canStart) notice.push("Bridge starts with its startup profile.");
     $("externalGatewayNotice").textContent = notice.join(" ");
     renderProfileControl();
     renderExtensionControls();
@@ -351,10 +374,10 @@
         : updated.settings.profile;
       if (confirmed === target) {
         showToast(hasLiveProfile(updated)
-          ? "Access switched to " + PROFILE_META[target].badge + "."
-          : "Mode preference saved.");
+          ? "Access set to " + PROFILE_META[target].label + "."
+          : "Access preference saved.");
       } else {
-        profileError = "The running Bridge has not confirmed this mode.";
+        profileError = "Bridge has not confirmed this access level.";
       }
     } catch (err) {
       if (!liveChange && generation !== stateGeneration) return;
@@ -366,7 +389,7 @@
       while (panelRefreshNeeded) {
         panelRefreshNeeded = false;
         stateGeneration++;
-        stateError = "Confirming the active mode with the running Bridge.";
+        stateError = "Confirming the access level with Bridge.";
         renderMain(state);
         await readPanelState();
       }
@@ -388,7 +411,10 @@
       try {
         if (!document.hidden && !panelBusy && !profileChanging && !extensionDecisionInFlight) {
           if (activePage === "pageMissions" && !missionsInFlight) {
+            if (!sessionsInFlight) loadSessions(true);
             await loadMissionsDrawer(true);
+          } else if (activePage === "pageSession" && !sessionsInFlight) {
+            await loadSessions(true);
           } else if (activePage === "pageApprovals" && !approvalsInFlight
             && !refreshInFlight && !extensionPollTimer) {
             await loadApprovalsDrawer(true, true);
@@ -406,6 +432,7 @@
     activePage = pageId;
     pageEpoch++;
     missionsRead++;
+    sessionsRead++;
     diagnosticsRead++;
     schedulePageRefresh();
     if (pageId !== "pageApprovals") {
@@ -437,7 +464,7 @@
 
   async function chooseAndSaveWorkspace() {
     if (usesLiveWorkstation() || panelBusy || profileChanging) return;
-    const dir = await pickFolder("Choose Your Folder");
+    const dir = await pickFolder("Choose workspace folder");
     if (!dir || !state || usesLiveWorkstation()) return;
     const next = Object.assign({}, state.settings, { workspace: dir });
     if (await runPanelAction("save_panel_settings", { settings: next })) {
@@ -451,36 +478,26 @@
     const s = data.settings;
     applyTheme(s.theme);
 
-    const unavailable = Boolean(stateError) || (usesLiveWorkstation(data) && !isNativeStopped(data)
-      && (!data.liveProfile || !data.liveProfile.connected));
-    const live = !unavailable && Boolean(data.gateway && data.gateway.live);
-    $("livePill").className = "live-pill " + (live ? "live" : "standby");
-    $("liveDot").className = "dot " + (live ? "ok" : "");
-    $("liveText").textContent = unavailable ? "Unavailable" : (live ? "Live" : "Off");
-
-    $("gwDot").className = "dot " + (live ? "ok" : "warn");
-    $("gwStatus").textContent = live ? "Running" : (unavailable ? "Unavailable" : "Stopped");
-    $("gwStatus").title = live ? "Local port: " + data.gateway.port : "";
-
     const activeMissions = data.database && data.database.activeMissions ? data.database.activeMissions : 0;
     const pendingTotal = data.pendingApprovalsTotal || 0;
-    $("relDot").className = "dot " + (pendingTotal > 0 ? "warn" : (activeMissions > 0 ? "ok" : ""));
-    $("relStatus").textContent = pendingTotal > 0
-      ? pendingTotal + (pendingTotal === 1 ? " approval" : " approvals")
-      : (activeMissions > 0 ? activeMissions + (activeMissions === 1 ? " task" : " tasks") : "Idle");
-    $("relStatus").title = activeMissions + " active tasks; " + pendingTotal + " pending approvals";
+    const setBadge = (id, count, noun) => {
+      $(id).textContent = String(count);
+      $(id).classList.toggle("hidden", !(count > 0));
+      $(id).setAttribute("aria-label", count + " " + noun + (count === 1 ? "" : "s"));
+    };
+    setBadge("tasksBadge", activeMissions, "active task");
+    setBadge("approvalsBadge", pendingTotal, "pending approval");
 
-    $("scopePath").textContent = s.workspace || "Choose a folder";
-    $("scopePill").textContent = data.oauth && data.oauth.configured ? "Web configured" : "Local";
-    $("versionMeta").textContent = "v" + data.version + " | Local";
-
-    const badge = $("approvalsBadge");
-    if (pendingTotal > 0) {
-      badge.textContent = String(pendingTotal);
-      badge.classList.remove("hidden");
-    } else {
-      badge.classList.add("hidden");
-    }
+    $("scopePath").textContent = s.workspace || "No folder chosen";
+    $("scopePath").title = s.workspace || "";
+    $("versionMeta").textContent = "Agent Bridge " + data.version;
+    const oauthError = data.oauth && typeof data.oauth.error === "string" && data.oauth.error ? data.oauth.error : "";
+    $("webRelayState").textContent = oauthError
+      ? "Web relay error: " + oauthError
+      : data.oauth && data.oauth.configured
+        ? "Web relay is set up. Approve new web clients in Approvals."
+        : "Web relay not set up. Configure it under Storage and web relay.";
+    $("webRelayState").classList.toggle("notice-warn", Boolean(oauthError));
 
     // Settings fields
     $("setWorkspacePath").textContent = s.workspace || "Not chosen";
@@ -524,7 +541,7 @@
     recentFoldersKey = recentsKey;
 
     if (!s.onboardingCompleted && !usesLiveWorkstation(data)) {
-      $("obWorkspacePath").textContent = s.workspace || "Not chosen yet";
+      $("obWorkspacePath").textContent = s.workspace || "No folder chosen";
       $("onboardingModal").classList.remove("hidden");
     } else {
       $("onboardingModal").classList.add("hidden");
@@ -581,24 +598,25 @@
     const current = () => read === missionsRead && epoch === pageEpoch
       && activePage === "pageMissions" && generation === stateGeneration;
     missionsInFlight++;
-    if (!passive) body.innerHTML = '<div class="empty-note">Loading tasks...</div>';
+    if (!passive) body.innerHTML = '<div class="empty-note">Loading tasks…</div>';
     const render = (html) => { if (body.innerHTML !== html) body.innerHTML = html; };
+    const initHint = "Open Settings, then Storage and web relay, and select Initialize.";
     try {
       const data = await invoke("get_missions_snapshot");
       if (!current()) return;
       if (!data.configured || !data.exists) {
-        render('<div class="set-card"><div class="set-title">Setup required</div><div class="set-sub">Settings &gt; Advanced &gt; Initialize.</div></div>');
+        render('<div class="empty-state"><div class="set-title">Storage not set up</div><div class="set-sub">' + initHint + "</div></div>");
         return;
       }
       if (data.needsMigration) {
-        render('<div class="set-card"><div class="set-title">Database update needed</div><div class="set-sub">Settings &gt; Advanced &gt; Initialize.</div></div>');
+        render('<div class="empty-state"><div class="set-title">Storage needs an update</div><div class="set-sub">' + initHint + "</div></div>");
         return;
       }
       const missions = data.missions || [];
       const rooms = data.task_rooms || [];
       let html = "";
-      if (missions.length === 0) {
-        html += '<div class="set-card"><div class="set-title">No active tasks</div><div class="set-sub">Tasks appear here automatically.</div></div>';
+      if (missions.length === 0 && rooms.length === 0) {
+        html += '<div class="empty-state"><div class="set-title">No active tasks</div><div class="set-sub">Tasks your AI starts appear here.</div></div>';
       } else {
         html += missions.map((m) => {
           const pillCls = m.status === "active" || m.status === "completed" ? "ok" : "warn";
@@ -614,7 +632,7 @@
       }
 
       if (rooms.length > 0) {
-        html += '<div class="mini-label" style="margin: 6px 2px 2px;">Task Rooms (' + rooms.length + ")</div>";
+        html += '<h3 class="list-heading">Task Rooms</h3>';
         html += rooms.map((t) => {
           const pillCls = t.status === "completed" || t.status === "active" ? "ok" : "warn";
           const total = Number(t.steps_total);
@@ -630,9 +648,165 @@
       }
       render(html);
     } catch (err) {
-      if (current()) render('<div class="set-card"><div class="set-title">Tasks unavailable</div><div class="set-sub">' + escapeHtml(err) + "</div></div>");
+      if (current()) render('<div class="empty-state"><div class="set-title">Tasks could not load</div><div class="set-sub">' + escapeHtml(err) + "</div></div>");
     } finally {
       missionsInFlight--;
+    }
+  }
+
+  const SESSION_PROVIDERS = { chatgpt: "ChatGPT", gemini: "Gemini", local: "Local app" };
+  const SESSION_TRANSPORTS = { http: "HTTP", stdio: "Terminal (stdio)" };
+
+  function sessionName(session) {
+    return SESSION_PROVIDERS[session.provider] || "AI client";
+  }
+
+  function sinceText(iso) {
+    const time = Date.parse(iso);
+    if (!Number.isFinite(time)) return "-";
+    const seconds = Math.max(0, Math.round((Date.now() - time) / 1000));
+    if (seconds < 60) return "just now";
+    if (seconds < 3600) return Math.round(seconds / 60) + " min ago";
+    if (seconds < 86400) return Math.round(seconds / 3600) + " h ago";
+    return Math.round(seconds / 86400) + " d ago";
+  }
+
+  function listOf(value) {
+    return Array.isArray(value) ? value : [];
+  }
+
+  function sessionMissions(contexts) {
+    return listOf(contexts).reduce((all, ctx) => all.concat(listOf(ctx.missions)), []);
+  }
+
+  function sessionRow(key, title, meta, live) {
+    return '<button class="session-row" type="button" data-session="' + escapeHtml(key) + '">' +
+      '<span class="dot' + (live ? " ok" : "") + '" aria-hidden="true"></span>' +
+      '<span class="session-copy"><span class="item-name">' + escapeHtml(title) + "</span>" +
+      '<span class="session-meta">' + escapeHtml(meta) + "</span></span>" +
+      '<svg class="row-chevron" viewBox="0 0 16 16" width="12" height="12" fill="none" aria-hidden="true"><path d="M6 3.5L10.5 8 6 12.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>' +
+    "</button>";
+  }
+
+  function countText(count, noun) {
+    return count + " " + noun + (count === 1 ? "" : "s");
+  }
+
+  function renderSessionsList(data) {
+    const sessions = listOf(data && data.sessions);
+    const earlier = listOf(data && data.earlier);
+    let html = "";
+    if (!data || data.available === false) {
+      html += '<div class="item-meta">' + escapeHtml((data && data.reason) || "Sessions appear while Bridge is running.") + "</div>";
+    } else if (sessions.length === 0) {
+      html += '<div class="empty-state compact"><div class="set-title">No AI connected yet</div>' +
+        '<div class="set-sub">Sessions appear when an AI calls Bridge.</div></div>';
+    }
+    const live = sessions.filter((s) => s.live === true);
+    const recent = sessions.filter((s) => s.live !== true);
+    const block = (heading, list) => list.length === 0 ? "" :
+      '<h3 class="list-heading">' + heading + '</h3><div class="session-list">' + list.map((s) => {
+        const parts = [s.live === true ? "Active " + sinceText(s.lastSeen) : "Seen " + sinceText(s.lastSeen),
+          countText(sessionMissions(s.contexts).length, "mission"), countText(listOf(s.commands).length, "command")];
+        return sessionRow("s:" + s.sessionId, sessionName(s) + (s.clientLabel ? " · " + s.clientLabel : ""), parts.join(" · "), s.live === true);
+      }).join("") + "</div>";
+    html += block("Live now", live) + block("Connected earlier", recent);
+    if (earlier.length > 0) {
+      html += '<h3 class="list-heading">Earlier mission contexts</h3><div class="session-list">' + earlier.map((ctx) =>
+        sessionRow("c:" + ctx.contextId, (SESSION_PROVIDERS[ctx.actorKind] || ctx.actorKind || "Agent") + " context",
+          "Seen " + sinceText(ctx.lastSeen || ctx.attachedAt) + " · " + countText(listOf(ctx.missions).length, "mission"), false)
+      ).join("") + "</div>";
+    }
+    return html;
+  }
+
+  function missionCard(mission) {
+    const subtasks = listOf(mission.subtasks);
+    const pillCls = mission.status === "blocked" ? "warn" : "ok";
+    return '<div class="mission-block">' +
+      '<div class="set-row"><span class="item-name">' + escapeHtml(mission.goal) + '</span><span class="pill ' + pillCls + '">' + escapeHtml(mission.status) + "</span></div>" +
+      '<div class="session-meta">' + escapeHtml([mission.role ? "Role " + mission.role : "", "Revision " + mission.revision, "Updated " + sinceText(mission.updatedAt)].filter(Boolean).join(" · ")) + "</div>" +
+      (subtasks.length === 0 ? "" : '<ul class="subtask-list">' + subtasks.map((t) =>
+        '<li><span class="subtask-title">' + escapeHtml(t.title) + (t.assignedToContext === true ? ' <span class="pill accent">this session</span>' : "") +
+        '</span><span class="pill' + (t.status === "completed" ? " ok" : t.status === "blocked" ? " warn" : "") + '">' + escapeHtml(String(t.status).replace(/_/g, " ")) + "</span></li>"
+      ).join("") + "</ul>") +
+    "</div>";
+  }
+
+  function renderSessionDetail(key) {
+    const data = sessionsSnapshot;
+    const id = key.slice(2);
+    const session = key.startsWith("s:") ? listOf(data && data.sessions).find((s) => s.sessionId === id) : null;
+    const context = key.startsWith("c:") ? listOf(data && data.earlier).find((c) => c.contextId === id) : null;
+    if (!session && !context) {
+      $("sessionTitle").textContent = "Session";
+      return '<div class="empty-state"><div class="set-title">Session no longer listed</div><div class="set-sub">Go back to see current sessions.</div></div>';
+    }
+    if (context) {
+      $("sessionTitle").textContent = (SESSION_PROVIDERS[context.actorKind] || "Agent") + " context";
+      const missions = listOf(context.missions);
+      return '<section class="set-card"><dl class="kv kv-compact"><dt>Context</dt><dd>' + escapeHtml(context.contextId) + "</dd>" +
+        "<dt>Attached</dt><dd>" + escapeHtml(context.attachedAt || "-") + "</dd><dt>Last seen</dt><dd>" + escapeHtml(context.lastSeen || "-") + "</dd></dl></section>" +
+        '<section class="set-card"><h3 class="set-title">Missions</h3>' +
+        (missions.length ? missions.map(missionCard).join("") : '<div class="item-meta">No missions.</div>') + "</section>";
+    }
+    $("sessionTitle").textContent = sessionName(session);
+    const missions = sessionMissions(session.contexts);
+    const commands = listOf(session.commands);
+    const calls = listOf(session.toolCalls);
+    let html = '<section class="set-card">' +
+      '<div class="session-status"><span class="dot' + (session.live === true ? " ok" : "") + '" aria-hidden="true"></span>' +
+      escapeHtml(session.live === true ? "Live, active " + sinceText(session.lastSeen) : "Not live, seen " + sinceText(session.lastSeen)) + "</div>" +
+      '<dl class="kv"><dt>Connection</dt><dd>' + escapeHtml(sessionName(session) + " · " + (SESSION_TRANSPORTS[session.transport] || session.transport || "-")) + "</dd>" +
+      (session.clientLabel ? "<dt>Client</dt><dd>" + escapeHtml(session.clientLabel) + "</dd>" : "") +
+      "<dt>First seen</dt><dd>" + escapeHtml(session.firstSeen || "-") + "</dd>" +
+      "<dt>Requests</dt><dd>" + escapeHtml(session.requestCount) + (Number(session.inFlight) > 0 ? ", " + escapeHtml(session.inFlight) + " in progress" : "") + "</dd></dl></section>";
+    html += '<section class="set-card"><h3 class="set-title">Missions</h3>' +
+      (missions.length ? missions.map(missionCard).join("") : '<div class="item-meta">No missions in this session.</div>') + "</section>";
+    html += '<section class="set-card"><h3 class="set-title">Commands</h3>' +
+      (commands.length ? '<ol class="audit-list">' + commands.map((c) =>
+        '<li class="audit-row"><div class="audit-main"><code>' + escapeHtml(c.program) + '</code> <span class="pill' + (c.state === "running" ? " accent" : c.exitCode === 0 ? " ok" : " warn") + '">' +
+        escapeHtml(c.state === "running" ? "running" : "exit " + (c.exitCode === null || c.exitCode === undefined ? "-" : c.exitCode)) + "</span></div>" +
+        '<div class="audit-meta">' + escapeHtml("Started " + sinceText(c.startedAt) + (c.endedAt ? " · ended " + sinceText(c.endedAt) : "")) + "</div></li>"
+      ).join("") + "</ol>" : '<div class="item-meta">No commands run.</div>') + "</section>";
+    html += '<section class="set-card"><h3 class="set-title">Recent tool calls</h3>' +
+      (calls.length ? '<ol class="audit-list">' + calls.map((t) =>
+        '<li class="audit-row"><div class="audit-main"><code>' + escapeHtml(t.toolName) + '</code> <span class="pill' + (t.outcome === "success" ? " ok" : " warn") + '">' + escapeHtml(t.outcome || "-") + "</span></div>" +
+        '<div class="audit-meta">' + escapeHtml(t.time || "-") + "</div></li>"
+      ).join("") + "</ol>" : '<div class="item-meta">No tool calls yet.</div>') + "</section>";
+    return html;
+  }
+
+  function renderSessionsView() {
+    if (activePage === "pageMissions") {
+      const html = renderSessionsList(sessionsSnapshot);
+      if ($("sessionsBody").innerHTML !== html) $("sessionsBody").innerHTML = html;
+    } else if (activePage === "pageSession" && selectedSessionKey) {
+      const html = renderSessionDetail(selectedSessionKey);
+      if ($("sessionBody").innerHTML !== html) $("sessionBody").innerHTML = html;
+    }
+  }
+
+  async function loadSessions(passive = false) {
+    const read = ++sessionsRead;
+    const epoch = pageEpoch;
+    const generation = stateGeneration;
+    const current = () => read === sessionsRead && epoch === pageEpoch && generation === stateGeneration
+      && (activePage === "pageMissions" || activePage === "pageSession");
+    sessionsInFlight++;
+    if (!passive && activePage === "pageMissions") $("sessionsBody").innerHTML = '<div class="item-meta">Loading sessions…</div>';
+    try {
+      const data = await invoke("get_sessions");
+      if (!current()) return;
+      sessionsSnapshot = data && typeof data === "object" ? data : null;
+      renderSessionsView();
+    } catch (err) {
+      if (!current()) return;
+      const html = '<div class="item-meta notice-warn">Sessions could not load: ' + escapeHtml(err) + "</div>";
+      if (activePage === "pageMissions") $("sessionsBody").innerHTML = html;
+      else $("sessionBody").innerHTML = html;
+    } finally {
+      sessionsInFlight--;
     }
   }
 
@@ -786,7 +960,7 @@
     rememberOAuthCallbacks();
     if (!polling) {
       approvalsSnapshotKey = null;
-      body.innerHTML = '<div class="empty-note">Checking requests...</div>';
+      body.innerHTML = '<div class="empty-note">Checking requests…</div>';
     }
     const generation = stateGeneration;
     const read = ++nextStateRead;
@@ -803,30 +977,35 @@
         renderMain(panel);
       }
 
+      const providerNames = { chatgpt: "ChatGPT", gemini: "Gemini" };
       let html = "";
       if (!oauth.configured) {
-        html += '<div class="set-card"><div class="set-title">Web Connections</div><div class="set-sub">Set up Web Relay in Advanced settings.</div></div>';
+        html += '<div class="set-card"><div class="set-title">Web connections</div>' +
+          '<div class="set-sub">Set up the web relay in Settings to connect ChatGPT or Gemini web.</div></div>';
       } else {
         html += '<div class="set-card">' +
           '<div class="set-row">' +
-            '<div><div class="set-title">Web Connections</div><div class="set-sub">' + escapeHtml(oauth.origin) + "</div></div>" +
-            '<button class="mini-btn sm" id="enrollBtn" type="button">Allow New (10m)</button>' +
+            '<div class="set-col-grow"><div class="set-title">Web connections</div><div class="set-sub origin-full">' + escapeHtml(oauth.origin) + "</div></div>" +
+            '<button class="mini-btn sm" id="enrollBtn" type="button" title="Let a new ChatGPT or Gemini client ask for access during the next 10 minutes">Allow new (10 min)</button>' +
           "</div>";
         const pending = oauth.pending || [];
         if (pending.length === 0) {
-          html += '<div class="item-meta" style="margin-top:8px;">No pending connection requests.</div>';
+          html += '<div class="item-meta">No pending connection requests.</div>';
         } else {
-          html += pending.map((req) =>
-            '<div style="margin-top:9px;padding-top:9px;border-top:1px solid var(--border);">' +
-              '<div class="set-row"><span class="set-title">' + escapeHtml(req.provider.toUpperCase()) + '</span><span class="pill accent">' + escapeHtml(req.clientId) + "</span></div>" +
-              '<div class="item-meta">Callback: <code>' + escapeHtml(req.redirectUri) + "</code></div>" +
-              '<div class="item-meta">Resource: <code>' + escapeHtml(req.resource) + "</code></div>" +
-              renderCapability(req.capability) +
+          html += pending.map((req) => {
+            const provider = String(req.provider || "");
+            return '<div class="request-block">' +
+              '<div class="set-row"><span class="set-title">' + escapeHtml(providerNames[provider.toLowerCase()] || provider) +
+                '</span><span class="pill accent" title="Client ID">' + escapeHtml(req.clientId) + "</span></div>" +
+              '<dl class="kv"><dt>Callback</dt><dd><code>' + escapeHtml(req.redirectUri) + "</code></dd>" +
+              "<dt>Resource</dt><dd><code>" + escapeHtml(req.resource) + "</code></dd></dl>" +
               renderCapabilitySelection(oauth.capabilitySelection, req.capability || { kind: "legacy" }) +
-              '<input class="text-input" data-oauth-cb="' + escapeHtml(req.id) + '" type="text" placeholder="Paste callback link to confirm" style="margin-top:6px;">' +
-              '<button class="mini-btn full-w" data-oauth-approve="' + escapeHtml(req.id) + '" type="button">Approve Request</button>' +
-            "</div>"
-          ).join("");
+              renderCapability(req.capability) +
+              '<label class="field"><span class="field-label">To approve, paste the callback link shown by the client</span>' +
+              '<input class="text-input" data-oauth-cb="' + escapeHtml(req.id) + '" type="text" placeholder="https://…"></label>' +
+              '<button class="action-btn full-w" data-oauth-approve="' + escapeHtml(req.id) + '" type="button">Approve connection</button>' +
+            "</div>";
+          }).join("");
         }
         html += "</div>";
       }
@@ -840,9 +1019,9 @@
       if (ext.configured && ext.exists) {
         const servers = ext.servers || [];
         const requests = ext.requests || [];
-        html += '<div class="set-card"><div class="set-title">Extensions (' + servers.length + ")</div>";
+        html += '<div class="set-card"><div class="set-title">Extensions</div>';
         if (servers.length === 0) {
-          html += '<div class="set-sub">No extensions connected.</div>';
+          html += '<div class="set-sub">No extensions added.</div>';
         } else {
           html += servers.map((srv) => {
             const oauthMeta = ext.outboundOauth && ext.outboundOauth[srv.id];
@@ -855,17 +1034,17 @@
             const tokenLabel = !tokenStatusKnown ? "Token status unavailable"
               : tokenExpired ? "Token expired" : (tokenStored ? "Token stored" : "No token");
             const tokenClass = tokenExpired ? "warn" : (tokenStored ? "ok" : "");
-            const badge = '<span><span class="pill">' + (srv.enabled ? "On" : "Off") +
-              '</span> <span class="pill ' + tokenClass + '" title="Local OAuth token status">' +
+            const badge = '<span class="pill-group"><span class="pill" title="Extension enabled">' + (srv.enabled ? "On" : "Off") +
+              '</span><span class="pill ' + tokenClass + '" title="Local OAuth token status">' +
               tokenLabel + "</span></span>";
-            return '<div class="set-row" style="margin-top:7px;"><span class="item-meta"><strong>' + escapeHtml(srv.id) + "</strong></span>" + badge + "</div>";
+            return '<div class="set-row list-row"><span class="item-name">' + escapeHtml(srv.id) + "</span>" + badge + "</div>";
           }).join("");
         }
         if (!canDecideExtensions(panel)) {
           html += '<div class="set-sub">Connect Bridge to review requests.</div>';
         }
         if (requests.length > 0) {
-          html += '<div class="mini-label" style="margin-top:9px;">Extension requests</div>';
+          html += '<h3 class="list-heading">Requests</h3>';
           html += requests.map((r) => {
             const pending = r.status === "pending" && /^[0-9a-fA-F]{64}$/.test(r.requestId);
             const server = servers.find((candidate) => candidate.id === r.name);
@@ -878,12 +1057,13 @@
                 '<button class="mini-btn danger" data-ext-decide="refuse" data-ext-request="' + escapeHtml(r.requestId) +
                 '" type="button">Refuse</button></div>'
               : '<div class="item-meta">' + escapeHtml(r.reason || r.status) + "</div>";
-            return '<details class="extension-proposal"><summary>' + escapeHtml(r.action) +
-              " <code>" + escapeHtml(r.name) + "</code> (" + escapeHtml(r.status) + ")</summary>" +
-              '<div class="item-meta">Request: <code>' + escapeHtml(r.requestId) + "</code></div>" +
-              '<div class="item-meta">Endpoint: <code>' + escapeHtml(endpoint) + "</code></div>" +
+            return '<details class="extension-proposal"' + (pending ? " open" : "") + "><summary>" + escapeHtml(r.action) +
+              " <code>" + escapeHtml(r.name) + '</code> <span class="pill' + (pending ? " warn" : "") + '">' +
+              escapeHtml(r.status) + "</span></summary>" +
+              '<dl class="kv"><dt>Endpoint</dt><dd><code>' + escapeHtml(endpoint) + "</code></dd>" +
+              "<dt>Request</dt><dd><code>" + escapeHtml(r.requestId) + "</code></dd></dl>" +
               '<pre class="extension-payload">' + escapeHtml(JSON.stringify(r.payload || {}, null, 2)) + "</pre>" +
-              '<div class="set-sub">Secrets are shown as references only.</div>' +
+              '<div class="set-sub">Secrets appear as references only.</div>' +
               actions + "</details>";
           }).join("");
         }
@@ -979,14 +1159,15 @@
         || generation !== stateGeneration || read < lastStateRead) return;
       rememberOAuthCallbacks();
       approvalsSnapshotKey = null;
-      body.innerHTML = '<div class="set-card"><div class="set-title">Requests unavailable</div><div class="set-sub">' + escapeHtml(err) + "</div></div>";
+      body.innerHTML = '<div class="empty-state"><div class="set-title">Requests could not load</div><div class="set-sub">' + escapeHtml(err) + "</div></div>";
     } finally {
       approvalsInFlight--;
     }
   }
 
   function renderRequestAudit(audit) {
-    const empty = '<div class="item-meta">MCP request audit: No requests recorded</div>';
+    const heading = '<h3 class="list-heading">MCP request log</h3>';
+    const empty = heading + '<div class="item-meta">No requests recorded</div>';
     if (!audit || typeof audit !== "object") return empty;
     const text = (value) => (typeof value === "string" && value ? value : "-");
     const count = (value) => (Number.isFinite(value) ? String(value) : "-");
@@ -994,31 +1175,40 @@
       const records = Array.isArray(audit.records)
         ? audit.records.filter((record) => record && typeof record === "object")
         : [];
-      const summary = '<div class="item-meta">MCP request audit | ' +
-        'Boot ID: <strong>' + escapeHtml(text(audit.boot_id).slice(0, 8)) + '</strong> | ' +
-        'Records retained: <strong>' + escapeHtml(records.length) + '</strong> | ' +
-        'In flight: <strong>' + escapeHtml(count(audit.in_flight)) + '</strong> | ' +
-        'Evicted verified: <strong>' + escapeHtml(count(audit.evicted_verified)) + '</strong> | ' +
-        'Evicted unverified: <strong>' + escapeHtml(count(audit.evicted_unverified)) + '</strong></div>';
+      const summary = heading + '<dl class="kv kv-compact">' +
+        "<dt>Boot ID</dt><dd>" + escapeHtml(text(audit.boot_id).slice(0, 8)) + "</dd>" +
+        "<dt>Records kept</dt><dd>" + escapeHtml(records.length) + "</dd>" +
+        "<dt>In flight</dt><dd>" + escapeHtml(count(audit.in_flight)) + "</dd>" +
+        "<dt>Evicted</dt><dd>" + escapeHtml(count(audit.evicted_verified)) + " verified, " +
+          escapeHtml(count(audit.evicted_unverified)) + " unverified</dd></dl>";
       if (!records.length) return summary + '<div class="item-meta">No requests recorded</div>';
 
       // Snapshots list records in ascending completion sequence.
-      return summary + records.slice(-20).reverse().map((record) => {
+      return summary + '<ol class="audit-list">' + records.slice(-20).reverse().map((record) => {
         const date = new Date(Number(record.timestamp_unix_ms));
         const time = Number.isFinite(date.getTime()) ? date.toISOString() : "-";
         const provider = typeof record.provider === "string" && record.provider ? record.provider : "Unverified";
-        return '<div class="item-meta">' + escapeHtml(time) +
-          ' | ' + escapeHtml(text(record.method)) +
-          ' | Tool: ' + escapeHtml(text(record.tool_name)) +
-          ' | Outcome: ' + escapeHtml(text(record.outcome)) +
-          ' | HTTP: ' + escapeHtml(count(record.http_status)) +
-          ' | Error: ' + escapeHtml(Number.isFinite(record.error_code) ? String(record.error_code) : text(record.error_code)) +
-          ' | Duration: ' + escapeHtml(count(record.duration_ms)) + ' ms' +
-          ' | Client hash: ' + escapeHtml(text(record.client_id_sha256).slice(0, 8)) +
-          ' | Provider: ' + escapeHtml(provider) + '</div>';
-      }).join("");
+        const outcome = text(record.outcome);
+        const tone = outcome === "success" ? " ok" : (outcome === "-" ? "" : " warn");
+        const error = Number.isFinite(record.error_code) ? String(record.error_code)
+          : (typeof record.error_code === "string" && record.error_code ? record.error_code : null);
+        const client = typeof record.client_id_sha256 === "string" && record.client_id_sha256
+          ? record.client_id_sha256.slice(0, 8) : null;
+        const details = [
+          time,
+          "HTTP " + count(record.http_status),
+          error === null ? null : "error " + error,
+          Number.isFinite(record.duration_ms) ? record.duration_ms + " ms" : null,
+          provider,
+          client === null ? null : "client " + client,
+        ].filter((part) => part !== null);
+        return '<li class="audit-row"><div class="audit-main"><strong>' + escapeHtml(text(record.method)) + "</strong>" +
+          (typeof record.tool_name === "string" && record.tool_name ? " <code>" + escapeHtml(record.tool_name) + "</code>" : "") +
+          ' <span class="pill' + tone + '">' + escapeHtml(outcome) + "</span></div>" +
+          '<div class="audit-meta">' + escapeHtml(details.join(" · ")) + "</div></li>";
+      }).join("") + "</ol>";
     } catch (_) {
-      return '<div class="item-meta">MCP request audit: unreadable snapshot</div>';
+      return heading + '<div class="item-meta">The request log snapshot is unreadable.</div>';
     }
   }
   async function loadSettingsDiagnostics() {
@@ -1036,23 +1226,24 @@
       ]);
       if (!current()) return;
       const skillList = (skills && skills.skills) || [];
-      const profiles = (diag && diag.mcpBrowserProfiles) || [];
-      let html = '<div class="item-meta">Token security: <strong>' + escapeHtml(diag.oauthKeystore) + "</strong></div>";
-      html += '<div class="item-meta">Skills: <strong>' + skillList.length + "</strong> | Browser profiles: <strong>" + profiles.length + "</strong></div>";
+      const profiles = diag && Array.isArray(diag.mcpBrowserProfiles) ? diag.mcpBrowserProfiles : [];
+      let html = '<dl class="kv kv-compact"><dt>Token storage</dt><dd>' + escapeHtml(diag.oauthKeystore) + "</dd>" +
+        "<dt>Browser profiles</dt><dd>" + String(profiles.length) + "</dd></dl>";
       if (diag.capabilitySelection) {
-        html += renderCapability(diag.capabilitySelection.identity);
         html += renderCapabilitySelection(diag.capabilitySelection);
+        html += renderCapability(diag.capabilitySelection.identity);
       }
       if (diag.providerCleanup && diag.providerCleanup.pending > 0) {
-        html += '<div class="item-meta">Cleanup awaiting confirmation: <strong>' +
-          escapeHtml(diag.providerCleanup.pending) + '</strong>. A new runtime waits until cleanup is confirmed.</div>';
+        html += '<div class="item-meta notice-warn">' + escapeHtml(diag.providerCleanup.pending) +
+          " cleanup step(s) await confirmation. A new runtime waits until cleanup is confirmed.</div>";
       }
-      if (skillList.length > 0) {
-        html += skillList.map((sk) =>
-          '<div class="set-row" style="margin-top:6px;"><code>' + escapeHtml(sk.name || sk.id) +
-          '</code><button class="mini-btn sm" data-skill-rb="' + escapeHtml(sk.name || sk.id) + '" type="button">Rollback</button></div>'
-        ).join("");
-      }
+      html += '<h3 class="list-heading">Skills</h3>';
+      html += skillList.length > 0
+        ? skillList.map((sk) =>
+          '<div class="set-row list-row"><code>' + escapeHtml(sk.name || sk.id) +
+          '</code><button class="mini-btn xs" data-skill-rb="' + escapeHtml(sk.name || sk.id) + '" type="button" title="Roll back this skill">Roll back</button></div>'
+        ).join("")
+        : '<div class="item-meta">No skills installed.</div>';
       html += renderRequestAudit(diag.mcpRequestAudit);
       if (box.innerHTML === html) return;
       box.innerHTML = html;
@@ -1097,9 +1288,9 @@
       if (active === target) return;
       if (!hasLiveProfile() && (target === "full-control" || target === "fully-unlocked")) {
         pendingElevatedProfile = target;
-        $("modalDangerLabel").textContent = target === "fully-unlocked" ? "UNRESTRICTED ACCESS" : "FULL ACCESS";
-        $("modalProfileTitle").textContent = target === "fully-unlocked" ? "Save Unlock preference?" : "Save Full preference?";
-        $("modalProfileBody").textContent = "Saves your preference. Connect a running Bridge to apply it.";
+        $("modalProfileTitle").textContent = "Save " + PROFILE_META[target].label + " as your preference?";
+        $("modalDangerLabel").textContent = PROFILE_META[target].hint;
+        $("modalProfileBody").textContent = "Nothing changes until a running Bridge applies it.";
         $("modalConfirmBtn").textContent = "Save";
         $("profileModal").classList.remove("hidden");
         return;
@@ -1146,7 +1337,23 @@
   // NAVIGATION
   $("missionsNavBtn").addEventListener("click", () => {
     showPage("pageMissions");
+    loadSessions();
     loadMissionsDrawer();
+  });
+  $("sessionsBody").addEventListener("click", (event) => {
+    const row = event.target && event.target.closest ? event.target.closest("[data-session]") : null;
+    if (!row) return;
+    selectedSessionKey = row.getAttribute("data-session");
+    showPage("pageSession");
+    renderSessionsView();
+    loadSessions(true);
+  });
+  $("sessionBackBtn").addEventListener("click", () => {
+    selectedSessionKey = null;
+    showPage("pageMissions");
+    renderSessionsView();
+    loadSessions(true);
+    loadMissionsDrawer(true);
   });
   $("approvalsNavBtn").addEventListener("click", () => {
     showPage("pageApprovals");
@@ -1162,7 +1369,10 @@
       refreshState();
     });
   });
-  $("refreshMissionsBtn").addEventListener("click", () => loadMissionsDrawer());
+  $("refreshMissionsBtn").addEventListener("click", () => {
+    loadSessions();
+    loadMissionsDrawer();
+  });
   $("refreshApprovalsBtn").addEventListener("click", () => loadApprovalsDrawer());
   $("quitAppBtn").addEventListener("click", async () => {
     if (panelBusy || profileChanging || extensionDecisionInFlight) return;
@@ -1203,7 +1413,7 @@
 
   $("pickOauthDirBtn").addEventListener("click", async () => {
     if (usesLiveWorkstation()) return;
-    const dir = await pickFolder("Select OAuth Folder");
+    const dir = await pickFolder("Choose OAuth folder");
     if (dir) {
       $("inputOauthDir").value = dir;
       dirtyInputs.add("inputOauthDir");
@@ -1231,7 +1441,7 @@
       oauthAudience: $("inputOauthAudience").value,
     });
     if (await runPanelAction("save_panel_settings", { settings: next }, { clearInputs: ["inputOauthDir", "inputOauthOrigin", "inputOauthAudience"] })) {
-      showToast("Web Relay settings saved.");
+      showToast("Web relay saved.");
     }
   });
 
@@ -1251,7 +1461,7 @@
       showToast(String(err));
     }
   }
-  $("copyMcpBtn").addEventListener("click", () => copySnippet("snipMcpUrl", "Local link copied."));
+  $("copyMcpBtn").addEventListener("click", () => copySnippet("snipMcpUrl", "MCP link copied."));
   $("copyStdioBtn").addEventListener("click", () => copySnippet("snipStdio", "Terminal command copied."));
 
   $("openWorkspaceBtn").addEventListener("click", async () => {
@@ -1277,18 +1487,18 @@
 
   // WELCOME SETUP
   function setObStep(step) {
-    $("obStepLabel").textContent = step + " / 3";
+    $("obStepLabel").textContent = step + " of 3";
     $("obStep1").classList.toggle("hidden", step !== 1);
     $("obStep2").classList.toggle("hidden", step !== 2);
     $("obStep3").classList.toggle("hidden", step !== 3);
     $("obTitle").textContent = step === 1
-      ? "Pick your folder"
-      : (step === 2 ? "Choose access" : "Ready to connect");
+      ? "Choose a workspace"
+      : (step === 2 ? "Choose starting access" : "You're ready");
   }
 
   $("obPickWorkspaceBtn").addEventListener("click", async () => {
     if (usesLiveWorkstation()) return;
-    const dir = await pickFolder("Pick Your Folder");
+    const dir = await pickFolder("Choose workspace folder");
     if (!dir || !state) return;
     const next = Object.assign({}, state.settings, { workspace: dir });
     if (await runPanelAction("save_panel_settings", { settings: next })) {

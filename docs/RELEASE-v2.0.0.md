@@ -1,7 +1,8 @@
 # v2.0.0 Release
 
 This historical record describes the 2.0.0 release and its qualification
-results. The current stable release is [2.1.0](RELEASE-v2.1.0.md). The
+results. Later releases have their own notes; the [README](../README.md)
+links the current one. The
 default Rust suites now have zero ignored tests. See the
 [contributor test guide](../CONTRIBUTING.md#build--test) for opt-in tests.
 

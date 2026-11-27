@@ -184,6 +184,12 @@ async fn run_skill_action(
 }
 
 #[tauri::command]
+async fn get_sessions(runtime: State<'_, Arc<AppRuntime>>) -> Result<Value, String> {
+    let runtime = Arc::clone(runtime.inner());
+    run_backend(move || backend::get_sessions(&runtime)).await
+}
+
+#[tauri::command]
 async fn get_diagnostics(runtime: State<'_, Arc<AppRuntime>>) -> Result<Value, String> {
     let runtime = Arc::clone(runtime.inner());
     run_backend(move || backend::get_diagnostics(&runtime)).await
@@ -447,6 +453,7 @@ pub fn run() {
             get_skills_overview,
             run_skill_action,
             get_diagnostics,
+            get_sessions,
             quit_app,
         ])
         .build(tauri::generate_context!())

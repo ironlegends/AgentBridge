@@ -240,6 +240,7 @@ fn metadata_worker(
 
 struct Session {
     diagnostic: Diagnostic,
+    command: Option<Arc<crate::client_sessions::CommandRecord>>,
     child: Child,
     capture: SharedCapture,
     metadata_queue: Option<SyncSender<MetadataJob>>,
@@ -269,7 +270,7 @@ impl Session {
     ) -> ProcessResult<Self> {
         let shared: SharedCapture = Arc::new((Mutex::new(Captured::default()), Condvar::new()));
         let mut owned = Self {
-            diagnostic, child, capture: shared,
+            diagnostic, command: None, child, capture: shared,
             metadata_queue: None, worker_stop: Arc::new(AtomicBool::new(false)),
             pending_deadline: None, shutdown_deadline: None, requests_started: 0,
             stdout_reader: None, stderr_reader: None,
@@ -317,6 +318,9 @@ impl Session {
         let Some(status) = status else { return Ok(()); };
         let code = status.code();
         self.exit = Some(code);
+        if let Some(command) = &self.command {
+            command.finish(code);
+        }
         if let Some(permit) = self.permit.take() {
             let outcome = match code {
                 Some(exit_code) => ExecutionOutcome::Completed {
@@ -443,6 +447,7 @@ type ProjectProcessOwner = tests::ProjectProcessUnderTest;
 #[cfg(windows)]
 struct LiveProject {
     native: ProjectProcessOwner,
+    command: Option<Arc<crate::client_sessions::CommandRecord>>,
     gate: ExecutionGate,
     permit: Option<ExecutionPermit>,
     // Only the exact locally predefined public-echo program can accept typed
@@ -473,6 +478,9 @@ impl LiveProject {
         };
         if !output.running {
             self.completed_at.get_or_insert_with(Instant::now);
+            if let Some(command) = &self.command {
+                command.finish(output.exit_code.map(|code| code as i32));
+            }
             self.finish(ExecutionOutcome::Completed{
                 exit_code:output.exit_code.unwrap_or(1) as i32,summary:None,
             })?;
@@ -571,6 +579,9 @@ impl LiveProject {
             "PROCESS_CLEANUP_PENDING: owned restricted Job termination unconfirmed"
         })?;
         self.completed_at.get_or_insert_with(Instant::now);
+        if let Some(command) = &self.command {
+            command.finish(output.exit_code.map(|code| code as i32));
+        }
         self.finish(ExecutionOutcome::Uncertain{
             reason_code:"project_terminated_by_owner".into(),
         })?;
@@ -1098,7 +1109,7 @@ fn project_start_with_snapshot(settings:&Path,root:&Path,database:&Path,
     let typed_stdin=preapproved && grant.is_some_and(|entry|
         entry.stdin_protocol.as_deref()==Some("public-echo-v1"));
     Ok((id,LiveProject{
-        native:native.into(),gate,permit:Some(permit),typed_stdin,
+        native:native.into(),command:None,gate,permit:Some(permit),typed_stdin,
         started:Instant::now(),last_used:Instant::now(),completed_at:None,
     },preapproved))
 }
@@ -1173,7 +1184,7 @@ fn start_with_snapshot(
         {
             // This may require an actual local human Yes. Do not hold the
             // registry lock while displaying the approval dialog.
-            let (id,project,preapproved)=project_start_with_snapshot(
+            let (id,mut project,preapproved)=project_start_with_snapshot(
                 settings,root,database,a,Duration::from_millis(wait),commands,
             )?;
             let mut owner=registry.lock()
@@ -1184,6 +1195,8 @@ fn start_with_snapshot(
                 // capacity race may allow an untracked child to survive.
                 return Err("PROCESS_CAPACITY_REACHED: no slot for owned restricted process");
             }
+            project.command = crate::client_sessions::CommandRecord::for_request(Diagnostic::ProjectProgram.id());
+            crate::client_sessions::link_command(project.command.as_ref());
             owner.project_sessions.insert(id.clone(),Arc::new(Mutex::new(project)));
             return Ok(json!({
                 "session_id":id,"diagnostic":"project-program",
@@ -1214,11 +1227,13 @@ fn start_with_snapshot(
     if owned.active_count() >= MAX_SESSIONS {
         return Err("PROCESS_CAPACITY_REACHED: too many active diagnostic sessions");
     }
-    let (id, session) = fixed_start_with_snapshot(settings, root, database, diagnostic, workspace,commands)?;
+    let (id, mut session) = fixed_start_with_snapshot(settings, root, database, diagnostic, workspace,commands)?;
     if owned.sessions.contains_key(&id) {
         return Err("PROCESS_ID_UNAVAILABLE: random session identifier collision");
     }
     let output = Arc::clone(&session.capture);
+    session.command = crate::client_sessions::CommandRecord::for_request(diagnostic.id());
+    crate::client_sessions::link_command(session.command.as_ref());
     owned.sessions.insert(id.clone(), Arc::new(Mutex::new(session)));
     drop(owned);
     // Start is nonblocking except for a small best-effort first-output wait.

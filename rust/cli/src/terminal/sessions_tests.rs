@@ -156,7 +156,7 @@ fn supervisor_fixture(fail_next:Arc<AtomicBool>)->(SessionSupervisor,Arc<Mutex<L
     let limits=EngineLimits::default();
     let policy=OperatorPolicy::builder(std::env::temp_dir()).build(&FsEnvironmentVerifier,&limits).unwrap();
     let (_,_,gate)=CommandDecisionEngine::with_fs_verifier(policy,limits).split();
-    let retained=Arc::new(Mutex::new(LiveProject{native,gate,permit:None,typed_stdin:false,
+    let retained=Arc::new(Mutex::new(LiveProject{native,command:None,gate,permit:None,typed_stdin:false,
         started:Instant::now(),last_used:Instant::now(),completed_at:None}));
     let registry=Arc::new(Mutex::new(Registry::default()));
     registry.lock().unwrap().project_sessions.insert(

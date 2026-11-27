@@ -180,6 +180,71 @@ async fn serve(config: UiConfig) -> Result<(), RuntimeError> {
     serve_with_profile(config, None, None, None, None,OperationAdmission::default()).await
 }
 
+/// The optional local transport view exposes a single read and uses the
+/// same loopback authentication as the workstation operator.
+pub(crate) struct LocalSessionView {
+    shutdown: watch::Sender<bool>,
+    task: tokio::task::JoinHandle<std::io::Result<()>>,
+}
+
+impl LocalSessionView {
+    pub(crate) async fn stop(self) -> Result<(), RuntimeError> {
+        let _ = self.shutdown.send(true);
+        self.task.await??;
+        Ok(())
+    }
+}
+
+pub(crate) async fn start_local_session_view(
+    port: u16,
+    descriptor: &Path,
+    audit: Arc<crate::request_audit::RequestAudit>,
+    database: SharedCoreDatabase,
+) -> Result<LocalSessionView, RuntimeError> {
+    let listener = agent_bridge_http::bind_loopback(port).await?;
+    let port = listener.local_addr()?.port();
+    let token = agent_bridge_missions::operator::random_token_hex(32);
+    let listen = format!("{LOOPBACK_IP}:{port}");
+    let descriptor = agent_bridge_lifecycle::publish_session_view_descriptor(descriptor, &json!({
+        "service": "agent-bridge-ui", "listen": listen,
+        "ui_url": format!("{LOOPBACK_SCHEME}://{listen}/?token={token}"),
+        "token_required": true, "loopback_only": true,
+        "live_profile_control": false, "workstation_shutdown_control": false,
+        "session_view_only": true,
+    }))?;
+    let effects = OperationAdmission::default();
+    let state = Arc::new(UiState {
+        config: UiConfig {
+            port, database: None, settings_dir: None, oauth_state: None, oauth_origin: None,
+            oauth_audience: None, project: None, open_browser: false, capability_selection: None,
+            request_audit: Some(audit),
+        },
+        token,
+        bound_port: port,
+        started_at_unix: SystemTime::now().duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_secs()).unwrap_or(0),
+        profile: None,
+        live_database: Some(database),
+        shutdown_sender: None,
+        oauth_owner: crate::extensions::UiOAuthOwner::default(),
+        effects: effects.clone(),
+    });
+    let app = Router::new().route("/api/sessions", get(handle_sessions)).with_state(state);
+    let (shutdown, receiver) = watch::channel(false);
+    let task = tokio::spawn(async move {
+        let _descriptor = descriptor;
+        let stopping = effects.clone();
+        let served = axum::serve(listener, app).with_graceful_shutdown(async move {
+            wait_for_shutdown(receiver).await;
+            stopping.close();
+        }).await;
+        effects.close();
+        effects.drain().await;
+        served
+    });
+    Ok(LocalSessionView { shutdown, task })
+}
+
 /// Shares the already authorized workstation's live profile controller. The
 /// caller owns the MCP listener and joins this UI in the same process.
 pub(crate) async fn serve_embedded(
@@ -245,6 +310,7 @@ async fn serve_with_profile(
         .route("/api/skills", get(handle_skills_list))
         .route("/api/skills/action", post(handle_skills_action))
         .route("/api/diagnostics", get(handle_diagnostics))
+        .route("/api/sessions", get(handle_sessions))
         .with_state(state);
 
     println!(
@@ -1248,6 +1314,29 @@ async fn handle_skills_action(
     }
 }
 
+async fn handle_sessions(State(state): State<Arc<UiState>>, headers: HeaderMap) -> Response {
+    if let Err(response) = validate_loopback_request(&headers, &state, true) {
+        return response;
+    }
+    let Some(audit) = state.config.request_audit.clone() else {
+        return json_response(StatusCode::OK, json!({
+            "available": false, "reason": "The operator is not attached to a live workstation.",
+        }));
+    };
+    let database = state.live_database.clone();
+    let path = state.config.database.clone();
+    let result = state.blocking(move || {
+        audit.sessions.snapshot(&audit.boot_id, database.as_ref(), path.as_deref())
+    }).await;
+    match result {
+        Ok(Ok(mut snapshot)) => {
+            snapshot["available"] = json!(true);
+            json_response(StatusCode::OK, snapshot)
+        }
+        _ => json_response(StatusCode::SERVICE_UNAVAILABLE, json!({"error": "SESSIONS_UNAVAILABLE"})),
+    }
+}
+
 async fn handle_diagnostics(State(state): State<Arc<UiState>>, headers: HeaderMap) -> Response {
     if let Err(resp) = validate_loopback_request(&headers, &state, true) {
         return resp;
@@ -1429,6 +1518,7 @@ impl NativeOperator {
             OperatorRead::Extensions => handle_extensions_list(state, headers).await,
             OperatorRead::Skills => handle_skills_list(state, headers).await,
             OperatorRead::Diagnostics => handle_diagnostics(state, headers).await,
+            OperatorRead::Sessions => handle_sessions(state, headers).await,
         };
         let mut reply = self.reply(response).await?;
         if matches!(operation, OperatorRead::Overview) {
@@ -1520,9 +1610,16 @@ mod native_operator_tests {
         let mut headers = operator.headers();
         headers.remove("X-Agent-Bridge-Token");
         let state = State(Arc::clone(&operator.state));
-        let unauthenticated = operator.reply(handle_diagnostics(state, headers).await).await.unwrap();
+        let unauthenticated = operator.reply(handle_diagnostics(state, headers.clone()).await).await.unwrap();
         assert_eq!(unauthenticated.status, 401);
         assert!(unauthenticated.body.get("mcp_request_audit").is_none());
+        assert!(unauthenticated.body.get("client_sessions").is_none());
+        let denied = operator.reply(handle_sessions(
+            State(Arc::clone(&operator.state)), headers,
+        ).await).await.unwrap();
+        assert_eq!(denied.status, 401);
+        assert!(denied.body.get("sessions").is_none());
+        assert!(denied.body.get("earlier").is_none());
 
         let reply = operator.get(crate::backend::OperatorRead::Diagnostics).await.unwrap();
         assert_eq!(reply.status, 200);
@@ -1530,6 +1627,51 @@ mod native_operator_tests {
         assert_eq!(reply.body["mcp_request_audit"]["evicted"], 0);
         assert_eq!(reply.body["mcp_request_audit"]["in_flight"], 0);
         assert_eq!(reply.body["mcp_request_audit"]["records"], json!([]));
+        let sessions = operator.get(crate::backend::OperatorRead::Sessions).await.unwrap();
+        assert_eq!(sessions.status, 200);
+        assert_eq!(sessions.body["boot_id"], reply.body["mcp_request_audit"]["boot_id"]);
+        assert_eq!(sessions.body["sessions"], json!([]));
+    }
+
+    #[tokio::test]
+    async fn local_session_listener_restarts_with_the_same_descriptor() {
+        use std::sync::Mutex;
+
+        let directory = crate::test_state_base().join(format!("session-view-{}",
+            agent_bridge_missions::operator::random_token_hex(16)));
+        struct Cleanup(PathBuf);
+        impl Drop for Cleanup {
+            fn drop(&mut self) { let _ = std::fs::remove_dir_all(&self.0); }
+        }
+        let _cleanup = Cleanup(directory.clone());
+        std::fs::create_dir_all(&directory).unwrap();
+        let private = directory.join("operator");
+        agent_bridge_lifecycle::initialize_operator_settings(&private).unwrap();
+        let path = private.join("sessions.json");
+        let database = Arc::new(Mutex::new(CoreDatabase::initialize_new(&directory.join("core.db")).unwrap()));
+        let audit = Arc::new(crate::request_audit::RequestAudit::new().unwrap());
+        let free_port = || std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .unwrap().local_addr().unwrap().port();
+
+        let first = start_local_session_view(free_port(), &path, audit.clone(), database.clone()).await.unwrap();
+        let read_descriptor = || {
+            let bytes = std::fs::read(&path).unwrap();
+            let record = serde_json::from_slice::<Value>(&bytes).unwrap();
+            assert_eq!(record["session_view_only"], true);
+        };
+        read_descriptor();
+        assert!(start_local_session_view(free_port(), &path, audit.clone(), database.clone()).await.is_err());
+        read_descriptor();
+        let reader = std::fs::File::open(&path).unwrap();
+        first.stop().await.unwrap();
+        assert!(!path.exists());
+
+        let second = start_local_session_view(free_port(), &path, audit, database).await.unwrap();
+        read_descriptor();
+        drop(reader);
+        read_descriptor();
+        second.stop().await.unwrap();
+        assert!(!path.exists());
     }
 
     #[tokio::test]

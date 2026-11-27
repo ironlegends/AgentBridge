@@ -109,4 +109,4 @@ Release tooling lives under `scripts/`:
 - `scripts/rust/repository_hygiene.py --repo .` checks tracked files and product version consistency. `scripts/rust/test_build_winapp_passive.py` verifies the pinned WinApp input hashes and sizes.
 - `scripts/windows/sign-release.ps1` generates `SHA256SUMS` for explicitly listed archives and a detached Windows CNG signature, `SHA256SUMS.sig`. Verify the signature with `licenses/agent-bridge-release-public.pem`.
 
-The independent desktop workspace needs its own notice inventory and distribution qualification. See [archive privacy and provenance](PUBLIC-RELEASE-SCOPE.md#archive-privacy-and-provenance), the [release checks](RELEASE-v2.1.0.md#reproduce-the-gates), and the [release notice review](RELEASE-NOTICES.md).
+The independent desktop workspace needs its own notice inventory and distribution qualification. See [archive privacy and provenance](PUBLIC-RELEASE-SCOPE.md#archive-privacy-and-provenance), the [release checks](RELEASE-v2.2.0.md#reproduce-the-gates), and the [release notice review](RELEASE-NOTICES.md).

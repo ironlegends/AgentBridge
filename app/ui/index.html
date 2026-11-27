@@ -9,19 +9,30 @@
 </head>
 <body>
   <div class="app-shell">
-    <!-- Compact Frameless Titlebar -->
     <header class="titlebar" data-tauri-drag-region>
       <div class="titlebar-brand" data-tauri-drag-region>
-        <span class="titlebar-dot" aria-hidden="true"></span>
+        <svg class="titlebar-mark" viewBox="0 0 40 40" width="16" height="16" fill="none" aria-hidden="true">
+          <defs>
+            <linearGradient id="abGrad" x1="4" y1="6" x2="36" y2="34" gradientUnits="userSpaceOnUse">
+              <stop offset="0%" stop-color="#38BDF8"/>
+              <stop offset="50%" stop-color="#6366F1"/>
+              <stop offset="100%" stop-color="#14B8A6"/>
+            </linearGradient>
+          </defs>
+          <path d="M6 27C9 15 15 11 20 11C25 11 31 15 34 27" stroke="url(#abGrad)" stroke-width="4" stroke-linecap="round"/>
+          <circle cx="8" cy="27.5" r="3.6" fill="#38BDF8"/>
+          <circle cx="20" cy="11" r="3.8" fill="#818CF8"/>
+          <circle cx="32" cy="27.5" r="3.6" fill="#2DD4BF"/>
+        </svg>
         <span class="titlebar-name" data-tauri-drag-region>Agent Bridge</span>
       </div>
       <div class="titlebar-controls">
-        <button id="minBtn" class="win-btn" type="button" title="Minimize to Tray" aria-label="Minimize to Tray">
+        <button id="minBtn" class="win-btn" type="button" title="Minimize to tray" aria-label="Minimize to tray">
           <svg viewBox="0 0 12 12" width="10" height="10" aria-hidden="true">
             <path d="M2 6h8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
           </svg>
         </button>
-        <button id="hideBtn" class="win-btn win-btn-close" type="button" title="Hide to Tray" aria-label="Hide to Tray">
+        <button id="hideBtn" class="win-btn win-btn-close" type="button" title="Hide to tray (Bridge keeps running)" aria-label="Hide to tray">
           <svg viewBox="0 0 12 12" width="10" height="10" aria-hidden="true">
             <path d="M2.5 2.5l7 7M9.5 2.5l-7 7" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
           </svg>
@@ -29,174 +40,130 @@
       </div>
     </header>
 
-    <!-- MAIN SCREEN -->
+    <!-- MAIN SCREEN: status, access, workspace, navigation -->
     <main id="pageMain" class="page active">
-      <!-- Status Hero Card -->
-      <section class="hero-card" data-tauri-drag-region>
-        <div class="hero-top" data-tauri-drag-region>
-          <div class="brand-lockup" data-tauri-drag-region>
-            <div class="brand-mark" aria-hidden="true">
-              <svg viewBox="0 0 40 40" width="22" height="22" fill="none">
-                <defs>
-                  <linearGradient id="abGrad" x1="4" y1="6" x2="36" y2="34" gradientUnits="userSpaceOnUse">
-                    <stop offset="0%" stop-color="#38BDF8"/>
-                    <stop offset="50%" stop-color="#6366F1"/>
-                    <stop offset="100%" stop-color="#14B8A6"/>
-                  </linearGradient>
-                </defs>
-                <path d="M6 27C9 15 15 11 20 11C25 11 31 15 34 27" stroke="url(#abGrad)" stroke-width="3.2" stroke-linecap="round"/>
-                <path d="M12 27C14 20 17 17.5 20 17.5C23 17.5 26 20 28 27" stroke="#E0E7FF" stroke-opacity="0.7" stroke-width="2" stroke-linecap="round"/>
-                <circle cx="8" cy="27.5" r="3" fill="#38BDF8"/>
-                <circle cx="20" cy="11" r="3.2" fill="#818CF8"/>
-                <circle cx="32" cy="27.5" r="3" fill="#2DD4BF"/>
-              </svg>
-            </div>
-            <div class="brand-copy" data-tauri-drag-region>
-              <h1 class="brand-title" data-tauri-drag-region>Agent Bridge</h1>
-              <p class="brand-sub" data-tauri-drag-region>Web chats. Local agents.</p>
-            </div>
-          </div>
-          <div id="livePill" class="live-pill standby">
-            <span id="liveDot" class="dot"></span>
-            <span id="liveText">Connecting</span>
-          </div>
-        </div>
-
-        <div class="hero-grid">
-          <div class="hero-tile">
-            <span class="tile-label">Bridge</span>
-            <div class="tile-value-row">
-              <span id="gwDot" class="dot warn"></span>
-              <span id="gwStatus" class="tile-value">Checking…</span>
-            </div>
-          </div>
-          <div class="hero-tile">
-            <span class="tile-label">Activity</span>
-            <div class="tile-value-row">
-              <span id="relDot" class="dot"></span>
-              <span id="relStatus" class="tile-value">Idle</span>
-            </div>
-          </div>
-        </div>
-      </section>
-
-      <!-- Access Level Selector -->
-      <section class="section-block">
-        <div class="section-head">
-          <div class="section-head-copy">
-            <div class="section-title access-title"><svg viewBox="0 0 16 16" width="14" height="14" fill="none" aria-hidden="true"><path d="M8 2l5 2v4c0 3-2 5-5 6-3-1-5-3-5-6V4zM6 8l1.5 1.5L10 7" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/></svg><span id="profileTitle">Active mode</span></div>
-            <div id="profileHint" class="section-hint">Connecting to Agent Bridge…</div>
-          </div>
-          <span id="profileBadge" class="profile-badge">-</span>
-        </div>
-
-        <div id="profileSelector" class="seg-shell seg-4" role="group" aria-label="Active access mode" aria-describedby="profileCeiling profileStatus" aria-busy="false">
-          <div id="profileIndicator" class="seg-indicator hidden"></div>
-          <button class="seg-btn" data-profile="read-only" type="button" title="Safe mode: AI can only view files" aria-pressed="false" disabled>Read</button>
-          <button class="seg-btn" data-profile="workspace-write" type="button" title="AI can read and edit files in your folder" aria-pressed="false" disabled>Write</button>
-          <button class="seg-btn" data-profile="full-control" type="button" title="Adds approved commands and app controls" aria-pressed="false" disabled>Full</button>
-          <button class="seg-btn" data-profile="fully-unlocked" type="button" title="Unrestricted local access for this session" aria-pressed="false" disabled>Unlock</button>
-        </div>
-        <div class="profile-state">
-          <div id="profileCeiling" class="section-hint hidden"></div>
-          <div id="profileStatus" class="section-hint" role="status" aria-live="polite">Connecting to Agent Bridge…</div>
-        </div>
-      </section>
-
-      <!-- Folder Card -->
-      <section class="scope-card">
-        <div class="scope-top">
-          <div class="scope-info">
-            <div class="scope-label-row">
-              <span class="scope-label"><svg viewBox="0 0 16 16" width="13" height="13" fill="none" aria-hidden="true"><path d="M2 5V3.5h5l1.5 2H14v7H2z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/></svg> Workspace</span>
-              <span id="scopePill" class="scope-pill">Local</span>
-            </div>
-            <div id="scopePath" class="scope-path">No folder chosen</div>
-          </div>
-          <button id="quickWorkspaceBtn" class="mini-btn sm" type="button">Change</button>
-        </div>
-        <div id="versionMeta" class="version-meta">Ready on your computer</div>
-      </section>
-
-      <!-- Primary Action & Simple Navigation -->
-      <section class="actions-stack">
+      <section id="statusCard" class="status-card" aria-labelledby="statusHeading">
+        <h1 id="statusHeading" class="status-heading">
+          <span id="gwDot" class="dot warn" aria-hidden="true"></span>
+          <span class="status-subject">Bridge</span>
+          <span id="gwStatus">Checking…</span>
+        </h1>
+        <p id="externalGatewayNotice" class="status-detail hidden" role="status"></p>
         <div id="gatewayActions" class="power-row">
           <button id="powerBtn" class="action-btn" type="button" disabled>Start Bridge</button>
-          <button id="stopBtn" class="mini-btn stop-btn hidden" type="button">Stop</button>
+          <button id="stopBtn" class="ghost-btn stop-btn hidden" type="button">Stop</button>
         </div>
-
-        <div id="externalGatewayNotice" class="section-hint hidden" role="status"></div>
-
-        <nav class="nav-row" aria-label="Sections">
-          <button id="missionsNavBtn" class="mini-btn nav-btn" type="button">
-            <svg viewBox="0 0 16 16" width="13" height="13" fill="none" aria-hidden="true">
-              <path d="M3 4.5h10M3 8h7M3 11.5h8.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
-            </svg>
-            <span>Tasks</span>
-          </button>
-          <button id="approvalsNavBtn" class="mini-btn nav-btn" type="button">
-            <svg viewBox="0 0 16 16" width="13" height="13" fill="none" aria-hidden="true">
-              <path d="M8 2.2l4.8 2v3.6c0 2.9-2 5.2-4.8 6-2.8-.8-4.8-3.1-4.8-6V4.2L8 2.2z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/>
-            </svg>
-            <span>Approvals</span>
-            <span id="approvalsBadge" class="nav-badge hidden">0</span>
-          </button>
-          <button id="settingsNavBtn" class="mini-btn nav-btn" type="button">
-            <svg viewBox="0 0 16 16" width="13" height="13" fill="none" aria-hidden="true">
-              <circle cx="8" cy="8" r="2.2" stroke="currentColor" stroke-width="1.5"/>
-              <path d="M8 2v1.6M8 12.4V14M2 8h1.6M12.4 8H14M3.8 3.8l1.1 1.1M11.1 11.1l1.1 1.1M12.2 3.8l-1.1 1.1M4.9 11.1l-1.1 1.1" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/>
-            </svg>
-            <span>Settings</span>
-          </button>
-        </nav>
       </section>
+
+      <section class="section-block" aria-labelledby="profileTitle">
+        <div class="section-head">
+          <h2 id="profileTitle" class="section-title">Access</h2>
+          <span id="profileCeiling" class="section-aside hidden"></span>
+        </div>
+        <div id="profileSelector" class="seg-shell seg-4" role="group" aria-labelledby="profileTitle" aria-describedby="profileHint profileStatus" aria-busy="false">
+          <div id="profileIndicator" class="seg-indicator hidden"></div>
+          <button class="seg-btn" data-profile="read-only" type="button" aria-pressed="false" disabled>Read</button>
+          <button class="seg-btn" data-profile="workspace-write" type="button" aria-pressed="false" disabled>Write</button>
+          <button class="seg-btn" data-profile="full-control" type="button" aria-pressed="false" disabled>Full</button>
+          <button class="seg-btn" data-profile="fully-unlocked" type="button" aria-pressed="false" disabled>Unlock</button>
+        </div>
+        <p id="profileHint" class="section-hint">Waiting for Bridge</p>
+        <p id="profileStatus" class="section-hint" role="status" aria-live="polite">Connecting to Agent Bridge…</p>
+      </section>
+
+      <section class="workspace-row" aria-label="Workspace">
+        <svg class="workspace-icon" viewBox="0 0 16 16" width="16" height="16" fill="none" aria-hidden="true"><path d="M2 5V3.5h5l1.5 2H14v7H2z" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/></svg>
+        <div class="workspace-copy">
+          <span class="workspace-label">Workspace</span>
+          <span id="scopePath" class="workspace-path">No folder chosen</span>
+        </div>
+        <button id="quickWorkspaceBtn" class="mini-btn sm" type="button">Change</button>
+      </section>
+
+      <nav class="nav-row" aria-label="Sections">
+        <button id="missionsNavBtn" class="nav-btn" type="button">
+          <svg viewBox="0 0 16 16" width="15" height="15" fill="none" aria-hidden="true"><circle cx="5.5" cy="6" r="2" stroke="currentColor" stroke-width="1.4"/><circle cx="11" cy="6" r="2" stroke="currentColor" stroke-width="1.4"/><path d="M2 13c.4-2 1.8-3 3.5-3s3.1 1 3.5 3M8.6 11c.5-.6 1.3-1 2.4-1 1.7 0 3.1 1 3.5 3" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>
+          <span>Sessions</span>
+          <span id="tasksBadge" class="nav-badge neutral hidden">0</span>
+        </button>
+        <button id="approvalsNavBtn" class="nav-btn" type="button">
+          <svg viewBox="0 0 16 16" width="15" height="15" fill="none" aria-hidden="true"><path d="M8 2.2l4.8 2v3.6c0 2.9-2 5.2-4.8 6-2.8-.8-4.8-3.1-4.8-6V4.2L8 2.2z" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/></svg>
+          <span>Approvals</span>
+          <span id="approvalsBadge" class="nav-badge hidden">0</span>
+        </button>
+        <button id="settingsNavBtn" class="nav-btn" type="button">
+          <svg viewBox="0 0 16 16" width="15" height="15" fill="none" aria-hidden="true"><circle cx="8" cy="8" r="2.2" stroke="currentColor" stroke-width="1.4"/><path d="M8 2v1.6M8 12.4V14M2 8h1.6M12.4 8H14M3.8 3.8l1.1 1.1M11.1 11.1l1.1 1.1M12.2 3.8l-1.1 1.1M4.9 11.1l-1.1 1.1" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>
+          <span>Settings</span>
+        </button>
+      </nav>
     </main>
 
-    <!-- TASKS PAGE -->
-    <section id="pageMissions" class="page subpage">
+    <!-- SESSIONS AND TASKS PAGE -->
+    <section id="pageMissions" class="page subpage" aria-labelledby="missionsTitle">
       <div class="subpage-head">
-        <button class="mini-btn sm" data-back type="button">&lsaquo; Back</button>
-        <h2 class="subpage-title">Tasks <span class="auto-label" title="Updates automatically while open">Auto</span></h2>
-        <button id="refreshMissionsBtn" class="mini-btn sm icon-button" type="button" title="Refresh now" aria-label="Refresh now"><svg viewBox="0 0 16 16" width="14" height="14" fill="none" aria-hidden="true"><path d="M13 7A5 5 0 1 0 11 12M13 3v4H9" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+        <button class="back-btn" data-back type="button" aria-label="Back"><svg viewBox="0 0 16 16" width="14" height="14" fill="none" aria-hidden="true"><path d="M10 3.5L5.5 8l4.5 4.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+        <h2 id="missionsTitle" class="subpage-title">Sessions</h2>
+        <button id="refreshMissionsBtn" class="icon-btn" type="button" title="Refresh now (also refreshes automatically)" aria-label="Refresh sessions and tasks"><svg viewBox="0 0 16 16" width="14" height="14" fill="none" aria-hidden="true"><path d="M13 7A5 5 0 1 0 11 12M13 3v4H9" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
       </div>
-      <div id="missionsBody" class="scroll-body"></div>
+      <div class="scroll-body">
+        <div id="sessionsBody" class="sessions-body"></div>
+        <h3 class="list-heading page-heading">Tasks</h3>
+        <div id="missionsBody" class="missions-body"></div>
+      </div>
+    </section>
+
+    <!-- SESSION DETAIL PAGE -->
+    <section id="pageSession" class="page subpage" aria-labelledby="sessionTitle">
+      <div class="subpage-head">
+        <button id="sessionBackBtn" class="back-btn" type="button" aria-label="Back to sessions"><svg viewBox="0 0 16 16" width="14" height="14" fill="none" aria-hidden="true"><path d="M10 3.5L5.5 8l4.5 4.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+        <h2 id="sessionTitle" class="subpage-title">Session</h2>
+        <span class="head-spacer" aria-hidden="true"></span>
+      </div>
+      <div id="sessionBody" class="scroll-body"></div>
     </section>
 
     <!-- APPROVALS PAGE -->
-    <section id="pageApprovals" class="page subpage">
+    <section id="pageApprovals" class="page subpage" aria-labelledby="approvalsTitle">
       <div class="subpage-head">
-        <button class="mini-btn sm" data-back type="button">&lsaquo; Back</button>
-        <h2 class="subpage-title">Approvals <span class="auto-label" title="Updates automatically while open">Auto</span></h2>
-        <button id="refreshApprovalsBtn" class="mini-btn sm icon-button" type="button" title="Refresh now" aria-label="Refresh now"><svg viewBox="0 0 16 16" width="14" height="14" fill="none" aria-hidden="true"><path d="M13 7A5 5 0 1 0 11 12M13 3v4H9" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+        <button class="back-btn" data-back type="button" aria-label="Back"><svg viewBox="0 0 16 16" width="14" height="14" fill="none" aria-hidden="true"><path d="M10 3.5L5.5 8l4.5 4.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+        <h2 id="approvalsTitle" class="subpage-title">Approvals</h2>
+        <button id="refreshApprovalsBtn" class="icon-btn" type="button" title="Refresh now (also refreshes automatically)" aria-label="Refresh approvals"><svg viewBox="0 0 16 16" width="14" height="14" fill="none" aria-hidden="true"><path d="M13 7A5 5 0 1 0 11 12M13 3v4H9" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
       </div>
       <div id="approvalsBody" class="scroll-body"></div>
     </section>
 
     <!-- SETTINGS PAGE -->
-    <section id="pageSettings" class="page subpage">
+    <section id="pageSettings" class="page subpage" aria-labelledby="settingsTitle">
       <div class="subpage-head">
-        <button class="mini-btn sm" data-back type="button">&lsaquo; Back</button>
-        <h2 class="subpage-title">Settings</h2>
-        <button id="quitAppBtn" class="mini-btn sm danger-text" type="button">Quit</button>
+        <button class="back-btn" data-back type="button" aria-label="Back"><svg viewBox="0 0 16 16" width="14" height="14" fill="none" aria-hidden="true"><path d="M10 3.5L5.5 8l4.5 4.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+        <h2 id="settingsTitle" class="subpage-title">Settings</h2>
+        <span class="head-spacer" aria-hidden="true"></span>
       </div>
 
       <div class="scroll-body">
-        <!-- Theme Selector -->
-        <div class="set-card">
-          <div class="set-title">Theme</div>
-          <div class="seg-shell seg-3" style="margin-top: 8px;">
-            <div id="themeIndicator" class="seg-indicator"></div>
-            <button class="seg-btn active" data-theme-choice="system" type="button">Auto</button>
-            <button class="seg-btn" data-theme-choice="light" type="button">Light</button>
-            <button class="seg-btn" data-theme-choice="dark" type="button">Dark</button>
+        <section class="set-card" aria-labelledby="connectTitle">
+          <h3 id="connectTitle" class="set-title">Connect an AI</h3>
+          <div class="snip-row">
+            <span class="field-label">MCP link (local apps)</span>
+            <button id="copyMcpBtn" class="mini-btn xs" type="button">Copy</button>
           </div>
-        </div>
+          <pre id="snipMcpUrl" class="code-snip">Loading…</pre>
+          <div class="snip-row">
+            <span class="field-label">Terminal command</span>
+            <button id="copyStdioBtn" class="mini-btn xs" type="button">Copy</button>
+          </div>
+          <pre id="snipStdio" class="code-snip">agent-bridge stdio</pre>
+          <dl class="kv web-paths">
+            <dt>ChatGPT web</dt><dd>Secure MCP Tunnel</dd>
+            <dt>Gemini web</dt><dd>HTTPS web relay with OAuth</dd>
+          </dl>
+          <p id="webRelayState" class="set-sub">Checking the web relay…</p>
+        </section>
 
-        <!-- Folder Card -->
-        <div class="set-card">
+        <section class="set-card" aria-labelledby="workspaceTitle">
           <div class="set-row">
             <div class="set-col-grow">
-              <div class="set-title">Workspace</div>
+              <h3 id="workspaceTitle" class="set-title">Workspace</h3>
               <div id="setWorkspacePath" class="set-sub path-truncate">Not chosen</div>
             </div>
             <div class="btn-inline">
@@ -205,145 +172,128 @@
             </div>
           </div>
           <div id="recentWorkspacesWrap" class="recent-wrap hidden">
-            <div class="mini-label">Recent folders</div>
+            <div class="field-label">Recent</div>
             <div id="recentWorkspacesList" class="recent-list"></div>
           </div>
-        </div>
+        </section>
 
-        <!-- Simple Connect Snippets -->
-        <div class="set-card">
-          <div class="set-title access-title"><svg viewBox="0 0 16 16" width="14" height="14" fill="none" aria-hidden="true"><path d="M6 5l2-2a3 3 0 014 4l-2 2M10 11l-2 2a3 3 0 01-4-4l2-2M6 10l4-4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg> Connect your AI</div>
-          <div class="connect-methods">
-            <div><strong>ChatGPT Web</strong><span>Secure MCP Tunnel</span></div>
-            <div><strong>Gemini Web</strong><span>HTTPS / OAuth</span></div>
+        <section class="set-card set-row" aria-labelledby="themeTitle">
+          <h3 id="themeTitle" class="set-title">Theme</h3>
+          <div class="seg-shell seg-3 seg-compact" role="group" aria-labelledby="themeTitle">
+            <div id="themeIndicator" class="seg-indicator"></div>
+            <button class="seg-btn active" data-theme-choice="system" type="button">Auto</button>
+            <button class="seg-btn" data-theme-choice="light" type="button">Light</button>
+            <button class="seg-btn" data-theme-choice="dark" type="button">Dark</button>
           </div>
-          <div class="set-sub">Local clients use the link or command below.</div>
+        </section>
 
-          <div class="snip-row">
-            <span class="mini-label">Local link</span>
-            <button id="copyMcpBtn" class="mini-btn xs" type="button">Copy</button>
-          </div>
-          <pre id="snipMcpUrl" class="code-snip">Loading...</pre>
-
-          <div class="snip-row" style="margin-top: 8px;">
-            <span class="mini-label">Terminal command</span>
-            <button id="copyStdioBtn" class="mini-btn xs" type="button">Copy</button>
-          </div>
-          <pre id="snipStdio" class="code-snip">agent-bridge stdio</pre>
-        </div>
-
-        <!-- Collapsible Advanced Settings (hidden by default for simplicity) -->
         <details class="adv-details">
           <summary class="adv-summary">
-            <span>Advanced settings</span>
-            <span class="adv-hint">Storage, OAuth, Diagnostics</span>
+            <span>Storage and web relay</span>
+            <svg class="chevron" viewBox="0 0 16 16" width="12" height="12" fill="none" aria-hidden="true"><path d="M6 3.5L10.5 8 6 12.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
           </summary>
-
           <div class="adv-body">
-            <!-- Local Storage & Port -->
-            <div class="set-card">
-              <div class="set-title">Storage &amp; Port</div>
-              <div class="set-sub">Private state and local port.</div>
-
+            <div class="adv-group">
+              <h4 class="group-title">Storage</h4>
               <label class="field-label" for="inputDbPath">Database file</label>
               <input id="inputDbPath" class="text-input" type="text" placeholder="missions.sqlite">
 
               <label class="field-label" for="inputSettingsDir">Settings folder</label>
-              <input id="inputSettingsDir" class="text-input" type="text" placeholder="settings directory">
+              <input id="inputSettingsDir" class="text-input" type="text" placeholder="Settings folder">
 
-              <label class="field-label" for="inputGatewayPort">Local port (127.0.0.1)</label>
+              <label class="field-label" for="inputGatewayPort">Local port</label>
               <input id="inputGatewayPort" class="text-input" type="number" min="1024" max="65535" value="18855">
 
-              <div class="btn-row-3">
+              <div class="btn-row">
                 <button id="savePathsBtn" class="mini-btn sm" type="button">Save</button>
-                <button id="initStateBtn" class="mini-btn sm accent-btn" type="button">Initialize</button>
-                <button id="openSettingsDirBtn" class="mini-btn sm" type="button">Open Dir</button>
+                <button id="initStateBtn" class="mini-btn sm" type="button">Initialize</button>
+                <button id="openSettingsDirBtn" class="mini-btn sm" type="button">Open folder</button>
               </div>
             </div>
 
-            <!-- Web Relay (OAuth 2.1) -->
-            <div class="set-card">
-              <div class="set-title">Web Relay (OAuth 2.1)</div>
-              <div class="set-sub">Authenticated HTTPS route for web chats.</div>
+            <div class="adv-group">
+              <h4 class="group-title">Web relay</h4>
+              <p class="set-sub">HTTPS route with OAuth 2.1 for ChatGPT and Gemini web.</p>
 
-              <label class="field-label" for="inputOauthDir">OAuth folder</label>
-              <div class="input-with-btn">
-                <input id="inputOauthDir" class="text-input" type="text" placeholder="Optional path">
-                <button id="pickOauthDirBtn" class="mini-btn sm" type="button">Browse</button>
-              </div>
+              <label class="field-label" for="inputOauthOrigin">Public HTTPS address</label>
+              <input id="inputOauthOrigin" class="text-input" type="text" placeholder="https://…">
 
-              <label class="field-label" for="inputOauthOrigin">Public HTTPS URL</label>
-              <input id="inputOauthOrigin" class="text-input" type="text" placeholder="HTTPS relay origin">
-
-              <label class="field-label" for="inputOauthAudience">Relay scope</label>
+              <label class="field-label" for="inputOauthAudience">Web chats can use</label>
               <select id="inputOauthAudience" class="text-input">
-                <option value="workstation">Workstation (tasks + files)</option>
+                <option value="workstation">Tasks and files</option>
                 <option value="missions">Tasks only</option>
               </select>
 
-              <button id="saveOauthBtn" class="mini-btn full-w" type="button">Save Web Relay</button>
-            </div>
+              <label class="field-label" for="inputOauthDir">OAuth folder</label>
+              <div class="input-with-btn">
+                <input id="inputOauthDir" class="text-input" type="text" placeholder="Optional">
+                <button id="pickOauthDirBtn" class="mini-btn sm" type="button">Browse</button>
+              </div>
 
-            <!-- System Status & Skills -->
-            <div class="set-card">
-              <div class="set-title">Diagnostics &amp; Skills</div>
-              <div id="skillsAndDiagBox" class="diag-box">Loading...</div>
+              <div class="btn-row">
+                <button id="saveOauthBtn" class="mini-btn sm" type="button">Save web relay</button>
+              </div>
             </div>
           </div>
         </details>
+
+        <details class="adv-details">
+          <summary class="adv-summary">
+            <span>Diagnostics and skills</span>
+            <svg class="chevron" viewBox="0 0 16 16" width="12" height="12" fill="none" aria-hidden="true"><path d="M6 3.5L10.5 8 6 12.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          </summary>
+          <div id="skillsAndDiagBox" class="adv-body diag-box">Loading…</div>
+        </details>
+      </div>
+
+      <div class="settings-foot">
+        <span id="versionMeta" class="foot-meta">Agent Bridge</span>
+        <button id="quitAppBtn" class="ghost-btn danger-text" type="button">Quit</button>
       </div>
     </section>
 
-    <!-- ELEVATED ACCESS CONFIRMATION MODAL -->
+    <!-- ELEVATED ACCESS CONFIRMATION -->
     <div id="profileModal" class="modal-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="modalProfileTitle">
       <div class="modal-card">
-        <div id="modalDangerLabel" class="modal-eyebrow">FULL ACCESS</div>
-        <h3 id="modalProfileTitle" class="modal-title">Switch to Full Access?</h3>
-        <p id="modalProfileBody" class="modal-body">
-          This lets AI run approved commands and control selected windows on your PC.
-        </p>
+        <h3 id="modalProfileTitle" class="modal-title">Save Full preference?</h3>
+        <p id="modalDangerLabel" class="modal-risk">Full access</p>
+        <p id="modalProfileBody" class="modal-body">Saves your preference. Connect a running Bridge to apply it.</p>
         <div class="modal-actions">
           <button id="modalCancelBtn" class="mini-btn" type="button">Cancel</button>
-          <button id="modalConfirmBtn" class="action-btn danger-btn" type="button">Switch</button>
+          <button id="modalConfirmBtn" class="action-btn danger-btn" type="button">Save</button>
         </div>
       </div>
     </div>
 
-    <!-- SIMPLE 3-STEP WELCOME SETUP -->
+    <!-- FIRST-RUN SETUP -->
     <div id="onboardingModal" class="modal-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="obTitle">
       <div class="modal-card ob-card">
         <div class="ob-head">
-          <span class="modal-eyebrow accent-eyebrow">WELCOME</span>
-          <span id="obStepLabel" class="pill">1 / 3</span>
+          <h3 id="obTitle" class="modal-title">Choose a workspace</h3>
+          <span id="obStepLabel" class="pill">1 of 3</span>
         </div>
-        <h3 id="obTitle" class="modal-title">Pick your folder</h3>
 
         <div id="obStep1" class="ob-step">
-          <p class="modal-body">
-            Choose the workspace your AI can access.
-          </p>
+          <p class="modal-body">Your AI can only reach files in this folder.</p>
           <div class="ob-path-box">
-            <div class="mini-label">Selected folder</div>
-            <div id="obWorkspacePath" class="path-truncate">Not chosen yet</div>
+            <div id="obWorkspacePath" class="path-truncate">No folder chosen</div>
+            <button id="obPickWorkspaceBtn" class="mini-btn sm" type="button">Choose…</button>
           </div>
-          <button id="obPickWorkspaceBtn" class="mini-btn full-w" type="button">Choose Folder</button>
           <div class="modal-actions">
-            <button id="obNext1Btn" class="action-btn full-w" type="button">Continue</button>
+            <button id="obNext1Btn" class="action-btn" type="button">Continue</button>
           </div>
         </div>
 
         <div id="obStep2" class="ob-step hidden">
-          <p class="modal-body">
-            Choose a starting access mode.
-          </p>
+          <p class="modal-body">You can change this at any time.</p>
           <div class="ob-choices">
             <button class="ob-choice active" data-ob-profile="read-only" type="button">
-              <strong>Read Only (Safest)</strong>
-              <span>Inspect files without changes.</span>
+              <strong>Read</strong>
+              <span>View files only. Safest.</span>
             </button>
             <button class="ob-choice" data-ob-profile="workspace-write" type="button">
-              <strong>Can Edit Files</strong>
-              <span>Read and edit workspace files.</span>
+              <strong>Write</strong>
+              <span>View and edit files in the workspace.</span>
             </button>
           </div>
           <div class="modal-actions">
@@ -353,22 +303,18 @@
         </div>
 
         <div id="obStep3" class="ob-step hidden">
-          <p class="modal-body">
-            Ready to run in the system tray.
-          </p>
-          <div class="ob-checklist">
-            <div class="item-meta">1. Start Bridge on this computer</div>
-            <div class="item-meta">2. Connect your AI through MCP</div>
-            <div class="item-meta">3. Close to hide to tray</div>
-          </div>
+          <ol class="ob-checklist">
+            <li>Start Bridge from the main screen.</li>
+            <li>Copy the connection link from Settings into your AI.</li>
+            <li>Closing the window keeps Bridge in the tray.</li>
+          </ol>
           <div class="modal-actions">
-            <button id="obFinishBtn" class="action-btn full-w" type="button">Get Started</button>
+            <button id="obFinishBtn" class="action-btn" type="button">Done</button>
           </div>
         </div>
       </div>
     </div>
 
-    <!-- TOAST NOTIFICATION -->
     <div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
   </div>
 </body>

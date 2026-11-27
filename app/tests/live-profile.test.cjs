@@ -297,7 +297,7 @@ test("a failed state refresh marks attached controls unavailable instead of reta
   await ui.settle(ui.pending("get_panel_state"), "IPC disconnected", true);
   await polling;
   assert.ok(ui.buttons().every((button) => button.disabled));
-  assert.notEqual(ui.el("liveText").textContent, "Live");
+  assert.equal(ui.el("gwStatus").textContent, "Unavailable");
 });
 
 test("an older poll cannot overwrite a newer state loaded by the approvals screen", async () => {
@@ -1058,10 +1058,11 @@ test("a confirmed native Stop is displayed as stopped without a connection error
   stopped.tunnel.childRunning = false;
   stopped.tunnel.state = "stopped";
   const ui = await ready(stopped);
-  assert.equal(ui.el("liveText").textContent, "Off");
+  assert.equal(ui.el("statusCard").getAttribute("data-tone"), "off");
   assert.equal(ui.el("gwStatus").textContent, "Stopped");
   assert.equal(ui.el("profileStatus").classList.contains("error"), false);
-  assert.match(ui.el("externalGatewayNotice").textContent, /Bridge is stopped/);
+  assert.match(ui.el("externalGatewayNotice").textContent, /Start it/);
+  assert.doesNotMatch(ui.el("externalGatewayNotice").textContent, /unavailable/i);
   assert.equal(ui.el("powerBtn").disabled, false);
   assert.ok(ui.buttons().every((button) => button.disabled));
 });
@@ -1159,6 +1160,25 @@ test("open Tasks page refreshes automatically and shows real task progress", asy
   assert.ok(ui.timer(3000));
 });
 
+test("Sessions list renders the Rust snapshot escaped and grouped by its live flag", async () => {
+  const ui = await ready();
+  await ui.el("missionsNavBtn").fire("click");
+  await ui.settle(ui.pending("get_sessions"), { available: true, sessions: [
+    { sessionId: "s1\"><img>", provider: "chatgpt", clientLabel: "<b>x</b>", lastSeen: "2025-01-01T00:00:00Z", live: true,
+      contexts: [{ missions: [{ goal: "g" }] }], commands: [{ program: "p" }, { program: "q" }] },
+    { sessionId: "s2", provider: "unknown<script>", lastSeen: "bad", live: "true", contexts: "nope", commands: null },
+  ], earlier: [{ contextId: "c1", actorKind: "<i>agent</i>", missions: [] }] });
+  const html = ui.el("sessionsBody").innerHTML;
+  assert.match(html, /Live now<\/h3>.*ChatGPT · &lt;b&gt;x&lt;\/b&gt;.*1 mission · 2 commands.*Connected earlier<\/h3>.*AI client/s);
+  assert.match(html, /data-session="s:s1&quot;&gt;&lt;img&gt;"/);
+  assert.match(html, /&lt;i&gt;agent&lt;\/i&gt; context/);
+  assert.doesNotMatch(html, /<b>|<img>|<script>|<i>/);
+  await ui.el("refreshMissionsBtn").fire("click");
+  await ui.settle(ui.calls.filter((call) => call.command === "get_sessions" && !call.settled).at(-1),
+    { available: false, reason: "Bridge is <stopped>." });
+  assert.match(ui.el("sessionsBody").innerHTML, /Bridge is &lt;stopped&gt;\./);
+});
+
 test("late Tasks refresh cannot replace newer manual results", async () => {
   const ui = await ready();
   const snapshot = (goal) => ({ configured: true, exists: true, missions: [
@@ -1225,7 +1245,7 @@ test("Settings diagnostics refresh while open and stop polling after leaving", a
   await ui.settle(ui.pending("get_diagnostics"), { oauthKeystore: "Protected", mcpRequestAudit: audit });
   await ui.settle(ui.pending("get_skills_overview"), { skills: [] });
   await refresh;
-  assert.match(box.innerHTML, /Records retained: <strong>0<\/strong>/);
+  assert.match(box.innerHTML, /<dt>Records kept<\/dt><dd>0<\/dd>/);
   assert.match(box.innerHTML, /No requests recorded/);
 
   const records = Array.from({ length: 21 }, (_, index) => ({
@@ -1256,15 +1276,15 @@ test("Settings diagnostics refresh while open and stop polling after leaving", a
   await ui.settle(ui.pending("get_skills_overview"), { skills: [{ name: "fixture-skill" }] });
   await nextRefresh;
   assert.match(box.innerHTML, /fixture-skill/);
-  assert.match(box.innerHTML, /Boot ID: <strong>abcdef01<\/strong>/);
-  assert.match(box.innerHTML, /Records retained: <strong>21<\/strong>/);
-  assert.match(box.innerHTML, /In flight: <strong>2<\/strong>/);
-  assert.match(box.innerHTML, /Evicted verified: <strong>3<\/strong>/);
-  assert.match(box.innerHTML, /Evicted unverified: <strong>4<\/strong>/);
+  assert.match(box.innerHTML, /<dt>Boot ID<\/dt><dd>abcdef01<\/dd>/);
+  assert.match(box.innerHTML, /<dt>Records kept<\/dt><dd>21<\/dd>/);
+  assert.match(box.innerHTML, /<dt>In flight<\/dt><dd>2<\/dd>/);
+  assert.match(box.innerHTML, /<dt>Evicted<\/dt><dd>3 verified, 4 unverified<\/dd>/);
   assert.deepEqual([...box.innerHTML.matchAll(/fixture-tool-(\d+)/g)].map((match) => Number(match[1])),
     Array.from({ length: 20 }, (_, index) => 21 - index));
-  assert.match(box.innerHTML, /2025-01-01T00:00:00\.000Z \| tools\/call \| Tool: fixture-tool-21&lt;&amp;&gt; \| Outcome: jsonrpc_error \| HTTP: 200 \| Error: -32602 \| Duration: 0 ms \| Client hash: 1234abcd \| Provider: gemini/);
-  assert.match(box.innerHTML, /fixture-tool-20 \| Outcome: http_refusal \| HTTP: 429 \| Error: request_limit \| Duration: 0 ms \| Client hash: - \| Provider: Unverified/);
+  assert.match(box.innerHTML, /<strong>tools\/call<\/strong> <code>fixture-tool-21&lt;&amp;&gt;<\/code> <span class="pill warn">jsonrpc_error<\/span><\/div><div class="audit-meta">2025-01-01T00:00:00\.000Z · HTTP 200 · error -32602 · 0 ms · gemini · client 1234abcd<\/div>/);
+  assert.match(box.innerHTML, /<code>fixture-tool-20<\/code> <span class="pill warn">http_refusal<\/span><\/div><div class="audit-meta">2025-01-01T00:00:00\.000Z · HTTP 429 · error request_limit · 0 ms · Unverified<\/div>/);
+  assert.match(box.innerHTML, /<code>fixture-tool-19<\/code> <span class="pill ok">success<\/span>/);
   assert.doesNotMatch(box.innerHTML, /No requests recorded|fixture-tool-21<|1234abcd1234abcd/);
 
   const malformedRefresh = ui.runTimer(3000);
@@ -1279,8 +1299,8 @@ test("Settings diagnostics refresh while open and stop polling after leaving", a
   await ui.settle(ui.pending("get_skills_overview"), { skills: [{ name: "fixture-skill" }] });
   await malformedRefresh;
   assert.match(box.innerHTML, /fixture-skill/);
-  assert.match(box.innerHTML, /Boot ID: <strong>-<\/strong> \| Records retained: <strong>1<\/strong>/);
-  assert.match(box.innerHTML, /- \| ping \| Tool: - \| Outcome: - \| HTTP: - \| Error: - \| Duration: - ms \| Client hash: - \| Provider: Unverified/);
+  assert.match(box.innerHTML, /<dt>Boot ID<\/dt><dd>-<\/dd><dt>Records kept<\/dt><dd>1<\/dd>/);
+  assert.match(box.innerHTML, /<strong>ping<\/strong> <span class="pill">-<\/span><\/div><div class="audit-meta">- · HTTP - · Unverified<\/div>/);
   await ui.select("[data-back]")[0].fire("click");
   assert.equal(ui.timer(3000), undefined);
 });

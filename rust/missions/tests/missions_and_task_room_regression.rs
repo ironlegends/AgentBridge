@@ -36,6 +36,96 @@ impl Drop for TempDb {
     }
 }
 
+#[test]
+fn observed_mission_context_use_touches_stale_last_seen_and_throttles_writes() {
+    let mut fixture = TempDb::new("context-last-seen");
+    let conn = fixture.db.connection_mut();
+    let context = agent_bridge_missions::create_context(conn).unwrap();
+    let old = "2000-01-01T00:00:00Z";
+    conn.execute("UPDATE agent_contexts SET last_seen=?1 WHERE context_id=?2",
+        [old, &context.context_id]).unwrap();
+    let read_seen = |conn: &rusqlite::Connection| -> String {
+        conn.query_row("SELECT last_seen FROM agent_contexts WHERE context_id=?1",
+            [&context.context_id], |row| row.get(0)).unwrap()
+    };
+    let args = json!({"actor_context_handle":context.context_handle});
+    let mut observed = None;
+    agent_bridge_missions::dispatch_tool_observed(conn, "agent_bridge_mission_list", &args, |id| {
+        observed = Some(id.to_owned());
+    }).unwrap();
+    assert_eq!(observed.as_deref(), Some(context.context_id.as_str()));
+    let recent = read_seen(conn);
+    assert_ne!(recent, old);
+    let before = conn.total_changes();
+    dispatch_tool(conn, "agent_bridge_mission_list", &args).unwrap();
+    assert_eq!(conn.total_changes(), before);
+    assert_eq!(read_seen(conn), recent);
+}
+
+#[test]
+fn refused_mission_operations_leave_context_unobserved_and_timestamp_unchanged() {
+    let mut fixture = TempDb::new("refused-context-last-seen");
+    let conn = fixture.db.connection_mut();
+    let owner = agent_bridge_missions::create_context(conn).unwrap();
+    let other = agent_bridge_missions::create_context(conn).unwrap();
+    let mission = dispatch_tool(conn, "agent_bridge_mission_create", &json!({
+        "actor_context_handle":owner.context_handle,"goal":"Example mission","idempotency_key":"create"
+    })).unwrap();
+    let old = "2000-01-01T00:00:00Z";
+    for (tool, context, args, code) in [
+        ("agent_bridge_mission_get", &other, json!({
+            "actor_context_handle":other.context_handle,"mission_id":mission["mission_id"]
+        }), "SECURITY_DENIED"),
+        ("agent_bridge_mission_checkpoint", &owner, json!({
+            "actor_context_handle":owner.context_handle,"mission_id":mission["mission_id"],
+            "summary":"Example checkpoint","if_revision":999
+        }), "CONFLICT_REVISION"),
+    ] {
+        conn.execute("UPDATE agent_contexts SET last_seen=?1 WHERE context_id=?2",
+            [old, &context.context_id]).unwrap();
+        let mut observed = false;
+        let error = agent_bridge_missions::dispatch_tool_observed(conn, tool, &args, |_| {
+            observed = true;
+        }).unwrap_err();
+        assert_eq!(error.code, code);
+        let seen: String = conn.query_row("SELECT last_seen FROM agent_contexts WHERE context_id=?1",
+            [&context.context_id], |row| row.get(0)).unwrap();
+        assert_eq!(seen, old);
+        assert!(!observed);
+    }
+}
+
+#[test]
+fn session_mission_display_keeps_only_bounded_goal_and_subtask_title() {
+    let mut fixture = TempDb::new("session-mission-display");
+    let conn = fixture.db.connection_mut();
+    let context = agent_bridge_missions::create_context(conn).unwrap();
+    let mission = dispatch_tool(conn, "agent_bridge_mission_create", &json!({
+        "actor_context_handle":context.context_handle,
+        "goal":"a".repeat(250),"idempotency_key":"create"
+    })).unwrap();
+    let subtask = dispatch_tool(conn, "agent_bridge_mission_subtask_create", &json!({
+        "actor_context_handle":context.context_handle, "mission_id":mission["mission_id"],
+        "assignee_context_id":context.context_id, "goal":"b".repeat(250),"idempotency_key":"subtask"
+    })).unwrap();
+    let subtask_id = &subtask["subtask"]["subtask_id"];
+    dispatch_tool(conn, "agent_bridge_mission_subtask_update", &json!({
+        "actor_context_handle":context.context_handle, "mission_id":mission["mission_id"],
+        "subtask_id":subtask_id, "if_revision":subtask["subtask"]["revision"],
+        "status":"in_progress","summary":"Example summary","idempotency_key":"start"
+    })).unwrap();
+    let tasks = agent_bridge_missions::operator::inspect_operator_snapshot(conn, 20).unwrap();
+    let (views, _) = agent_bridge_missions::operator::inspect_session_contexts(
+        conn, &[context.context_id], None, 4_096,
+    ).unwrap();
+    let mission = &views[0].as_ref().unwrap()["missions"][0];
+    let task_page_goal = tasks["missions"][0]["goal"].as_str().unwrap();
+    assert_eq!(mission["goal"], &task_page_goal[..200]);
+    assert_eq!(mission["subtasks"], json!([{
+        "id":subtask_id, "title":"b".repeat(200), "status":"in_progress", "assigned_to_context":true
+    }]));
+}
+
 fn rev_of(v: &Value) -> i64 {
     v.get("revision")
         .or_else(|| v.get("current_revision"))

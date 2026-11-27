@@ -201,6 +201,59 @@ impl Drop for StdioMcp {
     }
 }
 
+#[test]
+fn connected_sessions_stdio_is_visible_only_through_its_authenticated_read() {
+    use std::io::Read;
+    use std::net::{Ipv4Addr, TcpListener, TcpStream};
+    use std::time::Duration;
+
+    let sandbox = TempSandbox::new("local-session-view");
+    let path = sandbox.path().join("missions.sqlite");
+    drop(agent_bridge_core::CoreDatabase::initialize_new(&path).unwrap());
+    let private = sandbox.path().join("operator");
+    agent_bridge_lifecycle::initialize_operator_settings(&private).unwrap();
+    let descriptor = private.join("session-view.json");
+    let reservation = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let address = reservation.local_addr().unwrap();
+    drop(reservation);
+    let port = address.port().to_string();
+    let mut mcp = StdioMcp::spawn(
+        &["stdio", path.to_str().unwrap(), "--ui-port", &port,
+            "--ui-session-file", descriptor.to_str().unwrap()], sandbox.path(), "read-only",
+    );
+    let report: Value = serde_json::from_slice(&fs::read(descriptor).unwrap()).unwrap();
+    assert_eq!(report["session_view_only"], true);
+    let token = report["ui_url"].as_str().unwrap().split_once("?token=").unwrap().1;
+    let (failed, context) = mcp.call_tool("agent_bridge_context_create", json!({}));
+    assert!(!failed, "{context}");
+    let read = |authorization: &str| {
+        let mut stream = TcpStream::connect_timeout(&address, Duration::from_secs(3)).unwrap();
+        stream.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+        write!(stream, "GET /api/sessions HTTP/1.1\r\nHost: {address}\r\n{authorization}Connection: close\r\n\r\n").unwrap();
+        let mut response = String::new();
+        stream.read_to_string(&mut response).unwrap();
+        response
+    };
+    let refused = read("");
+    assert!(refused.starts_with("HTTP/1.1 401 "));
+    assert!(!refused.contains("\"sessions\""));
+    let response = read(&format!("X-Agent-Bridge-Token: {token}\r\n"));
+    assert!(response.starts_with("HTTP/1.1 200 "));
+    let body: Value = serde_json::from_str(response.split_once("\r\n\r\n").unwrap().1).unwrap();
+    assert_eq!(body["totals"], json!({"connected":1,"live":1}));
+    assert_eq!(body["sessions"][0]["provider"], "local");
+    assert_eq!(body["sessions"][0]["transport"], "stdio");
+    assert_eq!(body["sessions"][0]["contexts"][0]["context_id"], context["context_id"]);
+    assert!(!response.contains(token));
+    assert!(!response.contains(context["context_handle"].as_str().unwrap()));
+    let mut stderr = mcp.child.stderr.take().unwrap();
+    assert_eq!(mcp.close(), 0);
+    let mut diagnostics = String::new();
+    stderr.read_to_string(&mut diagnostics).unwrap();
+    assert!(!diagnostics.contains(token));
+    assert!(TcpStream::connect_timeout(&address, Duration::from_millis(500)).is_err());
+}
+
 fn init_env(sb: &TempSandbox) -> (PathBuf, PathBuf, PathBuf) {
     let ws = sb.path().join("workspace");
     let db_dir = sb.path().join("db");

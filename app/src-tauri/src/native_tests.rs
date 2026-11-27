@@ -126,6 +126,7 @@ fn native_commands_use_authoritative_live_state_and_serialize_restarts() {
     let initial = backend::get_panel_state(&runtime).unwrap();
     assert_eq!(initial["gateway"]["native"], true, "native configuration must select native ownership");
     assert_eq!(initial["gateway"]["controls"]["canStart"], true);
+    assert_eq!(backend::get_sessions(&runtime).unwrap()["available"], false);
     let before = fs::read(root.0.join("panel-settings.json")).unwrap();
     let running = backend::start_or_restart_gateway(&runtime, backend::GatewayIntent::Start).unwrap();
     let _cleanup = StopOwned(&runtime);
@@ -142,6 +143,10 @@ fn native_commands_use_authoritative_live_state_and_serialize_restarts() {
     assert!(!root.0.join("legacy").exists());
     let snapshot = backend::get_missions_snapshot(&runtime).unwrap();
     assert_eq!(snapshot["exists"], true);
+    let sessions = backend::get_sessions(&runtime).unwrap();
+    assert_eq!(sessions["available"], true);
+    assert_eq!(sessions["liveWindowSeconds"], 120);
+    assert_eq!(sessions["sessions"], serde_json::json!([]));
 
     let restarted = backend::start_or_restart_gateway(&runtime, backend::GatewayIntent::Restart).unwrap();
     assert!(restarted["gateway"]["generation"].as_u64().unwrap() > generation);

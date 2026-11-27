@@ -72,6 +72,7 @@
     "allow-get-skills-overview",
     "allow-run-skill-action",
     "allow-get-diagnostics",
+    "allow-get-sessions",
     "allow-quit-app"
   ]
 }
