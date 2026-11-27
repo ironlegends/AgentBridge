@@ -39,6 +39,19 @@ pub(super) fn document_stdio_workspace(tools: &mut [ToolDefinition]) -> Result<(
     apply(tools, &stdio_docs()?)
 }
 
+pub(super) fn stdio_workspace_instructions(writable: bool) -> String {
+    let files = if writable {
+        "This workspace permits file writes. Check desktop_policy_status for limits."
+    } else {
+        "Project files are read-only in this workspace. Mission records can still change."
+    };
+    format!("{files} Use tools/list to see this session's capabilities. \
+        desktop_artifact_manage works with temporary artifacts separate from project files. \
+        After an invitation, use agent_bridge_mission_observe before agent_bridge_mission_attach. \
+        To record progress use agent_bridge_mission_checkpoint. To read saved summaries use \
+        agent_bridge_mission_checkpoints.")
+}
+
 // The operator selects an entire serialized catalogue by its existing digest mechanism.
 // A legacy manifest must receive exactly its original definitions. Normal startup still
 // checks handler membership and the complete digest before admitting an OAuth client.

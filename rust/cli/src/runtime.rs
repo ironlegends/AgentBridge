@@ -924,7 +924,12 @@ fn open_qualified(
         }
         Ok(ToolCallResult::text(result.to_string()))
     });
-    let config=GatewayConfig::new("agent-bridge", version).with_catalog_ttl_ms(CATALOG_TTL_MS);
+    let mut config=GatewayConfig::new("agent-bridge", version).with_catalog_ttl_ms(CATALOG_TTL_MS);
+    if selected.is_unified() {
+        if let Some(work) = &workspace {
+            config = config.with_instructions(tool_docs::stdio_workspace_instructions(work.write_files));
+        }
+    }
     let config=match seal.as_deref(){
         Some(seal)=>{
             // Local stdio has no bearer; the private connection is its
@@ -1207,6 +1212,7 @@ mod session_transport_tests {
             .map(|line|serde_json::from_str(line).unwrap()).collect();
         assert_eq!(replies.len(),4);
         assert_eq!(replies[0]["result"]["serverInfo"]["name"],"agent-bridge-core");
+        assert!(replies[0]["result"].get("instructions").is_none());
         let tools=replies[1]["result"]["tools"].as_array().unwrap();
         assert!(tools.iter().all(|tool|CatalogueSelection::Core.allows(tool["name"].as_str().unwrap())));
         assert_eq!(replies[2]["error"]["code"],-32602);
@@ -1218,6 +1224,139 @@ mod session_transport_tests {
         let refused=open_qualified(&db,None,None,None,None,None,
             #[cfg(any(windows,unix))] None,CatalogueSelection::Extensions,&mut supervisors);
         assert!(refused.err().unwrap().to_string().contains("CATALOGUE_SELECTION_UNAVAILABLE"));
+    }
+
+    #[test]
+    fn stdio_workspace_instructions_cover_legacy_modern_and_guard_non_workspace_routes() {
+        use agent_bridge_gateway::modern::{CAPABILITIES_KEY, VERSION, VERSION_KEY};
+        use std::collections::BTreeSet;
+
+        let root = crate::test_state_base().join(format!(
+            "stdio-workspace-instructions-{}",
+            agent_bridge_missions::operator::random_token_hex(8)
+        ));
+        let ws = root.join("workspace");
+        let db_dir = root.join("db");
+        std::fs::create_dir_all(&ws).unwrap();
+        std::fs::create_dir_all(&db_dir).unwrap();
+        struct Cleanup(PathBuf);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let _cleanup = Cleanup(root.clone());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+            std::fs::set_permissions(&ws, std::fs::Permissions::from_mode(0o700)).unwrap();
+            std::fs::set_permissions(&db_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let db = db_dir.join("core.sqlite");
+        drop(CoreDatabase::initialize_new(&db).unwrap());
+
+        let run_stdio = |router: &Router, frames: &[Value]| -> Vec<Value> {
+            let input = frames.iter().map(Value::to_string).collect::<Vec<_>>().join("\n") + "\n";
+            let mut out = Vec::new();
+            let audit = Arc::new(RequestAudit::new().unwrap());
+            serve_stdio_mcp(input.as_bytes(), &mut out, router, &audit).unwrap();
+            std::str::from_utf8(&out)
+                .unwrap()
+                .lines()
+                .map(|line| serde_json::from_str(line).unwrap())
+                .collect()
+        };
+        let legacy_frames = [
+            json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"contract","version":"1"}}}),
+            json!({"jsonrpc":"2.0","method":"notifications/initialized"}),
+            json!({"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}),
+        ];
+        let modern_meta = json!({(VERSION_KEY): VERSION, (CAPABILITIES_KEY): {}});
+        let modern_frames = [
+            json!({"jsonrpc":"2.0","id":1,"method":"server/discover","params":{"_meta": modern_meta.clone()}}),
+            json!({"jsonrpc":"2.0","id":2,"method":"tools/list","params":{"_meta": modern_meta}}),
+        ];
+
+        // 1. Default foreground read-only stdio workspace: returns server instructions on both
+        // legacy initialize and modern server/discover, and preserves the exact 22 tool names.
+        let mut supervisors = Vec::new();
+        let (ro_router, ro_db) = open_qualified(
+            &db,
+            Some(Workspace { root: ws.clone(), write_files: false, profile: DesktopProfile::ReadOnly }),
+            None, None, None, None,
+            #[cfg(any(windows, unix))] None,
+            CatalogueSelection::Unified,
+            &mut supervisors,
+        ).unwrap();
+        let legacy = run_stdio(&ro_router, &legacy_frames);
+        let modern = run_stdio(&ro_router, &modern_frames);
+        let expected_ro = tool_docs::stdio_workspace_instructions(false);
+        assert_eq!(legacy[0]["result"]["serverInfo"]["name"], "agent-bridge");
+        assert_eq!(legacy[0]["result"]["instructions"], expected_ro);
+        assert_eq!(modern[0]["result"]["instructions"], expected_ro);
+        assert_eq!(modern[0]["result"]["cacheScope"], "private");
+        assert_eq!(modern[0]["result"]["ttlMs"], CATALOG_TTL_MS);
+        assert!(expected_ro.contains("read-only"));
+        let documented_names: BTreeSet<String> = serde_json::from_str::<std::collections::BTreeMap<String, Value>>(
+            include_str!("../../../contracts/stdio-workspace-tool-docs.json"),
+        ).unwrap().into_keys().collect();
+        assert_eq!(documented_names.len(), 22);
+        for listing in [&legacy[1], &modern[1]] {
+            let names: BTreeSet<String> = listing["result"]["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|t| t["name"].as_str().unwrap().to_owned())
+                .collect();
+            assert_eq!(names, documented_names);
+        }
+        drop(ro_router);
+        drop(ro_db);
+
+        // 2. Writable stdio workspace reports enabled workspace writes on both eras.
+        let (rw_router, rw_db) = open_qualified(
+            &db,
+            Some(Workspace { root: ws.clone(), write_files: true, profile: DesktopProfile::WorkspaceWrite }),
+            None, None, None, None,
+            #[cfg(any(windows, unix))] None,
+            CatalogueSelection::Unified,
+            &mut supervisors,
+        ).unwrap();
+        let rw_legacy = run_stdio(&rw_router, &legacy_frames);
+        let rw_modern = run_stdio(&rw_router, &modern_frames);
+        let expected_rw = tool_docs::stdio_workspace_instructions(true);
+        assert_ne!(expected_rw, expected_ro);
+        assert_eq!(rw_legacy[0]["result"]["instructions"], expected_rw);
+        assert_eq!(rw_modern[0]["result"]["instructions"], expected_rw);
+        assert!(expected_rw.contains("permits file writes"));
+        drop(rw_router);
+        drop(rw_db);
+
+        // 3. Non-workspace missions route and specialized catalogue views omit workspace instructions.
+        let missions_router = missions(&db).unwrap();
+        let missions_legacy = run_stdio(&missions_router, &legacy_frames);
+        let missions_modern = run_stdio(&missions_router, &modern_frames);
+        assert!(missions_legacy[0]["result"].get("instructions").is_none());
+        assert!(missions_modern[0]["result"].get("instructions").is_none());
+        drop(missions_router);
+
+        let (narrow_router, narrow_db) = open_qualified(
+            &db,
+            Some(Workspace { root: ws, write_files: false, profile: DesktopProfile::ReadOnly }),
+            None, None, None, None,
+            #[cfg(any(windows, unix))] None,
+            CatalogueSelection::Core,
+            &mut supervisors,
+        ).unwrap();
+        let narrow_legacy = run_stdio(&narrow_router, &legacy_frames);
+        let narrow_modern = run_stdio(&narrow_router, &modern_frames);
+        assert_eq!(narrow_legacy[0]["result"]["serverInfo"]["name"], "agent-bridge-core");
+        assert!(narrow_legacy[0]["result"].get("instructions").is_none());
+        assert!(narrow_modern[0]["result"].get("instructions").is_none());
+        drop(narrow_router);
+        drop(narrow_db);
+        assert!(supervisors.is_empty());
     }
 
     const LARGE_CALL: &str = r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"large_fixture"}}"#;
