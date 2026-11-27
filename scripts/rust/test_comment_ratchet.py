@@ -53,6 +53,31 @@ fn value<'a>(input: &'a str) { // TODO: real work
 '''
         self.assertEqual(findings("src/lib.rs", source), [])
 
+    def test_vendored_glib_is_excluded_while_other_paths_stay_audited(self):
+        import subprocess, tempfile
+        from pathlib import Path
+        from comment_ratchet import collect
+
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            subprocess.run(["git", "-C", str(repo), "init", "--quiet"], check=True)
+            files = {
+                "app/src-tauri/patches/glib-0.18.5/src/auto/date_time.rs": "// TODO: upstream\n",
+                "app/src-tauri/src/lib.rs": "// TODO: first-party debt\n",
+                "app/src-tauri/patches/other/src/lib.rs": "// TODO: unreviewed patch debt\n",
+            }
+            for rel, content in files.items():
+                target = repo / rel
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(content, encoding="utf-8")
+            subprocess.run(["git", "-C", str(repo), "add", "--all"], check=True)
+            report = collect(repo)
+            flagged = {item["path"] for item in report["findings"]}
+            self.assertEqual(
+                flagged,
+                {"app/src-tauri/src/lib.rs", "app/src-tauri/patches/other/src/lib.rs"},
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

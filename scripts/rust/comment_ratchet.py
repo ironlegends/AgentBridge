@@ -15,6 +15,7 @@ RAW_STRING = re.compile(r'(?:br|cr|r)(?P<hashes>#{0,255})"')
 CHAR_LITERAL = re.compile(r"'(?:\\(?:u\{[0-9a-fA-F_]+\}|x[0-9a-fA-F]{2}|[^\r\n])|[^'\\\r\n])'")
 DEFERRED_WORK = re.compile(r"\b(?:TODO|FIXME|HACK|XXX)\b")
 DIVIDER = re.compile(r"[-=*_~#./\\]{8,}")
+THIRD_PARTY_VENDORS = ("app/src-tauri/patches/glib-0.18.5/",)
 
 
 def scan_rust_comments(source):
@@ -124,6 +125,8 @@ def collect(repo, ref=None):
     all_findings, totals, summaries = [], Counter(), []
     for name in sorted(set(names)):
         if not name.endswith(".rs"):
+            continue
+        if any(name.startswith(prefix) for prefix in THIRD_PARTY_VENDORS):
             continue
         if ref:
             source = git(repo, "show", f"{ref}:{name}").decode("utf-8")

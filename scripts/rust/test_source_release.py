@@ -196,6 +196,57 @@ class DesktopSourceArchiveTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "missing required index files"):
             self.archive("missing-native-patch.zip")
 
+    def test_vendored_glib_paths_modes_and_required_license_are_enforced(self):
+        extra_allowed = {
+            "app/src-tauri/patches/glib-0.18.5/src/auto/date_time.rs": b"pub struct DateTime;\n",
+            "app/src-tauri/patches/glib-0.18.5/benches/gstring.rs": b"fn main() {}\n",
+            "app/src-tauri/patches/glib-0.18.5/tests/value.rs": b"#[test] fn v() {}\n",
+            "app/src-tauri/patches/glib-0.18.5/tests/subclass_compiletest/02-no-auto-send-sync.stderr": b"error\n",
+        }
+        excluded = (
+            "app/src-tauri/patches/glib-0.18.5/.cargo_vcs_info.json",
+            "app/src-tauri/patches/glib-0.18.5/src/unreviewed.json",
+            "app/src-tauri/patches/glib-0.18.5/target/out.rs",
+            "app/src-tauri/patches/glib-0.18.5/evil.exe",
+            "app/src-tauri/patches/other/lib.rs",
+        )
+        for rel, content in extra_allowed.items():
+            self.write(rel, content)
+        for rel in excluded:
+            self.write(rel, b"excluded fixture\n")
+        self.git("add", "--all")
+
+        archive = self.archive("vendored-glib.zip")
+        entries = self.entries(archive)
+        for rel, content in extra_allowed.items():
+            self.assertEqual(entries.get(rel), content)
+        for rel in excluded:
+            self.assertNotIn(rel, entries)
+
+        with zipfile.ZipFile(archive) as pkg:
+            prefix = "agent-bridge-1.2.3-rust-src/"
+            for info in pkg.infolist():
+                rel = info.filename.removeprefix(prefix)
+                if rel.startswith("app/src-tauri/patches/"):
+                    self.assertEqual(info.external_attr >> 16, 0o100644, rel)
+
+        exec_target = "app/src-tauri/patches/glib-0.18.5/src/auto/date_time.rs"
+        self.git("update-index", "--chmod=+x", exec_target)
+        with self.assertRaisesRegex(ValueError, "unexpected executable mode"):
+            self.archive("exec-vendored.zip")
+        self.git("update-index", "--chmod=-x", exec_target)
+
+        for required_path in (
+            "app/src-tauri/patches/glib-0.18.5/LICENSE",
+            "app/src-tauri/patches/glib-0.18.5/src/variant_iter.rs",
+        ):
+            data = (self.repo / required_path).read_bytes()
+            self.git("rm", "--cached", required_path)
+            with self.assertRaisesRegex(ValueError, "missing required index files"):
+                self.archive("missing-glib-req.zip")
+            self.write(required_path, data)
+            self.git("add", "--", required_path)
+
     def test_desktop_archive_bytes_are_deterministic(self):
         first = self.archive("first.zip").read_bytes()
         second = self.archive("second.zip").read_bytes()
