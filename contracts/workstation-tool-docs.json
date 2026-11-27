@@ -1,0 +1,464 @@
+{
+  "desktop_task_manage": {
+    "annotations": {
+      "readOnlyHint": false,
+      "openWorldHint": false,
+      "destructiveHint": true,
+      "idempotentHint": false
+    },
+    "description": "Create or inspect project-bound Task Rooms and record progress, blockers or a final review. Use mission tools for cross-context mission assignments. Each action controls which fields it accepts.",
+    "parameters": {
+      "action": "Operation selected from this tool's enumerated actions. Required inputs depend on the selected action.",
+      "completed_step_ids": "Identifiers of previously completed steps.",
+      "completion_conditions": "Conditions used to decide when the task is complete.",
+      "confirm_label": "Exact context label required to confirm reattachment.",
+      "context_handle": "Private capability of the Task Room context. Keep it out of task text and logs.",
+      "context_id": "Public identifier of the Task Room context.",
+      "context_label": "Operator-visible label for this Task Room context.",
+      "current_step_id": "Identifier of the step currently in progress.",
+      "device": "Device label associated with this Task Room context.",
+      "goal": "Outcome the task should achieve.",
+      "limit": "Maximum records to return in this list.",
+      "missing_checks": "Checks still outstanding at the time of the report.",
+      "open_risks": "Outstanding risks to retain in the task record.",
+      "project": "Project label associated with this task.",
+      "review_status": "Outcome of the task's final review.",
+      "step_id": "Identifier of the step being updated.",
+      "step_status": "New state of the selected step.",
+      "steps": "Steps to record for this task, in execution order.",
+      "summary": "Short account of the progress or result being recorded.",
+      "task_id": "Identifier of the project-bound Task Room.",
+      "task_status": "Task state recorded by this operation.",
+      "title": "Short title shown in the Task Room.",
+      "verified_facts": "Facts already supported by evidence for this task."
+    }
+  },
+  "desktop_skill_manage": {
+    "annotations": {
+      "readOnlyHint": false,
+      "openWorldHint": true,
+      "destructiveHint": true,
+      "idempotentHint": false
+    },
+    "description": "Inspect documentary skill versions and read their resources, or install, activate and roll back a version when permitted by the operator.",
+    "parameters": {
+      "action": "Operation selected from this tool's enumerated actions. Required inputs depend on the selected action.",
+      "activate": "Whether to make the selected skill version active after installation.",
+      "expected_sha256": "Expected SHA-256 digest of the selected skill content.",
+      "max_chars": "Character limit for returned skill text.",
+      "name": "Name of the documentary skill to inspect or manage.",
+      "resource_path": "Path of the requested resource within the skill.",
+      "source_path": "Local source path for the requested skill package.",
+      "source_url": "URL of the requested skill source, subject to the configured source policy.",
+      "version": "Exact skill version to inspect or select."
+    }
+  },
+  "desktop_mcp_manage": {
+    "annotations": {
+      "readOnlyHint": false,
+      "openWorldHint": true,
+      "destructiveHint": true,
+      "idempotentHint": false
+    },
+    "parameters": {
+      "action": "Operation selected from this tool's enumerated actions. Required inputs depend on the selected action.",
+      "name": "Name of the configured extension server.",
+      "description": "Operator-facing description of the proposed extension.",
+      "url": "Endpoint proposed for this extension.",
+      "enabled": "Requested enablement state for this extension.",
+      "oauth": "OAuth configuration selected for the extension.",
+      "oauth_scope": "OAuth scope requested from the upstream provider.",
+      "oauth_client_id": "Registered upstream OAuth client identifier.",
+      "oauth_client_auth_method": "Registered method of authenticating this OAuth client.",
+      "oauth_client_secret_env": "Environment variable name containing the upstream client secret. Supply the name only.",
+      "force": "Whether to force the requested extension refresh when supported.",
+      "timeout_ms": "Requested upstream timeout in milliseconds."
+    }
+  },
+  "desktop_mcp_tool_inspect": {
+    "annotations": {
+      "readOnlyHint": true,
+      "openWorldHint": false
+    },
+    "description": "Read one approved extension tool’s cached descriptor and input contract. Use desktop_mcp_tool_search when its name is unknown.",
+    "parameters": {
+      "name": "Registered name of the approved extension tool whose descriptor is needed."
+    }
+  },
+  "desktop_mcp_tool_search": {
+    "annotations": {
+      "readOnlyHint": true,
+      "openWorldHint": false
+    },
+    "parameters": {
+      "query": "Search terms matched against cached extension descriptors.",
+      "server": "Limit the search to this configured extension server.",
+      "limit": "Maximum records to return in this list."
+    }
+  },
+  "desktop_mcp_tool_call": {
+    "annotations": {
+      "readOnlyHint": false,
+      "openWorldHint": true,
+      "destructiveHint": true,
+      "idempotentHint": false
+    },
+    "description": "Invoke one approved extension operation using its published argument schema. Review the cached descriptor first. Effects and returned content depend on that extension.",
+    "parameters": {
+      "name": "Registered name of the approved extension operation.",
+      "arguments": "Arguments matching the approved extension tool's input schema."
+    }
+  },
+  "desktop_policy_status": {
+    "annotations": {
+      "readOnlyHint": true,
+      "openWorldHint": false
+    },
+    "description": "Read the workstation file provider’s effective policy and limits. Use agent_bridge_status for the gateway, profile and total tool count."
+  },
+  "desktop_get_file_info": {
+    "annotations": {
+      "readOnlyHint": true,
+      "openWorldHint": false
+    }
+  },
+  "desktop_list_directory": {
+    "annotations": {
+      "readOnlyHint": true,
+      "openWorldHint": false
+    },
+    "parameters": {
+      "depth": "Number of directory levels to traverse. Use 1 for immediate children."
+    }
+  },
+  "desktop_read_file": {
+    "annotations": {
+      "readOnlyHint": false,
+      "openWorldHint": false,
+      "destructiveHint": false,
+      "idempotentHint": false
+    },
+    "parameters": {
+      "offset": "Zero-based line index. A negative offset counts from the end of the file.",
+      "length": "Maximum number of text lines to return."
+    }
+  },
+  "desktop_search": {
+    "annotations": {
+      "readOnlyHint": true,
+      "openWorldHint": false
+    },
+    "parameters": {
+      "pattern": "Expression to match against a filename or a line of text. Interpreted as a regex unless literal_search is true.",
+      "search_type": "Match filenames with files, or text lines with content when the active profile permits it.",
+      "file_pattern": "Optional filename glob restricting the files examined.",
+      "ignore_case": "Match regardless of letter case when true.",
+      "include_hidden": "Include hidden entries only when supported by the workspace policy.",
+      "literal_search": "Treat pattern as literal text instead of a regular expression.",
+      "max_results": "Stop collecting after this many matches.",
+      "timeout_ms": "Search time budget in milliseconds; a partial result can be truncated."
+    }
+  },
+  "desktop_artifact_manage": {
+    "annotations": {
+      "readOnlyHint": false,
+      "openWorldHint": false,
+      "destructiveHint": true,
+      "idempotentHint": false
+    },
+    "parameters": {
+      "action": "Operation to perform. Supply path for publish and artifact_id for get, read or delete; list accepts an optional limit.",
+      "artifact_id": "Instance-local ID from publish or list. Required for get, read and delete.",
+      "encoding": "Representation of a read chunk: utf8 for text or base64 for arbitrary bytes.",
+      "length": "Maximum bytes to read in this chunk. Used only with read.",
+      "limit": "Maximum number of artifacts to return for list.",
+      "offset": "Zero-based byte offset for read. Use next_offset from the preceding chunk.",
+      "retention_seconds": "Lifetime of the stored copy from publication, in seconds. Used only with publish."
+    }
+  },
+  "desktop_create_directory": {
+    "annotations": {
+      "readOnlyHint": false,
+      "openWorldHint": false,
+      "destructiveHint": false,
+      "idempotentHint": false
+    }
+  },
+  "desktop_write_file": {
+    "annotations": {
+      "readOnlyHint": false,
+      "openWorldHint": false,
+      "destructiveHint": true,
+      "idempotentHint": false
+    },
+    "parameters": {
+      "content": "UTF-8 text for the selected write operation.",
+      "mode": "Choose whether to rewrite or append the supplied text.",
+      "observation_id": "One-use observation from a recent read of this file by the same provider."
+    }
+  },
+  "desktop_edit_file": {
+    "annotations": {
+      "readOnlyHint": false,
+      "openWorldHint": false,
+      "destructiveHint": true,
+      "idempotentHint": false
+    },
+    "parameters": {
+      "old_string": "Exact existing text to replace in the observed file.",
+      "new_string": "Replacement text for the matched existing text.",
+      "expected_replacements": "Number of exact matches the edit expects before it changes the file.",
+      "observation_id": "One-use observation from a recent read of this file by the same provider."
+    }
+  },
+  "desktop_move_file": {
+    "annotations": {
+      "readOnlyHint": false,
+      "openWorldHint": false,
+      "destructiveHint": true,
+      "idempotentHint": false
+    },
+    "parameters": {
+      "source_observation_id": "One-use observation from a recent read of the source file by the same provider."
+    }
+  },
+  "agent_bridge_task_import": {
+    "annotations": {
+      "readOnlyHint": false,
+      "openWorldHint": false,
+      "destructiveHint": true,
+      "idempotentHint": false
+    },
+    "parameters": {
+      "actor_context_handle": "Private handle of the destination mission context.",
+      "context_id": "Public identifier of the Task Room context.",
+      "context_handle": "Private capability of the Task Room context. Keep it out of task text and logs.",
+      "task_id": "Identifier of the project-bound Task Room."
+    }
+  },
+  "desktop_list_allowed_commands": {
+    "annotations": {
+      "readOnlyHint": true,
+      "openWorldHint": false
+    }
+  },
+  "desktop_agent_desktop": {
+    "annotations": {
+      "readOnlyHint": false,
+      "openWorldHint": false,
+      "destructiveHint": true,
+      "idempotentHint": false
+    },
+    "parameters": {
+      "action": "Operation selected from this tool's enumerated actions. Required inputs depend on the selected action.",
+      "lease_id": "Opaque identifier of an existing virtual desktop lease.",
+      "desktop_number": "Number of the configured virtual desktop. Desktop 1 is reserved.",
+      "task_label": "Human-readable label identifying the work assigned to the desktop.",
+      "task_id": "Identifier of the project-bound Task Room.",
+      "context_handle": "Private capability of the Task Room context. Keep it out of task text and logs."
+    }
+  },
+  "desktop_start_process": {
+    "annotations": {
+      "readOnlyHint": false,
+      "openWorldHint": true,
+      "destructiveHint": true,
+      "idempotentHint": false
+    },
+    "parameters": {
+      "command": "Command text for the shell form of this operation.",
+      "shell": "Shell selected for this process under the active operator profile.",
+      "program": "Program selected for literal argument-vector execution.",
+      "args": "Ordered literal arguments for the selected program.",
+      "timeout_ms": "Maximum time to wait for the startup receipt, in milliseconds.",
+      "elevation": "Requested privilege mode, subject to the local operator's admission policy."
+    }
+  },
+  "desktop_read_process": {
+    "annotations": {
+      "readOnlyHint": false,
+      "openWorldHint": false,
+      "destructiveHint": true,
+      "idempotentHint": false
+    },
+    "parameters": {
+      "session_id": "Opaque identifier of the gateway-owned process session.",
+      "timeout_ms": "Maximum waiting interval for this operation, in milliseconds.",
+      "offset": "History index. Zero uses the session reader cursor. Negative indices count from the end.",
+      "length": "Maximum history entries to return."
+    }
+  },
+  "desktop_interact_process": {
+    "annotations": {
+      "readOnlyHint": false,
+      "openWorldHint": true,
+      "destructiveHint": true,
+      "idempotentHint": false
+    },
+    "parameters": {
+      "session_id": "Opaque identifier of the gateway-owned process session.",
+      "input": "Literal UTF-8 input for this gateway-owned session.",
+      "eof": "Whether to close the session's input stream after sending the input.",
+      "timeout_ms": "Maximum waiting interval for this operation, in milliseconds.",
+      "wait_for_prompt": "Whether to wait for new output to settle before returning the receipt."
+    }
+  },
+  "desktop_terminate_process": {
+    "annotations": {
+      "readOnlyHint": false,
+      "openWorldHint": false,
+      "destructiveHint": true,
+      "idempotentHint": false
+    },
+    "parameters": {
+      "session_id": "Opaque identifier of the gateway-owned process session."
+    }
+  },
+  "agent_bridge_project_command": {
+    "annotations": {
+      "readOnlyHint": false,
+      "openWorldHint": true,
+      "destructiveHint": true,
+      "idempotentHint": false
+    },
+    "parameters": {
+      "command": "Configured name from desktop_list_allowed_commands."
+    }
+  },
+  "desktop_ui_windows": {
+    "annotations": {
+      "readOnlyHint": true,
+      "openWorldHint": false
+    },
+    "parameters": {
+      "app": "Application filter for the window being inspected.",
+      "include_untitled": "Whether to return windows that lack a displayed title.",
+      "agent_desktop_lease_id": "Opaque ID of an existing authorized desktop lease when using that desktop."
+    }
+  },
+  "desktop_ui_snapshot": {
+    "annotations": {
+      "readOnlyHint": false,
+      "openWorldHint": false,
+      "destructiveHint": false,
+      "idempotentHint": false
+    },
+    "parameters": {
+      "window_id": "Opaque identifier of a window previously returned by the provider.",
+      "app": "Application filter for the window being inspected.",
+      "include_tree": "Whether to include the UI Automation element tree.",
+      "include_screenshot": "Whether to include an image of the selected window.",
+      "interactive_only": "Restrict returned elements to interactive controls.",
+      "max_elements": "Maximum number of UI Automation elements to return.",
+      "agent_desktop_lease_id": "Opaque ID of an existing authorized desktop lease when using that desktop."
+    }
+  },
+  "desktop_ui_action": {
+    "annotations": {
+      "readOnlyHint": false,
+      "openWorldHint": true,
+      "destructiveHint": true,
+      "idempotentHint": false
+    },
+    "parameters": {
+      "window_id": "Opaque identifier of a window previously returned by the provider.",
+      "computer_observation_id": "Single-use observation for the selected window from its most recent snapshot.",
+      "action": "Operation selected from this tool's enumerated actions. Required inputs depend on the selected action.",
+      "selector": "Element reference from the observed window.",
+      "value": "Value to apply to the selected control.",
+      "keys": "Key input for the requested window action.",
+      "button": "Mouse button applicable to the selected pointer action.",
+      "double": "Whether the click is a double-click.",
+      "direction": "Direction of the requested scroll.",
+      "to": "Scroll to the selected endpoint.",
+      "wheel": "Wheel amount for the requested scroll.",
+      "transport": "Input delivery method for the selected action when supported.",
+      "verbatim": "Whether to treat the supplied key input as literal text.",
+      "allow_system_keys": "Explicit request for system keys, subject to the local input policy.",
+      "from": "Starting element or position for the drag.",
+      "drag_to": "Destination element or position for the drag.",
+      "hold_ms": "Duration to hold the input, in milliseconds.",
+      "dwell_ms": "Duration to dwell at the target, in milliseconds.",
+      "wait_ms": "Requested waiting interval, in milliseconds.",
+      "settle_ms": "Time to allow the window to settle before returning, in milliseconds.",
+      "observe_after": "Observation to return after the action.",
+      "agent_desktop_lease_id": "Opaque ID of an existing authorized desktop lease when using that desktop."
+    }
+  },
+  "desktop_browser_act": {
+    "annotations": {
+      "readOnlyHint": false,
+      "openWorldHint": true,
+      "destructiveHint": true,
+      "idempotentHint": false
+    },
+    "parameters": {
+      "actions": "Ordered operations against the previously observed page.",
+      "browser_observation_id": "Single-use page observation associated with the selected page and session.",
+      "full_page": "Whether a requested screenshot covers the full page.",
+      "include_console": "Whether to include bounded console diagnostics in the result.",
+      "include_network": "Whether to include bounded network diagnostics in the result.",
+      "max_console_messages": "Maximum console messages to return.",
+      "max_interactive_elements": "Maximum interactive page elements to return.",
+      "max_network_events": "Maximum network events to return.",
+      "max_text_chars": "Maximum characters of page text to return.",
+      "page_id": "Opaque page identifier within the selected browser session.",
+      "screenshot": "Whether to include a screenshot in the returned page observation.",
+      "session_id": "Opaque identifier of the owned browser session.",
+      "timeout_ms": "Maximum waiting interval for this operation, in milliseconds."
+    }
+  },
+  "desktop_browser_session": {
+    "annotations": {
+      "readOnlyHint": false,
+      "openWorldHint": true,
+      "destructiveHint": true,
+      "idempotentHint": false
+    },
+    "parameters": {
+      "accept": "Whether to accept the pending JavaScript dialog.",
+      "action": "Operation selected from this tool's enumerated actions. Required inputs depend on the selected action.",
+      "agent_desktop_lease_id": "Opaque ID of an existing authorized desktop lease when using that desktop.",
+      "headless": "Whether to start the owned browser without a visible browser window.",
+      "page_id": "Opaque page identifier within the selected browser session.",
+      "profile_id": "Identifier of the gateway-owned persistent browser profile.",
+      "prompt_text": "Text supplied to a pending JavaScript prompt when accepting it.",
+      "session_id": "Opaque identifier of the owned browser session.",
+      "timeout_ms": "Maximum waiting interval for this operation, in milliseconds.",
+      "url": "Page URL for the selected browser operation, subject to its navigation policy.",
+      "viewport": "Viewport size of the owned browser page."
+    }
+  },
+  "desktop_browser_snapshot": {
+    "annotations": {
+      "readOnlyHint": false,
+      "openWorldHint": true,
+      "destructiveHint": false,
+      "idempotentHint": false
+    },
+    "parameters": {
+      "find_case_sensitive": "Whether text matching in find mode distinguishes letter case.",
+      "find_query": "Text to locate in the sanitized accessibility tree when using find mode.",
+      "full_page": "Whether a requested screenshot covers the full page.",
+      "include_console": "Whether to include bounded console diagnostics in the result.",
+      "include_network": "Whether to include bounded network diagnostics in the result.",
+      "max_console_messages": "Maximum console messages to return.",
+      "max_find_results": "Maximum matching elements to return in find mode.",
+      "max_interactive_elements": "Maximum interactive page elements to return.",
+      "max_network_events": "Maximum network events to return.",
+      "max_text_chars": "Maximum characters of page text to return.",
+      "mode": "Choose a bounded full observation or a search of the accessibility tree.",
+      "page_id": "Opaque page identifier within the selected browser session.",
+      "screenshot": "Whether to include a screenshot in the returned page observation.",
+      "session_id": "Opaque identifier of the owned browser session.",
+      "timeout_ms": "Maximum waiting interval for this operation, in milliseconds."
+    }
+  },
+  "agent_bridge_status": {
+    "annotations": {
+      "readOnlyHint": true,
+      "openWorldHint": false
+    },
+    "description": "Inspect the workstation version, selected tool count, capability identity, active profile and component qualification. Use desktop_policy_status for filesystem limits."
+  }
+}

@@ -1,5 +1,12 @@
 # MCP Tool Reference (46 Tools)
 
+The Windows OAuth workstation supports two sealed editions of the same 46 tools.
+The original catalogue digest is `7603bc547b696a3c45e4cd3f5b0b98bbf0f51c9cad66bc31f5a75ae5259c349c`.
+The edition with documented parameters and MCP annotations uses `6e3900f3fc7d8bf58aa1cf207bbb9139978c3aa002a6aef2927d2835d54a4f81`.
+Select the desired digest in the operator-owned manifest and authorize the resulting capability on the client.
+Existing manifests continue to serve their original definitions. Both editions enforce the same access checks.
+
+
 Agent Bridge exposes **16 Mission & Subtask tools**, **27 Workstation tools**, **1 pinned project command** and **2 historical utilities** over MCP `2026-07-28` and the legacy `initialize` versions `2024-11-05` through `2025-11-25`. The unified 2.x workstation publishes all 46 under one sealed catalogue digest. Modern discovery and catalog listings include `ttlMs: 300000`, `cacheScope: "private"`, and the `io.github.ironlegends/catalogRevision` metadata key.
 
 Only the tools enabled by your local startup profile and explicit CLI flags are published in `tools/list`. The embedded workstation console changes handler admission within that immutable startup catalog; lowering the active profile does not change OAuth authority or tool schemas. `fully-unlocked` retains file-tool confinement and adds direct processes only when explicitly enabled at startup.
