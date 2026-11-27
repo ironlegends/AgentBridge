@@ -8,7 +8,7 @@ description = "Gemini OAuth 2.1 compatibility server logic, without listener or 
 
 [dependencies]
 agent-bridge-oauth-compat = { path = "../oauth-compat" }
-base64 = "0.22"
+base64 = "0.23"
 fs2 = "0.4"
 getrandom = "0.2"
 serde = { version = "1", features = ["derive"] }
