@@ -5,6 +5,7 @@
 [![Release](https://img.shields.io/github/v/release/ironlegends/AgentBridge)](https://github.com/ironlegends/AgentBridge/releases)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue)](LICENSE)
 [![Windows](https://img.shields.io/badge/Windows-x64%20stable-blue)](docs/RELEASE-v2.2.0.md)
+[![Glama MCP server](https://glama.ai/mcp/servers/ironlegends/AgentBridge/badges/score.svg)](https://glama.ai/mcp/servers/ironlegends/AgentBridge)
 
 Agent Bridge turns ChatGPT Web, Gemini Web, and other compatible AI chats into local coding and automation agents. Keep using the chat you already know while your AI works directly on your computer.
 
