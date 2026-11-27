@@ -33,7 +33,7 @@ fn wide(value: &std::ffi::OsStr) -> Vec<u16> {
 fn path_units(value: &[u16]) -> PathBuf {
     PathBuf::from(std::ffi::OsString::from_wide(value))
 }
-fn digest(bytes: &[u8]) -> String { format!("{:x}", Sha256::digest(bytes)) }
+fn digest(bytes: &[u8]) -> String { Sha256::digest(bytes).iter().map(|b| format!("{b:02x}")).collect() }
 fn os_handle(handle: HANDLE) -> io::Result<OwnedHandle> {
     if handle.is_null() || handle == INVALID_HANDLE_VALUE { return Err(io::Error::last_os_error()); }
     // SAFETY: newly returned Win32 handle, transferred exactly once.
@@ -88,7 +88,7 @@ impl ImagePin {
             hash.update(&buffer[..n]);
         }
         if count != metadata.len() {return Err("ELEVATION_IMAGE_CHANGED".into());}
-        Ok(Self {path, file, identity, sha256:format!("{:x}",hash.finalize()), _parent:parent})
+        Ok(Self {path, file, identity, sha256:hash.finalize().iter().map(|b| format!("{b:02x}")).collect(), _parent:parent})
     }
     fn verify(&self) -> Result<(), RuntimeError> {
         if agent_bridge_core::physical_file_identity(&self.file)? != self.identity
@@ -167,7 +167,7 @@ impl PreparedBroker {
     fn prepare(mut payload:Payload) -> Result<Self,RuntimeError> {
         if elevated(unsafe {GetCurrentProcess()})? {return Err("ELEVATION_ALREADY_ELEVATED_REFUSED".into());}
         let mut entropy=[0u8;16];
-        getrandom::getrandom(&mut entropy).map_err(|_|"ELEVATION_NONCE_UNAVAILABLE")?;
+        getrandom::fill(&mut entropy).map_err(|_|"ELEVATION_NONCE_UNAVAILABLE")?;
         let nonce=entropy.iter().map(|b|format!("{b:02x}")).collect::<String>();
         payload.request.nonce=nonce.clone();
         payload.validate(&nonce)?;

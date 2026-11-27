@@ -98,7 +98,7 @@ pub(crate) fn expiry_ms(now: i64, duration: i64) -> Result<i64> {
 
 pub(crate) fn random_token() -> Result<String> {
     let mut secret = [0u8; 32];
-    getrandom::getrandom(&mut secret)
+    getrandom::fill(&mut secret)
         .map_err(|_| OAuthError::Uncertain("random_generator_unavailable"))?;
     Ok(URL_SAFE_NO_PAD.encode(secret))
 }

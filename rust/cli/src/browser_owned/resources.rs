@@ -112,7 +112,7 @@ pub(super) fn digest(file: &mut File, maximum: u64) -> Result<(u64, String), Run
         if bytes > maximum { return Err("BROWSER_RESOURCE_SIZE_MISMATCH".into()); }
         hash.update(&buffer[..count]);
     }
-    Ok((bytes, format!("{:x}", hash.finalize())))
+    Ok((bytes, hash.finalize().iter().map(|b| format!("{b:02x}")).collect()))
 }
 
 fn validate_diagnostic_guard(expected: &BTreeMap<PathBuf, Entry>, executable: &Path) -> Result<(), RuntimeError> {
@@ -134,7 +134,7 @@ impl Resources {
         let mut manifest_file = pin(&manifest_path, false)?;
         if manifest_file.metadata()?.len() > 8 * 1024 * 1024 { return Err("BROWSER_MANIFEST_LIMIT".into()); }
         let mut bytes = Vec::new(); manifest_file.read_to_end(&mut bytes)?;
-        if format!("{:x}", Sha256::digest(&bytes)) != expected_manifest.to_ascii_lowercase() { return Err("BROWSER_MANIFEST_CHANGED".into()); }
+        if Sha256::digest(&bytes).iter().map(|b| format!("{b:02x}")).collect::<String>() != expected_manifest.to_ascii_lowercase() { return Err("BROWSER_MANIFEST_CHANGED".into()); }
         let manifest: Manifest = serde_json::from_slice(&bytes)?;
         if manifest.schema_version != 1 || manifest.protocol_version != 2 || manifest.node.version != "24.14.0"
             || manifest.node.sha256 != "63c259c81e5d472b5f11c8d506070130cb04a1ecf84b80377a34ed6ec9048088"

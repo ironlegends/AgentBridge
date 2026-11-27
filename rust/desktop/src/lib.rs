@@ -1091,7 +1091,7 @@ fn read_regular(parent: &Dir, name: &str) -> Result<Vec<u8>> {
 }
 
 fn hex_hash(bytes: &[u8]) -> String {
-    format!("{:x}", Sha256::digest(bytes))
+    Sha256::digest(bytes).iter().map(|b| format!("{b:02x}")).collect()
 }
 
 fn display_parts(parts: &[String]) -> String {

@@ -124,7 +124,7 @@ fn transfers(root: &Path) -> BrowserTransferCallbacks {
             assert_eq!(name,"witness.txt");
             let destination=published.join("witness.txt"); fs::copy(path,&destination)?;
             let bytes=fs::read(destination)?; assert_eq!(bytes,b"download witness\n");
-            Ok(json!({"artifact_id":"test-published-artifact","bytes":bytes.len(),"sha256":format!("{:x}",Sha256::digest(&bytes))}))
+            Ok(json!({"artifact_id":"test-published-artifact","bytes":bytes.len(),"sha256":Sha256::digest(&bytes).iter().map(|b| format!("{b:02x}")).collect::<String>()}))
         }),
     }
 }

@@ -52,6 +52,6 @@ pub(crate) fn native_gui_fixture()->(PathBuf,std::fs::File){
     loop{let n=handle.read(&mut buf).unwrap();if n==0{break;}count+=n as u64;
         assert!(count<=512*1024*1024);hash.update(&buf[..n]);}
     assert_eq!(count,size);
-    assert_eq!(format!("{:x}",hash.finalize()),expected);
+    assert_eq!(hash.finalize().iter().map(|b| format!("{b:02x}")).collect::<String>(),expected);
     (path,handle)
 }

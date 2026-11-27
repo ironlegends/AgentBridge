@@ -92,7 +92,7 @@ pub(crate) fn apply(tx: &Transaction<'_>) -> Result<()> {
                     "legacy mission creator could not be verified",
                 ));
             }
-            let candidate = format!("{:x}", Sha256::digest(old.stored_owner.as_bytes()));
+            let candidate: String = Sha256::digest(old.stored_owner.as_bytes()).iter().map(|b| format!("{b:02x}")).collect();
             if registered_count(tx, &candidate)? != 1 {
                 return Err(CoreError::IncompatibleSchema(
                     "legacy mission creator could not be verified",

@@ -2,7 +2,7 @@
 //! No database path, SQLite migration, transport, or third-party Task Room state is created here.
 
 use chrono::Utc;
-use rand::{rngs::OsRng, RngCore};
+use rand::{rngs::SysRng, TryRng};
 use rusqlite::{params, Connection, OptionalExtension, Row, Transaction, TransactionBehavior};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -110,13 +110,13 @@ pub fn json<T: Serialize>(value: &T) -> Result<String> {
 }
 pub fn new_id(prefix: &str) -> String {
     let mut bytes = [0u8; 16];
-    OsRng.fill_bytes(&mut bytes);
+    SysRng.try_fill_bytes(&mut bytes).expect("OS RNG unavailable");
     format!("{}_{}", prefix, bytes.iter().map(|b| format!("{b:02x}")).collect::<String>())
 }
 pub fn new_guid_n() -> String {
     // The legacy checkpoint ID is Guid.NewGuid().ToString("N"), not an opaque cp_ ID.
     let mut bytes = [0u8; 16];
-    OsRng.fill_bytes(&mut bytes);
+    SysRng.try_fill_bytes(&mut bytes).expect("OS RNG unavailable");
     bytes[6] = (bytes[6] & 0x0f) | 0x40;
     bytes[8] = (bytes[8] & 0x3f) | 0x80;
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()

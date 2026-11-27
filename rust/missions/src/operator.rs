@@ -2,7 +2,7 @@
 //! cryptographic token generation. Never returns raw handles or handle hashes.
 
 use chrono::{DateTime, SecondsFormat, Utc};
-use rand::{rngs::OsRng, RngCore};
+use rand::{rngs::SysRng, TryRng};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::{json, Value};
 use std::collections::BTreeSet;
@@ -17,7 +17,7 @@ const MAX_SESSION_DISPLAY_TEXT: usize = 200;
 pub fn random_token_hex(byte_len: usize) -> String {
     let len = byte_len.clamp(16, 64);
     let mut bytes = vec![0u8; len];
-    OsRng.fill_bytes(&mut bytes);
+    SysRng.try_fill_bytes(&mut bytes).expect("OS RNG unavailable");
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 

@@ -405,7 +405,7 @@ fn output_pipe() -> io::Result<(File, Owned)> {
 
 fn input_pipe() -> io::Result<(File, Owned)> {
     let mut random = [0u8; 16];
-    getrandom::getrandom(&mut random)
+    getrandom::fill(&mut random)
         .map_err(|error| io::Error::other(format!("PIPE_RANDOM: {error}")))?;
     let suffix: String = random.iter().map(|byte| format!("{byte:02x}")).collect();
     let name = wide(OsStr::new(&format!(r"\\.\pipe\agent-bridge-stdin-{suffix}")))?;

@@ -317,7 +317,7 @@ fn number(args:&Map<String,Value>,key:&str,default:u64,maximum:u64)->io::Result<
 }
 fn new_id()->io::Result<String>{
     let mut bytes=[0u8;16];
-    getrandom::getrandom(&mut bytes).map_err(|_|error("WINDOW_RANDOMNESS_UNAVAILABLE"))?;
+    getrandom::fill(&mut bytes).map_err(|_|error("WINDOW_RANDOMNESS_UNAVAILABLE"))?;
     bytes[6]=(bytes[6]&15)|64;bytes[8]=(bytes[8]&63)|128;
     let text:String=bytes.iter().map(|byte|format!("{byte:02x}")).collect();
     Ok(format!("{}-{}-{}-{}-{}",&text[..8],&text[8..12],&text[12..16],&text[16..20],&text[20..]))
