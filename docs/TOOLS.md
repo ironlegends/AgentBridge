@@ -6,6 +6,10 @@ The edition with documented parameters and MCP annotations uses `6e3900f3fc7d8bf
 Select the desired digest in the operator-owned manifest and authorize the resulting capability on the client.
 Existing manifests continue to serve their original definitions. Both editions enforce the same access checks.
 
+The unified catalogue contains 46 tools with the default options. Setting `mission_handoff` to `true` adds the member handoff tool and changes the seal. The selection, tool definitions, manifest and OAuth grant must match exactly. The five smaller catalogues overlap: core (19), code (19), desktop (10), automation (18) and extensions (6).
+
+For the unified workstation, `mission_handoff: true` adds `agent_bridge_mission_handoff` (47 tools). Selecting `attempt_maintenance` as well adds `agent_bridge_mission_attempt` (48 tools). Both options are disabled by default. The operator binds a mission ID, subtask ID and base commit in the local manifest. Authorized members can claim the check, report progress and request independent review. Verification reads the Git revision of that approved worktree. Each changed selection requires its own catalogue fingerprint and fresh OAuth consent.
+
 
 Agent Bridge exposes **16 Mission & Subtask tools**, **27 Workstation tools**, **1 pinned project command** and **2 historical utilities** over MCP `2026-07-28` and the legacy `initialize` versions `2024-11-05` through `2025-11-25`. The unified 2.x workstation publishes all 46 under one sealed catalogue digest. Modern discovery and catalog listings include `ttlMs: 300000`, `cacheScope: "private"`, and the `io.github.ironlegends/catalogRevision` metadata key.
 

@@ -10,6 +10,10 @@ The desktop runs in Tauri and uses the system WebView2 runtime. The portable ZIP
 - The documented workstation catalogue has a new fingerprint. Select it locally and grant fresh OAuth consent on each client. The previous catalogue remains selectable for compatibility. See [the tool reference](TOOLS.md).
 - Dependabot tracks the Rust workspaces, browser worker and GitHub Actions. The portable package updates its Rust dependencies and pinned browser runtime.
 
+## Optional mission revision check
+
+For the unified workstation, `mission_handoff: true` adds `agent_bridge_mission_handoff` (47 tools). Selecting `attempt_maintenance` as well adds `agent_bridge_mission_attempt` (48 tools). Both options are disabled by default. The operator binds a mission ID, subtask ID and base commit in the local manifest. Authorized members can claim the check, report progress and request independent review. Verification reads the Git revision of that approved worktree. Each changed selection requires its own catalogue fingerprint and fresh OAuth consent.
+
 ## Distribution and verification
 
 Windows x64 portable is the supported target. Linux and macOS remain experimental. Windows ARM64 and the installer lack distribution qualification. This public snapshot excludes the experimental mobile controls and unattended provider review.
