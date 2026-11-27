@@ -128,6 +128,7 @@ pub(crate) fn unified_router(
     catalogue.push(ToolDefinition::new("agent_bridge_status",
         Some("Report the exact selected tool capability, family counts, live profile and component qualification.".into()),
         json!({"type":"object","properties":{},"additionalProperties":false})));
+    tool_docs::select_workstation_docs(&mut catalogue, &manifest.selection.catalogue_sha256)?;
     Ok(WorkstationRuntime {
         router:McpGateway::new(GatewayConfig::new("agent-bridge-workstation",env!("CARGO_PKG_VERSION"))
             .with_catalog_ttl_ms(CATALOG_TTL_MS),

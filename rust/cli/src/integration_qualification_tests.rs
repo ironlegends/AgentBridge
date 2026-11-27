@@ -151,6 +151,18 @@ fn listed_digest(attached: &Attached) -> String {
 }
 
 #[test]
+fn integration_documented_unified_catalogue_preserves_operator_seal() {
+    let mut bench = bench(false, false, |_, _| {});
+    bench.selected["catalogue_sha256"] = json!("6e3900f3fc7d8bf58aa1cf207bbb9139978c3aa002a6aef2927d2835d54a4f81");
+    let attached = attach(&bench);
+    let tools = attached.runtime.router.published_tools().into_iter().cloned().collect::<Vec<_>>();
+    attached.manifest.verify_catalogue(&tools).unwrap();
+    assert_eq!(tools.len(), 46);
+    assert!(tools.iter().all(|tool| tool.annotations.is_some()));
+    shutdown(attached, &bench.db);
+}
+
+#[test]
 fn integration_real_catalogue_46_providers_and_lifecycle() {
     qualify_catalogue(false);
 }

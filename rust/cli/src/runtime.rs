@@ -1,5 +1,8 @@
 #[path = "workspace_qualification.rs"]
 mod workspace_qualification;
+#[path = "tool_docs.rs"]
+mod tool_docs;
+use tool_docs::document_stdio_workspace;
 #[path = "runtime_unified.rs"]
 mod unified;
 pub(crate) use unified::unified_router;
@@ -781,34 +784,6 @@ fn guard_live_workstation(
         });
     }
     Ok(guarded)
-}
-
-#[derive(serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-struct WorkspaceToolDocs {
-    description: String,
-    annotations: Value,
-    #[serde(default)]
-    parameters: std::collections::BTreeMap<String, String>,
-}
-
-// Only the foreground stdio workspace uses these descriptions. OAuth workstation
-// manifests seal the complete serialized definitions, including their wording.
-fn document_stdio_workspace(catalog: &mut [ToolDefinition]) -> Result<(), RuntimeError> {
-    let docs: std::collections::BTreeMap<String, WorkspaceToolDocs> =
-        serde_json::from_str(include_str!("../../../contracts/stdio-workspace-tool-docs.json"))?;
-    for tool in catalog {
-        let Some(entry) = docs.get(&tool.name) else { continue };
-        tool.description = Some(entry.description.clone());
-        tool.annotations = Some(entry.annotations.clone());
-        for (name, description) in &entry.parameters {
-            let field = tool.input_schema["properties"].get_mut(name)
-                .and_then(Value::as_object_mut)
-                .ok_or("Documented stdio parameter missing from the tool schema")?;
-            field.insert("description".into(), Value::String(description.clone()));
-        }
-    }
-    Ok(())
 }
 
 fn open_qualified(
