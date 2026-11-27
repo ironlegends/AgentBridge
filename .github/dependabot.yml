@@ -1,0 +1,59 @@
+version: 2
+updates:
+  - package-ecosystem: "cargo"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    groups:
+      rust-updates:
+        applies-to: version-updates
+        patterns: ["*"]
+        exclude-patterns: ["rmcp*", "*rustls*", "reqwest", "windows*", "*oauth*", "tauri*", "webview2*"]
+        update-types: ["minor", "patch"]
+      rust-security:
+        applies-to: security-updates
+        patterns: ["*"]
+        exclude-patterns: ["rmcp*", "*rustls*", "reqwest", "windows*", "*oauth*", "tauri*", "webview2*"]
+
+  - package-ecosystem: "cargo"
+    directory: "/app/src-tauri"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 3
+    groups:
+      tauri-security:
+        applies-to: security-updates
+        patterns: ["*"]
+        exclude-patterns: ["rmcp*", "*rustls*", "reqwest", "windows*", "*oauth*", "tauri*", "webview2*"]
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 3
+    groups:
+      actions-security:
+        applies-to: security-updates
+        patterns: ["*"]
+
+  - package-ecosystem: "npm"
+    directory: "/workers/browser-playwright"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 2
+    groups:
+      browser-security:
+        applies-to: security-updates
+        patterns: ["*"]
+
+  - package-ecosystem: "cargo"
+    directory: "/experiments/mcp-sdk-comparison"
+    schedule:
+      interval: "monthly"
+    open-pull-requests-limit: 1
+    groups:
+      mcp-experiment-security:
+        applies-to: security-updates
+        patterns: ["*"]
+        exclude-patterns: ["rmcp*", "*rustls*", "reqwest", "windows*", "*oauth*", "tauri*", "webview2*"]
