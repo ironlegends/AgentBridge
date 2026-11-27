@@ -17,6 +17,7 @@ use agent_bridge_gateway::{
     ToolHandler, ToolMapHandler,
 };
 use crate::session_profile::{rank, ProfileControl};
+use crate::catalogue_selection::{CatalogueSelection,family_counts};
 use serde_json::{json, Value};
 use std::error::Error;
 pub type RuntimeError = Box<dyn Error + Send + Sync>;
@@ -56,6 +57,7 @@ fn release_channel_is_stable_only_for_the_exact_packager_marker() {
 pub(crate) struct WorkstationRuntime {
     pub(crate) router: Router,
     pub(crate) database: Option<SharedCoreDatabase>,
+    pub(crate) extension_scope: Option<crate::extensions::ExtensionScope>,
 }
 
 // This value comes exclusively from the operator-qualified physical directory.
@@ -152,7 +154,7 @@ fn mission_transport(database_path: &Path) -> Result<(Router, SharedCoreDatabase
     // Mission-only HTTP has no workstation sessions or watchdog to keep.
     let mut supervisors = Vec::new();
     open_qualified(database_path, None, None, None, None, None,
-        #[cfg(any(windows, unix))] None, &mut supervisors)
+        #[cfg(any(windows, unix))] None, CatalogueSelection::Unified,&mut supervisors)
 }
 
 /// Standalone Web MCP file-READ router. Unlike the mission/stdio gateway this
@@ -219,6 +221,16 @@ pub fn project_read_router(
     ))
 }
 
+fn attach_status_extensions(
+    payload: &mut Value,
+    settings: Option<&Path>,
+    scope: Option<&crate::extensions::ExtensionScope>,
+) {
+    if let (Some(settings), Some(scope)) = (settings, scope) {
+        payload["extensions"] = scope.status_snapshot(settings);
+    }
+}
+
 /// Snapshot the EXACT effective local extension authority, including the
 /// journal overlay and per-tool parameter/descriptor pins, without reading
 /// bearer credentials or contacting a remote MCP server. Only a hash of each
@@ -245,7 +257,7 @@ pub fn workstation_extension_authority(settings:&Path)->Result<Value,RuntimeErro
     }))
 }
 
-fn registry_matches_authority(
+pub(crate) fn registry_matches_authority(
     registry:&agent_bridge_extensions::Registry,
     expected:&Value,
 )->Result<bool,RuntimeError>{
@@ -291,7 +303,7 @@ fn attach_desktop_surface(
     supervisors: &mut Vec<crate::terminal::SessionSupervisor>,
     extension_authority: Option<&Value>,
     live_profile: Option<&ProfileControl>,
-) -> Result<(), RuntimeError> {
+) -> Result<Option<crate::extensions::ExtensionScope>, RuntimeError> {
     if selection.processes && (!work.profile.permits_processes() || !selection.terminal_tool) {
         return Err("Process tools require an explicitly selected full-control workstation".into());
     }
@@ -443,18 +455,19 @@ fn attach_desktop_surface(
         return Err("Web read-only DesktopFiles catalogue must contain exactly four tools".into());
     }
 
+    let mut attached_extension_scope = None;
     if selection.settings_tools {
         let directory=settings.ok_or("Private settings directory not selected")?;
         let scope=match live_profile {
             Some(profile)=>crate::extensions::ExtensionScope::live(profile)?,
             None=>crate::extensions::ExtensionScope::fixed(work.profile),
         };
+        attached_extension_scope = Some(scope.clone());
         crate::extensions::attach(directory,catalog,handlers,scope.clone())?;
         if let Some(expected)=extension_authority {
-            // This overrides the only effectful extension dispatch with a
-            // grant-bound one. It reads ONE effective Registry, compares
-            // its complete approved authority and executes through that SAME
-            // instance, eliminating a read-then-reload authorization race.
+            // This overrides the effectful extension dispatch with a
+            // grant-bound one. Compare the seal on the same validated live
+            // snapshot that is registered under the journal/profile gates.
             let bound=expected.clone();
             let local_settings=directory.to_owned();
             handlers.register("desktop_mcp_tool_call",move |args| {
@@ -470,17 +483,9 @@ fn attach_desktop_surface(
                     Some(Value::Object(value))=>value,
                     _=>return Ok(ToolCallResult::tool_error("Extension arguments must be an object")),
                 };
-                let Ok(registry)=crate::extensions::read(&local_settings) else {
-                    scope.close_sessions();
-                    return Ok(ToolCallResult::tool_error("EXTENSION_AUTHORITY_UNAVAILABLE"));
-                };
-                if !registry_matches_authority(&registry,&bound).unwrap_or(false) {
-                    scope.close_sessions();
-                    return Ok(ToolCallResult::tool_error("EXTENSION_AUTHORITY_CHANGED: new local OAuth authorization required"));
-                }
-                // The same registry instance, with this route's idle sessions.
-                let registry=scope.sessions(registry);
-                Ok(match registry.call(name,params,scope.current()) {
+                // Admit on the validated live snapshot, under the same
+                // journal and profile gates as local operator revocation.
+                Ok(match scope.call(&local_settings,name,params,Some(&bound)) {
                     Ok(value)=>{
                         let mut output=ToolCallResult::text(value.to_string());
                         output.is_error=value.get("isError").and_then(Value::as_bool).unwrap_or(false);
@@ -515,7 +520,7 @@ fn attach_desktop_surface(
             supervisors.push(supervisor);
         }
     }
-    Ok(())
+    Ok(attached_extension_scope)
 }
 
 /// Capabilities are approved by the LOCAL CLI, not accepted from MCP frames.
@@ -611,7 +616,7 @@ pub(crate) fn workstation_router(
 
     let mut catalog = Vec::new();
     let mut handlers = ToolMapHandler::new();
-    attach_desktop_surface(
+    let ext_scope = attach_desktop_surface(
         &work,database.as_ref(),database_boundary,
         if permitted.settings_tools || permitted.processes {
             Some(settings_dir)
@@ -644,6 +649,8 @@ pub(crate) fn workstation_router(
     // published names + schemas before any bearer request is accepted.
     let count = catalog.len();
     let status_profile = active_profile.clone();
+    let status_ext_scope = ext_scope.clone();
+    let status_settings_dir = settings_dir.to_path_buf();
     let (channel, production) = release_channel();
     handlers.register("agent_bridge_status", move |arguments| {
         if !arguments.is_empty() {
@@ -651,7 +658,7 @@ pub(crate) fn workstation_router(
         }
         let profile = *status_profile.read()
             .map_err(|_| ToolDispatchError::internal("PROFILE_STATE_UNAVAILABLE"))?;
-        Ok(ToolCallResult::text(json!({
+        let mut payload = json!({
             "ok":true,"version":env!("CARGO_PKG_VERSION"),
             "active_backend":"rust","audience":"workstation",
             "desktop_profile":profile,"vendor_tools":count,
@@ -665,7 +672,9 @@ pub(crate) fn workstation_router(
                 Some(agent_bridge_core::CURRENT_SCHEMA_VERSION)
             } else { None },
             "channel":channel,"production":production
-        }).to_string()))
+        });
+        attach_status_extensions(&mut payload, Some(&status_settings_dir), status_ext_scope.as_ref());
+        Ok(ToolCallResult::text(payload.to_string()))
     });
     catalog.push(ToolDefinition::new(
         "agent_bridge_status",Some("Report this locally approved Web workstation profile.".into()),
@@ -680,6 +689,7 @@ pub(crate) fn workstation_router(
         router: McpGateway::new(GatewayConfig::new("agent-bridge-workstation",
             env!("CARGO_PKG_VERSION")).with_catalog_ttl_ms(CATALOG_TTL_MS),catalog,handlers),
         database,
+        extension_scope: ext_scope,
     })
 }
 
@@ -745,7 +755,7 @@ fn guard_live_workstation(
         guarded.register(name.clone(), move |arguments| {
             // Direct process handlers synchronize admission with revocation themselves
             // and release the profile lock before waiting for asynchronous output.
-            if name == "agent_bridge_status" || (direct_processes &&
+            if matches!(name.as_str(), "agent_bridge_status" | "desktop_mcp_tool_call") || (direct_processes &&
                 (PROCESS_TOOLS.contains(&name.as_str()) || name == "agent_bridge_project_command")) {
                 return owner.call(&name, arguments);
             }
@@ -794,6 +804,7 @@ fn open_qualified(
     docs_approval: Option<crate::browser_docs::LocalApproval>,
     learn_approval: Option<crate::browser_docs::learn::LocalLearnApproval>,
     #[cfg(any(windows, unix))] native_chrome_approval: Option<crate::browser_docs::interactive::LocalInteractiveApproval>,
+    selected: CatalogueSelection,
     // Owned by serve_stdio. Drop is a safe fallback on early failures.
     supervisors: &mut Vec<crate::terminal::SessionSupervisor>,
 ) -> Result<(Router, SharedCoreDatabase), RuntimeError> {
@@ -817,6 +828,8 @@ fn open_qualified(
     let database = Arc::new(Mutex::new(CoreDatabase::open_existing(database_path)?));
     let mut catalog: Vec<ToolDefinition> =
         serde_json::from_str(include_str!("../../../contracts/mission-tools-v1.json"))?;
+    // The existing mission-only and legacy Web views keep their published contract.
+    catalog.retain(|tool| tool.name != "agent_bridge_mission_handoff");
     let mut handlers = ToolMapHandler::new();
     for tool in &catalog {
         if tool.name == "agent_bridge_status" {
@@ -826,8 +839,8 @@ fn open_qualified(
         let name = tool.name.clone();
         handlers.register(name.clone(), move |args| {
             let mut db = connection.lock().map_err(|_| ToolDispatchError::internal("Core unavailable"))?;
-            let result = agent_bridge_missions::dispatch_tool_observed(
-                db.connection_mut(), &name, &Value::Object(args), crate::client_sessions::link_context,
+            let result = agent_bridge_missions::dispatch_tool_activity_observed(
+                db.connection_mut(), &name, &Value::Object(args), crate::client_sessions::link_activity,
             );
             match result {
                 Ok(value) => Ok(ToolCallResult::text(value.to_string())),
@@ -836,8 +849,8 @@ fn open_qualified(
         });
     }
     let mission_count = catalog.len();
-    if let Some(work) = &workspace {
-        attach_desktop_surface(
+    let ext_scope = if let Some(work) = &workspace {
+        let scope = attach_desktop_surface(
             work,Some(&database),database_path,settings,
             DesktopSurface {
                 web_read_only:false,
@@ -849,12 +862,16 @@ fn open_qualified(
             &mut catalog,&mut handlers,supervisors,None,None,
         )?;
         document_stdio_workspace(&mut catalog)?;
+        scope
     } else if let Some(settings) = settings {
         // Preserve the existing mission-only stdio + explicitly selected
         // operator settings behavior; never enabled on the Web mission route.
-        crate::extensions::attach(settings,&mut catalog,&mut handlers,
-            crate::extensions::ExtensionScope::data_only())?;
-    }
+        let scope = crate::extensions::ExtensionScope::data_only();
+        crate::extensions::attach(settings,&mut catalog,&mut handlers,scope.clone())?;
+        Some(scope)
+    } else {
+        None
+    };
     if let Some(approval) = window_approval {
         // No HTTP/Web route accepts this unforgeable, locally granted value.
         crate::window_inspection::attach(approval, &mut catalog, &mut handlers);
@@ -870,30 +887,63 @@ fn open_qualified(
     if let Some(approval) = native_chrome_approval {
         crate::browser_docs::interactive::attach_native(approval, &mut catalog, &mut handlers);
     }
-    let desktop_count = catalog.len() - mission_count;
+    // Local stdio may already have a smaller surface than unified Web.
+    // Intersect with that actual authority; never synthesize missing tools.
+    selected.restrict(&mut catalog,&mut handlers);
+    selected.require_available(&catalog,&handlers)?;
+    let seal=if selected.is_unified(){None}
+        else{Some(crate::capability_manifest::catalogue_digest(&catalog)?)};
+    let selected_count=catalog.len();
+    let selected_families=family_counts(catalog.iter().map(|t|t.name.as_str()));
+    let desktop_count = if selected.is_unified(){catalog.len() - mission_count}
+        else{selected_count.saturating_sub(selected_families["missions_including_status"].as_u64().unwrap_or(0) as usize)};
     let desktop_profile = workspace.as_ref().map(|work| work.profile);
     let version = env!("CARGO_PKG_VERSION");
     let (channel, production) = release_channel();
+    let status_seal=seal.clone();
+    let status_ext_scope = ext_scope.clone();
+    let status_settings_dir = settings.map(Path::to_path_buf);
     handlers.register("agent_bridge_status", move |arguments| {
         if !arguments.is_empty() {
             return Err(ToolDispatchError::invalid_params("status takes no arguments"));
         }
-        Ok(ToolCallResult::text(json!({
+        let mut result=json!({
             "ok": true, "version": version, "active_backend": "rust",
             "database_schema": agent_bridge_core::CURRENT_SCHEMA_VERSION,
             "vendor_contract": null, "vendor_tools": desktop_count, "desktop_profile": desktop_profile,
             "channel": channel, "production": production
-        }).to_string()))
+        });
+        if let Some(seal)=&status_seal{
+            result["catalogue"]=json!(selected.name());
+            result["catalogue_sha256"]=json!(seal);
+            result["total_tools"]=json!(selected_count);
+            result["families"]=selected_families.clone();
+        }
+        if selected.allows("desktop_mcp_tool_search") {
+            attach_status_extensions(&mut result, status_settings_dir.as_deref(), status_ext_scope.as_ref());
+        }
+        Ok(ToolCallResult::text(result.to_string()))
     });
-    let router = McpGateway::new(
-        GatewayConfig::new("agent-bridge", version).with_catalog_ttl_ms(CATALOG_TTL_MS),
-        catalog, handlers,
-    );
+    let config=GatewayConfig::new("agent-bridge", version).with_catalog_ttl_ms(CATALOG_TTL_MS);
+    let config=match seal.as_deref(){
+        Some(seal)=>{
+            // Local stdio has no bearer; the private connection is its
+            // boundary. Also distinguish transport and exact startup profile.
+            let partition=crate::capability_manifest::canonical_digest(&json!({
+                "transport":"stdio","catalogue":selected.name(),
+                "catalogue_sha256":seal,"profile":desktop_profile
+            }))?;
+            selected.configure(config,&partition)
+        }
+        None=>config,
+    };
+    let router = McpGateway::new(config,catalog, handlers);
     Ok((router, database))
 }
 
 pub fn serve_stdio(
     database_path: &Path,
+    selected: CatalogueSelection,
     workspace: Option<(&Path, bool)>,
     settings: Option<&Path>,
     local_window: Option<crate::window_inspection::DedicatedWindow>,
@@ -990,9 +1040,12 @@ pub fn serve_stdio(
         database_path, qualified, settings, window_approval, docs_approval,
         learn_approval,
         #[cfg(any(windows, unix))] native_chrome_approval,
-        &mut supervisors,
+        selected,&mut supervisors,
     )?;
-    let audit = Arc::new(crate::request_audit::RequestAudit::new()?);
+    let history_dir = settings.map(crate::audit_history::default_history_dir);
+    let audit = Arc::new(crate::request_audit::RequestAudit::open_with_optional_history_dir(
+        history_dir.as_deref(),
+    )?);
     let local_view = if let Some((port, descriptor)) = ui {
         let runtime = tokio::runtime::Builder::new_multi_thread().worker_threads(1).enable_all().build()?;
         let view = runtime.block_on(crate::ui::start_local_session_view(
@@ -1002,7 +1055,7 @@ pub fn serve_stdio(
     } else {
         None
     };
-    let served = serve_stdio_mcp(io::stdin().lock(), io::stdout().lock(), &gateway, &audit.sessions);
+    let served = serve_stdio_mcp(io::stdin().lock(), io::stdout().lock(), &gateway, &audit);
     // stdio EOF or an I/O error must not allow any owned child or watchdog to
     // survive the stream. Join even when the client was idle at disconnect.
     drop(gateway);
@@ -1016,6 +1069,8 @@ pub fn serve_stdio(
         Some((runtime, view)) => runtime.block_on(view.stop()),
         None => Ok(()),
     };
+    // The audit belongs to the transport even when child/UI cleanup fails.
+    audit.flush_history(std::time::Duration::from_secs(2));
     if let Some(error) = shutdown_failure { return Err(error.into()); }
     operator_result?;
     served?;
@@ -1026,14 +1081,43 @@ fn serve_stdio_mcp(
     reader: impl io::BufRead,
     writer: impl io::Write,
     router: &Router,
-    sessions: &crate::client_sessions::ClientSessions,
+    audit: &Arc<crate::request_audit::RequestAudit>,
 ) -> io::Result<()> {
+    use agent_bridge_gateway::stdio::{self, FrameCompletion};
+    use crate::request_audit::{ErrorCode, RequestObservation};
     // The first discovery or initialize fixes the protocol era of this
     // process; a frame from the other era is refused instead of downgraded.
     let mut era = agent_bridge_gateway::modern::StdioEra::default();
-    agent_bridge_gateway::stdio::serve(reader, writer, |frame| {
-        sessions.dispatch(crate::client_sessions::Client::Local("stdio"), router, frame,
-            agent_bridge_gateway::stdio::MAX_FRAME_BYTES, || era.dispatch(router, frame))
+    let sessions = &audit.sessions;
+    stdio::serve_observed(reader, writer, move |frame| {
+        let observation = RequestObservation::new(Some(Arc::clone(audit)));
+        let client = observation.details().observe_stdio();
+        observation.details().observe_frame(frame.as_bytes());
+        let (response, admission) = sessions.prepare_dispatch(
+            client, router, frame, stdio::MAX_FRAME_BYTES, || era.dispatch(router, frame));
+        if let Some(response) = response.as_deref().filter(|response| response.len() <= stdio::MAX_FRAME_BYTES) {
+            observation.details().routed(agent_bridge_http::modern::ResponseMetadata::read(response));
+        }
+        (response, (observation, admission))
+    }, |(observation, admission), completion| {
+        // No success is recorded until the complete bounded reply is flushed.
+        let (session_id, activity) = admission.finish(completion == FrameCompletion::Written);
+        if let Some(session_id) = session_id {
+            observation.details().observe_session_id(session_id);
+        }
+        observation.details().observe_activity(activity);
+        match completion {
+            FrameCompletion::Written => observation.complete_stdio(),
+            FrameCompletion::Silent => observation.discard_silent(),
+            FrameCompletion::OutputTooLarge => {
+                observation.details().stdio_failed(ErrorCode::Named("response_exceeds_limit"));
+                observation.complete_stdio();
+            }
+            FrameCompletion::OutputFailed => {
+                observation.details().stdio_failed(ErrorCode::Named("request_interrupted"));
+                observation.complete_stdio();
+            }
+        }
     })
 }
 
@@ -1092,6 +1176,50 @@ mod session_transport_tests {
     use super::*;
     use crate::request_audit::RequestAudit;
 
+    #[test]
+    fn specialized_stdio_uses_only_existing_locally_selected_providers() {
+        let root=crate::test_state_base().join(format!("narrow-stdio-{}",
+            agent_bridge_missions::operator::random_token_hex(8)));
+        std::fs::create_dir_all(&root).unwrap();
+        struct Cleanup(PathBuf);
+        impl Drop for Cleanup{fn drop(&mut self){let _=std::fs::remove_dir_all(&self.0);}}
+        let _cleanup=Cleanup(root.clone());
+        #[cfg(unix)] {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&root,std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let db=root.join("core.sqlite");
+        drop(CoreDatabase::initialize_new(&db).unwrap());
+        let mut supervisors=Vec::new();
+        let (router,owner)=open_qualified(&db,None,None,None,None,None,
+            #[cfg(any(windows,unix))] None,CatalogueSelection::Core,&mut supervisors).unwrap();
+        let mut out=Vec::new();
+        let frames=[
+            json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26"}}),
+            json!({"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}),
+            json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"desktop_start_process","arguments":{}}}),
+            json!({"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"agent_bridge_status","arguments":{}}}),
+        ];
+        let input=frames.iter().map(Value::to_string).collect::<Vec<_>>().join("\n")+"\n";
+        let audit=Arc::new(RequestAudit::new().unwrap());
+        serve_stdio_mcp(input.as_bytes(),&mut out,&router,&audit).unwrap();
+        let replies:Vec<Value>=std::str::from_utf8(&out).unwrap().lines()
+            .map(|line|serde_json::from_str(line).unwrap()).collect();
+        assert_eq!(replies.len(),4);
+        assert_eq!(replies[0]["result"]["serverInfo"]["name"],"agent-bridge-core");
+        let tools=replies[1]["result"]["tools"].as_array().unwrap();
+        assert!(tools.iter().all(|tool|CatalogueSelection::Core.allows(tool["name"].as_str().unwrap())));
+        assert_eq!(replies[2]["error"]["code"],-32602);
+        let status:Value=serde_json::from_str(replies[3]["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(status["catalogue"],"core");
+        assert_eq!(status["total_tools"],tools.len());
+        drop(router);drop(owner);
+        assert!(supervisors.is_empty());
+        let refused=open_qualified(&db,None,None,None,None,None,
+            #[cfg(any(windows,unix))] None,CatalogueSelection::Extensions,&mut supervisors);
+        assert!(refused.err().unwrap().to_string().contains("CATALOGUE_SELECTION_UNAVAILABLE"));
+    }
+
     const LARGE_CALL: &str = r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"large_fixture"}}"#;
 
     fn large_reply_router() -> Router {
@@ -1107,12 +1235,12 @@ mod session_transport_tests {
 
     #[test]
     fn foreground_stdio_does_not_record_a_reply_rejected_by_its_frame_limit() {
-        let audit = RequestAudit::new().unwrap();
+        let audit = Arc::new(RequestAudit::new().unwrap());
         let input = format!("{}\n{LARGE_CALL}\n",
             r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26"}}"#);
         let mut output = Vec::new();
         let error = serve_stdio_mcp(input.as_bytes(), &mut output, &large_reply_router(),
-            &audit.sessions).unwrap_err();
+            &audit).unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::InvalidData);
         assert_eq!(error.to_string(), "stdio output frame exceeds maximum size");
         let replies: Vec<_> = std::str::from_utf8(&output).unwrap().lines().collect();
@@ -1123,6 +1251,152 @@ mod session_transport_tests {
         assert_eq!(session["request_count"], 1);
         assert_eq!(session["context_ids"], json!([]));
         assert_eq!(session["tool_calls"], json!([]));
+        let records = serde_json::to_value(audit.snapshot()).unwrap();
+        assert_eq!(records["in_flight"], 0);
+        assert_eq!(records["records"][1]["outcome"], "transport_error");
+        assert_eq!(records["records"][1]["error_code"], "response_exceeds_limit");
+        assert_eq!(records["records"][1]["provider"], "local");
+        assert!(records["records"][1]["http_status"].is_null());
+        assert!(records["records"][1].get("context_id").is_none());
+    }
+
+    struct AuditFixture(std::path::PathBuf);
+    impl Drop for AuditFixture {
+        fn drop(&mut self) { let _ = std::fs::remove_dir_all(&self.0); }
+    }
+
+    fn mission_fixture() -> (AuditFixture, Router) {
+        let path = crate::test_state_base().join(format!("stdio-audit-{}",
+            agent_bridge_missions::operator::random_token_hex(16)));
+        std::fs::create_dir_all(&path).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let db = path.join("core.sqlite");
+        drop(CoreDatabase::initialize_new(&db).unwrap());
+        let router = missions(&db).unwrap();
+        (AuditFixture(path), router)
+    }
+
+    const INIT: &str = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26"}}"#;
+    const NOTIFICATION: &str = r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#;
+    const STATUS: &str = r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"agent_bridge_status","arguments":{}}}"#;
+    const CREATE_CONTEXT: &str = r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"agent_bridge_context_create","arguments":{}}}"#;
+
+    #[test]
+    fn stdio_audit_persists_real_local_status_and_context_after_flush() {
+        use crate::audit_history::{AuditHistoryConfig, AuditHistoryFilter};
+        let (fixture, router) = mission_fixture();
+        let dir = fixture.0.join("history");
+        let audit = Arc::new(RequestAudit::open_with_history_dir(&dir, AuditHistoryConfig::default()).unwrap());
+        let input = format!("{INIT}\r\n{NOTIFICATION}\n{STATUS}\n{CREATE_CONTEXT}\n");
+        let mut output = Vec::new();
+        serve_stdio_mcp(input.as_bytes(), &mut output, &router, &audit).unwrap();
+        let replies: Vec<Value> = std::str::from_utf8(&output).unwrap().lines()
+            .map(|line| serde_json::from_str(line).unwrap()).collect();
+        assert_eq!(replies.len(), 3, "notifications must remain silent");
+        let context: Value = serde_json::from_str(replies[2]["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert!(agent_bridge_missions::valid_id("ctx", context["context_id"].as_str().unwrap()));
+        let snapshot = serde_json::to_value(audit.snapshot()).unwrap();
+        assert_eq!(snapshot["in_flight"], 0);
+        let rows = snapshot["records"].as_array().unwrap();
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[1]["tool_name"], "agent_bridge_status");
+        assert_eq!(rows[1]["method"], "tools/call");
+        assert_eq!(rows[2]["tool_name"], "agent_bridge_context_create");
+        assert_eq!(rows[2]["context_id"], context["context_id"]);
+        assert!(rows[2].get("mission_id").is_none());
+        let sid = rows[1]["session_id"].as_str().unwrap();
+        assert!(crate::audit_history::is_valid_session_id(sid));
+        for row in rows {
+            assert_eq!(row["provider"], "local");
+            assert_eq!(row["outcome"], "success");
+            assert_eq!(row["session_id"], sid);
+            assert!(row["http_status"].is_null() && row["client_id_sha256"].is_null());
+        }
+        assert!(!snapshot.to_string().contains(context["context_handle"].as_str().unwrap()));
+        assert!(audit.flush_history(std::time::Duration::from_secs(2)));
+        drop(audit);
+        let reopened = RequestAudit::open_with_history_dir(&dir, AuditHistoryConfig::default()).unwrap();
+        let history = reopened.query_history(&AuditHistoryFilter {
+            provider: Some("local".into()), method: Some("tools/call".into()),
+            ..AuditHistoryFilter::default()
+        });
+        assert!(history.available);
+        assert_eq!(history.lost, 0);
+        assert_eq!(history.records.len(), 2);
+        let status = history.records.iter().find(|r| r.tool_name.as_deref() == Some("agent_bridge_status")).unwrap();
+        assert_eq!(status.session_id.as_deref(), Some(sid));
+        assert_eq!(status.http_status, None);
+        let created = history.records.iter().find(|r| r.tool_name.as_deref() == Some("agent_bridge_context_create")).unwrap();
+        assert_eq!(created.context_id.as_deref(), context["context_id"].as_str());
+        assert!(created.mission_id.is_none());
+        assert!(!serde_json::to_string(&history).unwrap().contains(context["context_handle"].as_str().unwrap()));
+    }
+
+    #[test]
+    fn stdio_audit_disconnect_before_flush_never_admits_tentative_context() {
+        struct FailingWriter { flushes: usize }
+        impl io::Write for FailingWriter {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> { Ok(bytes.len()) }
+            fn flush(&mut self) -> io::Result<()> {
+                self.flushes += 1;
+                if self.flushes == 2 {
+                    return Err(io::Error::new(io::ErrorKind::BrokenPipe, "synthetic disconnect"));
+                }
+                Ok(())
+            }
+        }
+        use crate::audit_history::{AuditHistoryConfig, AuditHistoryFilter};
+        let (fixture, router) = mission_fixture();
+        let audit = Arc::new(RequestAudit::open_with_history_dir(
+            &fixture.0.join("history"), AuditHistoryConfig::default()).unwrap());
+        let input = format!("{INIT}\n{CREATE_CONTEXT}\n");
+        let error = serve_stdio_mcp(input.as_bytes(), FailingWriter { flushes: 0 }, &router, &audit).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::BrokenPipe);
+        let snapshot = serde_json::to_value(audit.snapshot()).unwrap();
+        assert_eq!(snapshot["in_flight"], 0);
+        let rows = snapshot["records"].as_array().unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[1]["provider"], "local");
+        assert_eq!(rows[1]["outcome"], "transport_error");
+        assert_eq!(rows[1]["error_code"], "request_interrupted");
+        assert!(rows[1]["http_status"].is_null());
+        assert!(rows[1].get("context_id").is_none() && rows[1].get("mission_id").is_none());
+        assert_eq!(rows[0]["session_id"], rows[1]["session_id"]);
+        let sessions = audit.sessions.snapshot("fixture", None, None).unwrap();
+        let session = &sessions["sessions"][0];
+        assert_eq!(session["request_count"], 1);
+        assert_eq!(session["in_flight"], 0);
+        assert_eq!(session["context_ids"], json!([]));
+        assert_eq!(session["tool_calls"], json!([]));
+        assert!(audit.flush_history(std::time::Duration::from_secs(2)));
+        let history = audit.query_history(&AuditHistoryFilter {
+            provider: Some("local".into()), method: Some("tools/call".into()),
+            ..AuditHistoryFilter::default()
+        });
+        assert!(history.available);
+        assert_eq!(history.lost, 0);
+        assert_eq!(history.records.len(), 1);
+        let refused = &history.records[0];
+        assert_eq!(refused.outcome, "transport_error");
+        assert!(refused.http_status.is_none() && refused.context_id.is_none() && refused.mission_id.is_none());
+    }
+
+    #[test]
+    fn stdio_audit_oversized_input_never_dispatches_or_admits_activity() {
+        let audit = Arc::new(RequestAudit::new().unwrap());
+        let input = vec![b'x'; agent_bridge_gateway::stdio::MAX_FRAME_BYTES + 1];
+        let mut output = Vec::new();
+        let error = serve_stdio_mcp(input.as_slice(), &mut output, &large_reply_router(), &audit).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(output.is_empty());
+        let snapshot = serde_json::to_value(audit.snapshot()).unwrap();
+        assert_eq!(snapshot["in_flight"], 0);
+        assert_eq!(snapshot["records"], json!([]));
+        assert_eq!(audit.sessions.snapshot("fixture", None, None).unwrap()["sessions"], json!([]));
     }
 
     #[tokio::test]

@@ -1,12 +1,12 @@
 use crate::native_config::AppConfig;
 use crate::native_tunnel::{ManagedTunnel, TunnelView};
 use agent_bridge_runtime::backend::{
-    self, BackendDescriptor, OperatorControl, OperatorRead, OperatorWrite, RunningWorkstation,
+    self, BackendDescriptor, OperatorControl, OperatorRead, OperatorWrite, RunningWorkstation, TunnelAuditEvent,
 };
 use serde_json::{json, Value};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 #[derive(Clone, Default)]
 pub struct NativeView {
@@ -100,8 +100,17 @@ impl NativeRuntime {
                 };
                 if let Some(config) = &config.tunnel {
                     let mut tunnel = ManagedTunnel::new(config.clone());
+                    let started = Instant::now();
                     tunnel.start();
-                    self.view.lock().unwrap_or_else(|e| e.into_inner()).tunnel = tunnel.snapshot();
+                    let snapshot = tunnel.snapshot();
+                    if let Some(running) = owned.backend.as_ref() {
+                        running.record_tunnel_event(if snapshot.child_running {
+                            TunnelAuditEvent::Started
+                        } else {
+                            TunnelAuditEvent::StartFailed
+                        }, started);
+                    }
+                    self.view.lock().unwrap_or_else(|e| e.into_inner()).tunnel = snapshot;
                     owned.tunnel = Some(tunnel);
                     self.log_tunnel();
                 }
@@ -136,7 +145,12 @@ impl NativeRuntime {
     }
     fn stop_tunnel(&self, owned: &mut OwnedNative) -> Result<(), String> {
         if let Some(tunnel) = owned.tunnel.as_mut() {
+            let started = Instant::now();
             let result = tunnel.stop();
+            if let Some(running) = owned.backend.as_ref() {
+                running.record_tunnel_event(if result.is_ok() { TunnelAuditEvent::Stopped }
+                    else { TunnelAuditEvent::CleanupFailed }, started);
+            }
             self.view.lock().unwrap_or_else(|e| e.into_inner()).tunnel = tunnel.snapshot();
             self.log_tunnel();
             result.map_err(|error| self.cleanup_error(error))?;
@@ -183,10 +197,21 @@ impl NativeRuntime {
         if self.snapshot().cleanup_failed { return false; }
         if !running.is_finished() {
             if self.closing.load(Ordering::Acquire) { return false; }
+            let started = Instant::now();
             let changed = owned.tunnel.as_mut().is_some_and(ManagedTunnel::tick);
             if changed {
-                self.view.lock().unwrap_or_else(|e| e.into_inner()).tunnel =
-                    owned.tunnel.as_ref().unwrap().snapshot();
+                let snapshot = owned.tunnel.as_ref().unwrap().snapshot();
+                let event = match snapshot.state {
+                    "running" => Some(TunnelAuditEvent::Started),
+                    "configuration-error" => Some(TunnelAuditEvent::StartFailed),
+                    "backoff" => Some(TunnelAuditEvent::Exited),
+                    "cleanup-failed" => Some(TunnelAuditEvent::CleanupFailed),
+                    _ => None,
+                };
+                if let (Some(running), Some(event)) = (owned.backend.as_ref(), event) {
+                    running.record_tunnel_event(event, started);
+                }
+                self.view.lock().unwrap_or_else(|e| e.into_inner()).tunnel = snapshot;
                 self.log_tunnel();
             }
             return changed;

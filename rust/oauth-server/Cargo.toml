@@ -7,6 +7,7 @@ publish = false
 description = "Gemini OAuth 2.1 compatibility server logic, without listener or proxy"
 
 [dependencies]
+hex = "0.4"
 agent-bridge-oauth-compat = { path = "../oauth-compat" }
 base64 = "0.23"
 fs2 = "0.4"

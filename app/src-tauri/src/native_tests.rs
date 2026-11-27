@@ -215,6 +215,17 @@ fn tunnel_hash_refusal_is_explicit_without_losing_native_backend() {
     assert_eq!(panel["tunnel"]["state"], "configuration-error");
     assert!(panel["tunnel"]["error"].as_str().unwrap().contains("SHA-256"));
     assert!(panel["tunnel"]["remoteReady"].is_null());
+    let diagnostics = runtime.native_runtime.read(
+        agent_bridge_runtime::backend::OperatorRead::Diagnostics).unwrap();
+    let audit = &diagnostics["mcp_request_audit"];
+    let records = audit["records"].as_array().unwrap();
+    let tunnel_event = records.iter().find(|record| record["method"] == "tunnel/start").unwrap();
+    assert_eq!(tunnel_event["outcome"], "lifecycle_error");
+    assert_eq!(tunnel_event["error_code"], "tunnel_start_failed");
+    assert!(tunnel_event["http_status"].is_null());
+    assert!(tunnel_event["provider"].is_null());
+    assert!(!audit.to_string().contains("fixture-tunnel.exe"));
+    assert!(!audit.to_string().contains("SHA-256"));
     drop(legacy_probe);
 }
 
@@ -427,4 +438,49 @@ fn native_tunnel_origin_refuses_other_resources_and_preserves_the_literal_target
             "a different or invalid identity must not become equivalent: {origin} => {target}");
     }
     assert!(!root.0.join("tunnel").exists());
+}
+
+#[test]
+fn native_quit_blocks_start_and_retains_owner_on_stop_timeout() {
+    use std::io::{BufRead, BufReader, Write};
+    use std::net::TcpStream;
+    use std::time::Duration;
+
+    let root = TestRoot::new();
+    let (runtime, _legacy_probe) = native_fixture(&root);
+    let panel = backend::start_or_restart_gateway(&runtime, backend::GatewayIntent::Start).unwrap();
+    let _cleanup = StopOwned(&runtime);
+    let port = panel["gateway"]["port"].as_u64().unwrap() as u16;
+    let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    stream.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+    write!(stream, "POST /mcp HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nContent-Type: application/json\r\nContent-Length: 10\r\nExpect: 100-continue\r\n\r\n").unwrap();
+    let mut reader = BufReader::new(stream);
+    let mut line = String::new();
+    reader.read_line(&mut line).unwrap();
+    assert!(line.contains("100 Continue"), "{line}");
+
+    runtime.native_runtime.set_closing(true);
+    let closing_panel = backend::get_panel_state(&runtime).unwrap();
+    assert_eq!(closing_panel["gateway"]["controls"]["canStart"], false);
+    assert_eq!(closing_panel["gateway"]["controls"]["canRestart"], false);
+    let refused_start = runtime.native_runtime.start(runtime.native_config.require().unwrap()).unwrap_err();
+    assert!(refused_start.contains("quitting"), "{refused_start}");
+
+    assert!(runtime.native_runtime.stop_with_timeout(Duration::from_millis(50)).is_err());
+    runtime.native_runtime.set_closing(false);
+    let incomplete = backend::get_panel_state(&runtime).unwrap();
+    let snapshot = runtime.native_runtime.snapshot();
+    assert!(snapshot.owned && snapshot.cleanup_failed);
+    assert_eq!(incomplete["gateway"]["controls"]["canStart"], false);
+    assert_eq!(incomplete["gateway"]["controls"]["canRestart"], false);
+    assert_eq!(incomplete["gateway"]["controls"]["canStop"], true);
+    assert!(backend::start_or_restart_gateway(&runtime, backend::GatewayIntent::Start).is_err());
+
+    drop(reader);
+    runtime.native_runtime.set_closing(true);
+    runtime.native_runtime.stop().unwrap();
+    let stopped = runtime.native_runtime.snapshot();
+    assert!(!stopped.owned && !stopped.running && !stopped.cleanup_failed);
+    let refused_after_stop = runtime.native_runtime.start(runtime.native_config.require().unwrap()).unwrap_err();
+    assert!(refused_after_stop.contains("quitting"), "{refused_after_stop}");
 }

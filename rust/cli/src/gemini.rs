@@ -1,7 +1,7 @@
 use crate::runtime::{self, Router as MissionRouter, RuntimeError, WebWorkstationCapabilities};
 use crate::session_profile::ProfileControl;
 use crate::operation_admission::OperationAdmission;
-use crate::request_audit::{ErrorCode, RequestAudit, RequestDetails, RequestObservation};
+use crate::request_audit::{ErrorCode, LifecycleEvent, OAuthEvent, RequestAudit, RequestDetails, RequestObservation, StartupObservation};
 use agent_bridge_desktop::DesktopProfile;
 use agent_bridge_http::modern::{response_status, ResponseMetadata};
 use agent_bridge_oauth_server::{
@@ -16,18 +16,20 @@ use serde_json::{json,Value};
 use std::io::{Read, Write};
 use std::path::{Path,PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::Semaphore;
 
 #[derive(Clone)]
 struct ExtensionGuard {
     settings: PathBuf,
+    scope: Option<crate::extensions::ExtensionScope>,
     // All effective local server grants and parameter/descriptor pins.
     // This is the authority of each separately authorized OAuth identity.
     authority: serde_json::Value,
 }
 
 struct UnifiedRoute {
+    catalogue: crate::catalogue_selection::CatalogueSelection,
     identity: CapabilityIdentity,
     router: Arc<MissionRouter>,
     extension_guard: Option<ExtensionGuard>,
@@ -68,6 +70,15 @@ struct Gateway {
 }
 
 impl Gateway {
+    fn invalidate_extension_results(&self){
+        if let Some(scope)=self.extension_guard.as_ref().and_then(|guard|guard.scope.as_ref()){
+            scope.invalidate_results();
+        }
+        if let Some(scope)=self.unified.as_ref().and_then(|route|route.extension_guard.as_ref())
+            .and_then(|guard|guard.scope.as_ref()){
+            scope.invalidate_results();
+        }
+    }
     fn observe_identity(&self, audit: &RequestDetails, identity: &AuthorizedIdentity) -> crate::client_sessions::Client {
         let digest = match &identity.capability {
             CapabilityIdentity::Legacy => Some(self.legacy_catalogue_sha256.as_ref()),
@@ -113,6 +124,33 @@ fn oauth_refusal_code(body: &[u8]) -> &'static str {
         Some("connector_busy") => "connector_busy",
         Some("oauth_state_uncertain") => "oauth_state_uncertain",
         _ => "oauth_refused",
+    }
+}
+
+// Endpoint refusals have additional fixed OAuth error codes. Keep MCP's
+// historical classification unchanged, and never copy an unknown error.
+fn oauth_endpoint_refusal_code(body: &[u8]) -> &'static str {
+    let value = serde_json::from_slice::<Value>(body).ok();
+    match value.as_ref().and_then(|value| value.get("error")).and_then(Value::as_str) {
+        Some("invalid_client") => "invalid_client",
+        Some("invalid_client_metadata") => "invalid_client_metadata",
+        Some("invalid_redirect_uri") => "invalid_redirect_uri",
+        Some("confidential_client_required") => "confidential_client_required",
+        Some("local_enrollment_required") => "local_enrollment_required",
+        Some("registration_limit") => "registration_limit",
+        Some("invalid_client_or_redirect") => "invalid_client_or_redirect",
+        Some("pkce_required") => "pkce_required",
+        Some("state_required") => "state_required",
+        Some("invalid_scope") => "invalid_scope",
+        Some("invalid_target") => "invalid_target",
+        Some("authorization_limit") => "authorization_limit",
+        Some("approval_invalid") => "approval_invalid",
+        Some("invalid_grant") => "invalid_grant",
+        Some("unsupported_grant_type") => "unsupported_grant_type",
+        Some("unsupported_content_type") => "unsupported_content_type",
+        Some("request_too_large") => "request_too_large",
+        Some("duplicate_parameter") => "duplicate_parameter",
+        _ => oauth_refusal_code(body),
     }
 }
 
@@ -163,7 +201,10 @@ fn adapt_chatgpt_file_read_result(frame: &str, routed: &str) -> Option<String> {
 
 async fn handle(State(app): State<Gateway>, request: Request) -> Response {
     let is_mcp = request.uri().path() == "/mcp";
-    let observation = RequestObservation::new(is_mcp.then(|| Arc::clone(&app.request_audit)));
+    let observation = match OAuthEvent::from_path(request.uri().path()) {
+        Some(event) => RequestObservation::oauth(Arc::clone(&app.request_audit), event),
+        None => RequestObservation::new(is_mcp.then(|| Arc::clone(&app.request_audit))),
+    };
     let response = handle_request(app, request, is_mcp, observation.details()).await;
     observation.complete(response.status());
     response
@@ -197,7 +238,7 @@ async fn handle_request(app: Gateway, request: Request, is_mcp: bool, audit: &Re
         let Ok(_effect)=app.effects.begin() else {
             return refuse(audit, StatusCode::SERVICE_UNAVAILABLE, "workstation_stopping", "workstation is stopping");
         };
-        audit.observe_frame(&bytes);
+        if is_mcp { audit.observe_frame(&bytes); }
         let (Ok(auth),Ok(origin),Ok(content_type)) = (header(&parts.headers,"authorization"),
             header(&parts.headers,"origin"),header(&parts.headers,"content-type")) else {
             return refuse(audit, StatusCode::BAD_REQUEST, "invalid_http_headers", "invalid HTTP headers");
@@ -206,8 +247,13 @@ async fn handle_request(app: Gateway, request: Request, is_mcp: bool, audit: &Re
             return refuse(audit, StatusCode::SERVICE_UNAVAILABLE, "oauth_unavailable", "OAuth unavailable");
         };
         let target = parts.uri.path_and_query().map(|p|p.as_str()).unwrap_or("/");
-        let action = oauth.handle_http(HttpRequest {method:parts.method.as_str(),target,authorization:auth,
-            origin,content_type,body:&bytes});
+        // The OAuth endpoint calls this observer only after authenticating the client.
+        // Fence before its durable mutation so uncertain rotation cannot revive old results.
+        let action = oauth.handle_http_observed(HttpRequest {method:parts.method.as_str(),target,authorization:auth,
+            origin,content_type,body:&bytes}, |identity| {
+                audit.observe_oauth_client(&identity);
+                app.invalidate_extension_results();
+            });
         match action {
             HttpAction::Reply(output) => {
                 if is_mcp {
@@ -215,10 +261,19 @@ async fn handle_request(app: Gateway, request: Request, is_mcp: bool, audit: &Re
                     // The limiter can reject a valid client before returning McpAuthorized.
                     if output.status == 429 && code == "request_limit" {
                         if let Ok(identity) = oauth.authorize_mcp(auth) {
-                            app.observe_identity(audit, &identity);
+                            let client = app.observe_identity(audit, &identity);
+                            if let Some(session_id) = app.request_audit.sessions.session_id(&client) {
+                                audit.observe_session_id(session_id);
+                            }
                         }
                     }
                     audit.refuse(ErrorCode::Named(code));
+                } else if OAuthEvent::from_path(parts.uri.path()).is_some() {
+                    if output.status >= 400 {
+                        audit.refuse(ErrorCode::Named(oauth_endpoint_refusal_code(&output.body)));
+                    } else {
+                        audit.routed(ResponseMetadata::default());
+                    }
                 }
                 let mut response = Response::builder().status(output.status);
                 for (name,value) in output.headers {
@@ -254,12 +309,31 @@ async fn handle_request(app: Gateway, request: Request, is_mcp: bool, audit: &Re
                 // Select the complete immutable view while authorization is
                 // still verified. A shared name never borrows another view's
                 // schema or handler, and no remote parameter selects this view.
-                let unified = if first.capability.is_legacy() { None } else {
+                let unified = if first.capability.is_legacy() {
+                    // A narrow startup never borrows a historical full
+                    // Workstation router, even with a valid legacy grant.
+                    if app.unified.as_ref().is_some_and(|route| !route.catalogue.is_unified()) {
+                        return refuse(audit, StatusCode::UNAUTHORIZED, "capability_unavailable", "capability unavailable");
+                    }
+                    None
+                } else {
                     let Some(selected) = app.unified.as_ref().filter(|selected|
                         app.audience == Audience::Workstation && selected.identity == first.capability)
                     else { return refuse(audit, StatusCode::UNAUTHORIZED, "capability_unavailable", "capability unavailable"); };
                     Some(Arc::clone(selected))
                 };
+                // Capture only the hash of the exact authenticated bearer,
+                // not the shared OAuth client id. Capture the profile/epoch
+                // while this authorization is still serialized with revoke.
+                let cache_scope=if let Some(route)=unified.as_ref(){
+                    route.extension_guard.as_ref()
+                }else{app.extension_guard.as_ref()};
+                let cache_request=if app.audience==Audience::Workstation{
+                    use sha2::{Digest,Sha256};
+                    auth.and_then(|header|header.strip_prefix("Bearer "))
+                        .and_then(|bearer|cache_scope.and_then(|guard|guard.scope.as_ref())
+                            .and_then(|scope|scope.cache_request(Sha256::digest(bearer.as_bytes()).into())))
+                }else{None};
                 // Authorization applies to this admitted request. No slow
                 // filesystem, browser or UI handler holds the global OAuth lock.
                 drop(oauth);
@@ -279,8 +353,12 @@ async fn handle_request(app: Gateway, request: Request, is_mcp: bool, audit: &Re
                 // the SAME loaded registry, after their live-profile check.
                 if let Some(guard)=extension_guard {
                     if app.audience!=Audience::Workstation
-                        || !runtime::workstation_extension_authority(&guard.settings)
-                            .is_ok_and(|current|current==guard.authority)
+                        || !match &guard.scope {
+                            Some(scope)=>scope.current_registry(&guard.settings).is_ok_and(|current|
+                                runtime::registry_matches_authority(&current,&guard.authority).unwrap_or(false)),
+                            None=>runtime::workstation_extension_authority(&guard.settings)
+                                .is_ok_and(|current|current==guard.authority),
+                        }
                     {
                         return refuse(audit, StatusCode::FORBIDDEN, "extension_authority_changed", "workstation extension authority changed");
                     }
@@ -299,14 +377,18 @@ async fn handle_request(app: Gateway, request: Request, is_mcp: bool, audit: &Re
                             .body(Body::from(body)).expect("fixed MCP refusal");
                     }
                 };
-                let routed = app.request_audit.sessions.dispatch(client, router, frame, response_limit, || {
-                    let routed = router.handle_str(frame);
+                let (routed, session_id, activity) = app.request_audit.sessions.dispatch_observed(client, router, frame, response_limit, || {
+                    let routed = crate::extensions::with_authenticated_cache(cache_request, || router.handle_str(frame));
                     if app.audience == Audience::Workstation && first.provider == ConnectorClient::ChatGpt {
                         routed.map(|result| adapt_chatgpt_file_read_result(frame, &result).unwrap_or(result))
                     } else {
                         routed
                     }
                 });
+                if let Some(session_id) = session_id {
+                    audit.observe_session_id(session_id);
+                }
+                audit.observe_activity(activity);
                 match routed {
                     Some(result) if result.len() <= response_limit => {
                         let metadata = ResponseMetadata::read(&result);
@@ -338,16 +420,19 @@ pub fn serve(database: &Path, state: &Path, origin: &str, port: u16) -> Result<(
         let oauth = OAuthServer::open(OAuthConfig {state_dir:state.to_owned(),public_origin:origin.to_owned(),audience:Audience::Missions})?;
         let missions = runtime::missions(database)?;
         // This listener's audit ring is reserved for local diagnostics in issue #160.
-        let request_audit = Arc::new(RequestAudit::new()?);
+        let request_audit = Arc::new(RequestAudit::open_with_optional_history_dir(
+            Some(&crate::audit_history::default_history_dir(state)),
+        )?);
         let legacy_catalogue_sha256 = router_catalogue_digest(&missions)?;
         let app = Gateway { oauth:Arc::new(Mutex::new(oauth)),router:Arc::new(missions),
-            legacy_catalogue_sha256, request_audit,
+            legacy_catalogue_sha256, request_audit: Arc::clone(&request_audit),
             audience:Audience::Missions,expected_resource:None,
             public_host,loopback_host:format!("127.0.0.1:{port}"),requests:Arc::new(Semaphore::new(32)),
             effects:OperationAdmission::default(),
             extension_guard:None, unified:None };
         let router = axum::Router::new().fallback(handle).with_state(app);
         axum::serve(listener,router).with_graceful_shutdown(async { let _ = tokio::signal::ctrl_c().await; }).await?;
+        request_audit.flush_history(Duration::from_secs(2));
         Ok(())
     })
 }
@@ -493,12 +578,14 @@ pub fn serve_project_reads(
         // public network adapter or advertise anonymous workspace tools.
         let listener=agent_bridge_http::bind_loopback(port).await?;
         // This listener's audit ring is reserved for local diagnostics in issue #160.
-        let request_audit = Arc::new(RequestAudit::new()?);
+        let request_audit = Arc::new(RequestAudit::open_with_optional_history_dir(
+            Some(&crate::audit_history::default_history_dir(settings_dir)),
+        )?);
         let legacy_catalogue_sha256 = router_catalogue_digest(&reader)?;
         let app=Gateway{
             oauth:Arc::new(Mutex::new(oauth)),
             router:Arc::new(reader),
-            legacy_catalogue_sha256, request_audit,
+            legacy_catalogue_sha256, request_audit: Arc::clone(&request_audit),
             audience:Audience::Workstation,
             expected_resource:Some(resource),
             public_host:host,
@@ -511,6 +598,7 @@ pub fn serve_project_reads(
         axum::serve(listener,router)
             .with_graceful_shutdown(async{let _=tokio::signal::ctrl_c().await;})
             .await?;
+        request_audit.flush_history(Duration::from_secs(2));
         Ok(())
     })
 }
@@ -980,13 +1068,25 @@ impl PreparedWorkstation {
         }
     }
     pub(crate) fn cleanup(&mut self) -> Result<(), RuntimeError> {
-        self.effects.close();
-        if self.requests.available_permits()!=32 || !self.effects.is_drained() {
-            return Err("WORKSTATION_EFFECT_DRAIN_PENDING".into());
+        let started = Instant::now();
+        let already_complete = self.cleanup_complete;
+        let result = (|| {
+            self.effects.close();
+            if self.requests.available_permits()!=32 || !self.effects.is_drained() {
+                return Err("WORKSTATION_EFFECT_DRAIN_PENDING".into());
+            }
+            cleanup_resources(&mut self.supervisors,&mut self.providers)?;
+            self.cleanup_complete=true;
+            Ok(())
+        })();
+        if !already_complete {
+            if let Some(audit) = &self.ui_config.request_audit {
+                audit.record_lifecycle(if result.is_ok() { LifecycleEvent::ServiceStopped }
+                    else { LifecycleEvent::ServiceStopFailed }, started);
+                audit.flush_history(Duration::from_secs(2));
+            }
         }
-        cleanup_resources(&mut self.supervisors,&mut self.providers)?;
-        self.cleanup_complete=true;
-        Ok(())
+        result
     }
 }
 
@@ -1018,13 +1118,20 @@ impl Drop for PreparedWorkstation {
             #[cfg(windows)]
             _project_pin:self._project_pin.take(),
         })));
+        let audit = self.ui_config.request_audit.clone();
         let cleanup:crate::provider_owner::Cleanup=Arc::new(move || {
             let mut slot=retained.lock().unwrap_or_else(|error|error.into_inner());
             let Some(owner)=slot.as_mut() else {return Ok(());};
             if owner.requests.available_permits()!=32 || !owner.effects.is_drained() {
                 return Err("WORKSTATION_EFFECT_DRAIN_PENDING".into());
             }
-            cleanup_resources(&mut owner.supervisors,&mut owner.providers)?;
+            let started = Instant::now();
+            let result = cleanup_resources(&mut owner.supervisors,&mut owner.providers);
+            if let Some(audit) = &audit {
+                audit.record_lifecycle(if result.is_ok() { LifecycleEvent::ServiceStopped }
+                    else { LifecycleEvent::ServiceStopFailed }, started);
+            }
+            result?;
             slot.take();
             Ok(())
         });
@@ -1033,6 +1140,7 @@ impl Drop for PreparedWorkstation {
 }
 
 pub(crate) async fn prepare_workstation(mut request: WorkstationStart<'_>) -> Result<PreparedWorkstation, RuntimeError> {
+    let started = Instant::now();
     static PREPARATION:tokio::sync::Mutex<()>=tokio::sync::Mutex::const_new(());
     let _preparation=PREPARATION.lock().await;
     crate::provider_owner::ProviderOwner::reconcile_rollbacks()?;
@@ -1189,6 +1297,11 @@ pub(crate) async fn prepare_workstation(mut request: WorkstationStart<'_>) -> Re
     };
     let oauth=Arc::new(Mutex::new(oauth_owner));
     let mut supervisors = StartupSupervisors { items: Vec::new(), providers: Vec::new(), oauth: Arc::clone(&oauth) };
+    // Only after local scope qualification and exclusive OAuth ownership.
+    let request_audit = Arc::new(RequestAudit::open_with_optional_history_dir(
+        Some(&crate::audit_history::default_history_dir(request.settings_dir)),
+    )?);
+    let startup = StartupObservation::new(Arc::clone(&request_audit), started);
 
     // The initial empty-state observation was outside the OAuth lock.
     // Recheck now under exclusive ownership: another OAuth grant/state
@@ -1233,6 +1346,16 @@ pub(crate) async fn prepare_workstation(mut request: WorkstationStart<'_>) -> Re
         }
         manifest.verify()?;
     }
+    let mut expected_base=expected_base;
+    if let Some(manifest)=unified_manifest.as_ref() {
+        let catalogue=manifest.selection.catalogue;
+        if !catalogue.is_unified() {
+            // The existing immutable startup marker also binds the choice:
+            // switching back to the legacy/full view with the same state is
+            // refused, not an authorization upgrade or cache reuse.
+            expected_base["catalogue_selection"]=json!(catalogue.name());
+        }
+    }
     let expected_base=if unified_manifest.is_some() {
         legacy_base_for_unified(request.workstation_state,genuinely_fresh,&expected_base)?
     }else{expected_base};
@@ -1244,13 +1367,18 @@ pub(crate) async fn prepare_workstation(mut request: WorkstationStart<'_>) -> Re
 
     // Assemble ONLY authorized, executable tools, then seal the EXACT
     // published catalog (names + schemas) before binding the listener.
-    let runtime::WorkstationRuntime { router: tools, database }=runtime::workstation_router(
+    let runtime::WorkstationRuntime {
+        router: tools,
+        database,
+        extension_scope: mut ui_extension_status,
+    } = runtime::workstation_router(
         &qualified,request.database_boundary,request.workstation_state,
         request.missions_state,request.settings_dir,request.lifecycle_dir,
         request.permitted,local_approval,docs_approval,learn_approval,
         #[cfg(any(windows, unix))] native_chrome_approval,
         &mut supervisors.items,extension_scope.as_ref(),active_profile.clone(),
     )?;
+    let legacy_extension_status=ui_extension_status.clone();
     let scope=workstation_scope(&expected_base,&tools)?;
     bind_workstation_scope(request.workstation_state,genuinely_fresh,&scope)?;
     let legacy_count=tools.published_tools().len();
@@ -1274,11 +1402,16 @@ pub(crate) async fn prepare_workstation(mut request: WorkstationStart<'_>) -> Re
             .bind_capability_manifest(&manifest.authority_bytes()?)?;
         capability_selection=manifest.summary()?;
         database=assembled.database;
+        let route_extension_scope = assembled.extension_scope;
+        if let Some(unified_scope) = route_extension_scope.as_ref() {
+            ui_extension_status = Some(unified_scope.clone());
+        }
         let identity=manifest.identity()?;
         let guard=Arc::clone(&manifest);
         Some(Arc::new(UnifiedRoute {
+            catalogue:manifest.selection.catalogue,
             identity,router:Arc::new(assembled.router),
-            extension_guard:Some(ExtensionGuard {settings:request.settings_dir.to_owned(),authority}),
+            extension_guard:Some(ExtensionGuard {settings:request.settings_dir.to_owned(),authority,scope:route_extension_scope}),
             manifest_guard:Arc::new(move ||guard.verify()),
             response_permits:Arc::new(Semaphore::new(2)),
         }))
@@ -1289,7 +1422,6 @@ pub(crate) async fn prepare_workstation(mut request: WorkstationStart<'_>) -> Re
     let listener=agent_bridge_http::bind_loopback(request.port).await?;
     let requests = Arc::new(Semaphore::new(32));
     let effects=OperationAdmission::default();
-    let request_audit = Arc::new(RequestAudit::new()?);
     let legacy_catalogue_sha256 = router_catalogue_digest(&tools)?;
     let app=Gateway{
         oauth:Arc::clone(&oauth),router:Arc::new(tools), unified,
@@ -1299,7 +1431,7 @@ pub(crate) async fn prepare_workstation(mut request: WorkstationStart<'_>) -> Re
         requests:Arc::clone(&requests),
         effects:effects.clone(),
         extension_guard:extension_scope.map(|authority|ExtensionGuard{
-            settings:request.settings_dir.to_owned(),authority,
+            settings:request.settings_dir.to_owned(),authority,scope:legacy_extension_status,
         }),
     };
     let service=axum::Router::new().fallback(handle).with_state(app);
@@ -1314,7 +1446,9 @@ pub(crate) async fn prepare_workstation(mut request: WorkstationStart<'_>) -> Re
         open_browser: request.ui_open,
         capability_selection: Some(capability_selection),
         request_audit: Some(request_audit),
+        extension_status: ui_extension_status,
     };
+    startup.complete();
     Ok(PreparedWorkstation {
         listener: Some(listener), requests, effects, service, profile: active_profile, database,
         ui_config, _oauth: oauth, supervisors: std::mem::take(&mut supervisors.items),

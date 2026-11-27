@@ -36,11 +36,44 @@ pub fn serve(
 /// Serves an MCP stdio stream with explicit per-frame byte limits for input
 /// and output payloads (excluding line terminators).
 pub fn serve_with_limits(
+    reader: impl BufRead,
+    writer: impl Write,
+    max_input_bytes: usize,
+    max_output_bytes: usize,
+    mut dispatch: impl FnMut(&str) -> Option<String>,
+) -> io::Result<()> {
+    serve_observed_with_limits(reader, writer, max_input_bytes, max_output_bytes,
+        |line| (dispatch(line), ()), |(), _| {})
+}
+
+/// Completion of one bounded input frame, not an acknowledgement by the client.
+/// Written means the complete response and its newline were flushed successfully.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FrameCompletion {
+    Written,
+    Silent,
+    OutputTooLarge,
+    OutputFailed,
+}
+
+/// Same framing and limits as serve; retain a caller-owned receipt until the
+/// response has actually been flushed. No callback for rejected input frames.
+pub fn serve_observed<T>(
+    reader: impl BufRead,
+    writer: impl Write,
+    dispatch: impl FnMut(&str) -> (Option<String>, T),
+    complete: impl FnMut(T, FrameCompletion),
+) -> io::Result<()> {
+    serve_observed_with_limits(reader, writer, MAX_FRAME_BYTES, MAX_FRAME_BYTES, dispatch, complete)
+}
+
+fn serve_observed_with_limits<T>(
     mut reader: impl BufRead,
     mut writer: impl Write,
     max_input_bytes: usize,
     max_output_bytes: usize,
-    mut dispatch: impl FnMut(&str) -> Option<String>,
+    mut dispatch: impl FnMut(&str) -> (Option<String>, T),
+    mut complete: impl FnMut(T, FrameCompletion),
 ) -> io::Result<()> {
     let mut line_buf = Vec::new();
 
@@ -61,8 +94,16 @@ pub fn serve_with_limits(
             continue;
         }
 
-        if let Some(response) = dispatch(line) {
-            write_bounded_line(&mut writer, &response, max_output_bytes)?;
+        let (response, receipt) = dispatch(line);
+        if let Some(response) = response {
+            let result = write_bounded_line(&mut writer, &response, max_output_bytes);
+            let completion = if result.is_ok() { FrameCompletion::Written }
+                else if response.len() > max_output_bytes { FrameCompletion::OutputTooLarge }
+                else { FrameCompletion::OutputFailed };
+            complete(receipt, completion);
+            result?;
+        } else {
+            complete(receipt, FrameCompletion::Silent);
         }
     }
 }

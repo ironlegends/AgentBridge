@@ -13,6 +13,11 @@ use tokio::task::JoinHandle;
 
 pub type BackendError = Box<dyn std::error::Error + Send + Sync>;
 
+/// A detached native panel can validate, but it owns no live registry.
+pub fn validate_extension_reload(settings: &Path) -> Result<Value, BackendError> {
+    crate::extensions::reload_from_operator_ui(settings, None)
+}
+
 /// Local launch configuration. It is neither deserializable nor obtainable
 /// from MCP; the native host supplies the same validated arguments as the CLI.
 pub struct WorkstationConfig {
@@ -100,9 +105,22 @@ pub struct ShutdownReport { pub clean: bool }
 #[derive(Serialize)]
 pub struct OperatorReply { pub status: u16, pub body: Value }
 #[derive(Clone, Copy)]
-pub enum OperatorRead { Overview, Profile, Missions, OAuth, Extensions, Skills, Diagnostics, Sessions }
+pub enum OperatorRead {
+    Overview, Profile, Missions, OAuth, Extensions, Skills, Diagnostics, Sessions,
+    SessionHistory { boot: u128, session: u128 },
+}
+
+impl OperatorRead {
+    pub fn session_history(boot: &str, session: &str) -> Option<Self> {
+        fn parse(id: &str) -> Option<u128> {
+            if !crate::audit_history::is_opaque_hex_id(id, 32) { return None; }
+            u128::from_str_radix(id, 16).ok()
+        }
+        Some(Self::SessionHistory { boot: parse(boot)?, session: parse(session)? })
+    }
+}
 #[derive(Clone, Copy)]
-pub enum OperatorWrite { SetProfile, OAuthEnroll, OAuthApprove, ExtensionsDecide, SkillsAction }
+pub enum OperatorWrite { SetProfile, OAuthEnroll, OAuthApprove, ExtensionsDecide, ExtensionsTest, ExtensionsReload, SkillsAction, CopyHandoff }
 
 struct OperatorShared {
     accepting: AtomicBool,
@@ -156,6 +174,17 @@ impl Drop for StopOnServerExit {
     }
 }
 
+/// Generation-bound local tunnel observations. No arbitrary strings or
+/// process details can be submitted to the request audit.
+#[derive(Clone, Copy)]
+pub enum TunnelAuditEvent {
+    Started,
+    StartFailed,
+    Exited,
+    CleanupFailed,
+    Stopped,
+}
+
 pub struct RunningWorkstation {
     descriptor: BackendDescriptor,
     operator: OperatorControl,
@@ -165,6 +194,19 @@ pub struct RunningWorkstation {
     server_error: Option<String>,
 }
 impl RunningWorkstation {
+    pub fn record_tunnel_event(&self, event: TunnelAuditEvent, started: std::time::Instant) {
+        use crate::request_audit::LifecycleEvent;
+        let Some(audit) = self.owner.as_ref().and_then(|owner| owner.ui_config.request_audit.as_ref())
+        else { return; };
+        audit.record_lifecycle(match event {
+            TunnelAuditEvent::Started => LifecycleEvent::TunnelStarted,
+            TunnelAuditEvent::StartFailed => LifecycleEvent::TunnelStartFailed,
+            TunnelAuditEvent::Exited => LifecycleEvent::TunnelExited,
+            TunnelAuditEvent::CleanupFailed => LifecycleEvent::TunnelCleanupFailed,
+            TunnelAuditEvent::Stopped => LifecycleEvent::TunnelStopped,
+        }, started);
+    }
+
     pub fn descriptor(&self) -> &BackendDescriptor { &self.descriptor }
     pub fn operator(&self) -> OperatorControl { self.operator.clone() }
 

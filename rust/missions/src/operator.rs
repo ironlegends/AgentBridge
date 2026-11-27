@@ -110,6 +110,8 @@ pub fn inspect_session_contexts(
         })?;
         for mission in mission_rows {
             let (mission_id, mut view) = mission?;
+            view["copy_handoff"] = json!(crate::handoff::copy_available(&tx, &mission_id,
+                view["revision"].as_i64().unwrap_or(0), Some(id)));
             let size = serde_json::to_vec(&view)?.len() + 1;
             if size > remaining { break; }
             remaining -= size;
@@ -201,7 +203,9 @@ pub fn inspect_operator_snapshot(conn: &Connection, limit: i64) -> Result<Value>
         for cp in cp_rows {
             recent_checkpoints.push(cp?);
         }
+        let copy_handoff = crate::handoff::copy_available(conn, &mission_id, revision, None);
         missions.push(json!({
+            "copy_handoff": copy_handoff,
             "mission_id": mission_id,
             "goal": goal,
             "status": status,
@@ -299,7 +303,7 @@ pub fn inspect_operator_snapshot(conn: &Connection, limit: i64) -> Result<Value>
         }
     }
 
-    Ok(json!({
+    let mut result = json!({
         "schema_version": SCHEMA_VERSION,
         "mission_counts": {
             "total": total_missions,
@@ -312,5 +316,13 @@ pub fn inspect_operator_snapshot(conn: &Connection, limit: i64) -> Result<Value>
         "total_task_rooms": total_task_rooms,
         "task_rooms": task_rooms,
         "task_room_contexts": task_room_contexts,
-    }))
+    });
+    // Historical clients keep their previous shape when there are no attempts.
+    // A broken attempt ledger must not hide the rest of the mission view.
+    match crate::attempts::Coordinator::default().operator_snapshot(conn, limit.min(100)) {
+        Ok(attempts) if !attempts.is_empty() => { result["attempts"] = json!(attempts); }
+        Err(_) => { result["attempts_unavailable"] = json!(true); }
+        _ => {}
+    }
+    Ok(result)
 }

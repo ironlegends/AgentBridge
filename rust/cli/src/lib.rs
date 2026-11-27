@@ -41,6 +41,8 @@ pub(crate) fn write_private(path: impl AsRef<std::path::Path>, bytes: impl AsRef
 mod elevation;
 pub mod backend;
 pub(crate) mod capability_manifest;
+mod catalogue_selection;
+mod attempt_maintenance;
 pub(crate) mod unified_core;
 pub(crate) mod operation_admission;
 pub(crate) mod database_binding;
@@ -51,8 +53,10 @@ pub(crate) mod browser_owned;
 mod browser_docs;
 mod extensions;
 mod gemini;
+pub(crate) mod audit_history;
 mod client_sessions;
 mod request_audit;
+mod audit_cli;
 mod lifecycle;
 pub(crate) mod owned_children;
 pub(crate) mod provider_owner;
@@ -86,7 +90,7 @@ pub(crate) fn warn_deprecated(option: &str) {
     eprintln!("agent-bridge: {option} is deprecated since 2.1.0 and will be removed in 3.0.0");
 }
 
-const USAGE: &str = "agent-bridge start [--state-dir <directory>] [--database <path>] [--port <number>]\nagent-bridge stop [--state-dir <directory>]\nagent-bridge web open <private-directory> <chatgpt|gemini> <mission-id> <subtask-id> <ChatGPT-project-URL|Gemini-notebook-URL>\nagent-bridge import <database-path> <task-room.json> [--historical-source-provider <provider>]\nagent-bridge settings init <private-directory>\nagent-bridge oauth enroll <private-oauth-state> <https-origin> <missions|workstation>\nagent-bridge oauth requests <private-oauth-state> <https-origin> <missions|workstation>\nagent-bridge oauth approve <private-oauth-state> <https-origin> <missions|workstation> <request-id> <exact-callback-from-client-interface>\nagent-bridge workspace inspect <absolute-project-directory> [--git-revision <database> <private-settings-directory>]\nagent-bridge gemini serve <database> <private-state> <https-origin> <loopback-port>\nagent-bridge gemini project-read <db-boundary> <workstation-oauth-state> <https-workstation-origin> <loopback-port> --read-project <absolute-project> --missions-state <missions-oauth-state> --missions-origin <https-missions-origin> --settings-dir <private-settings-directory> --lifecycle-dir <private-lifecycle-directory>\nagent-bridge gemini workstation <db-boundary> <NEW-private-workstation-oauth-state> <DISTINCT-https-workstation-origin> <loopback-port> --project <absolute-project> --profile <read-only|workspace-write|full-control|fully-unlocked> --missions-state <missions-oauth-state> --missions-origin <https-missions-origin> --settings-dir <private-settings-directory> --lifecycle-dir <private-lifecycle-directory> [--enable-task-rooms] [--enable-settings-tools] [--enable-processes] [--unified-v1] [--ui-port <port> [--ui-open]] [--local-window-read <dedicated-desktop|macos|x11:N> <absolute-executable> <class-or-bundle-id> <exact-title>] [--local-doc-page <relative-html-or-markdown> ... | --local-learn-url <exact-Microsoft-Learn-HTTPS-URL> | --local-chrome-page <project-relative-html> ... [--local-chrome-origin https://learn.microsoft.com]]\nagent-bridge extensions describe <private-directory> <server> <tool>\nagent-bridge extensions refresh-check <private-directory> <mcp_docs|microsoft_learn|stdio-server>\nagent-bridge extensions requests <private-directory>\nagent-bridge extensions request <private-directory> <request-id>\nagent-bridge extensions approve <private-directory> <request-id> [<request-id>...]\nagent-bridge extensions refuse <private-directory> <request-id>\nagent-bridge extensions compact <private-directory>\nagent-bridge extensions forget-absent <private-directory> <server-name>\nagent-bridge extensions import <private-directory> <mcp-json-path> [--inherit-path <stdio-server>]...\nagent-bridge db <inspect|init|migrate> <database-path>\nagent-bridge stdio <database-path> [--workspace <directory> | --write-workspace <directory>] [--settings <private-directory>] [--ui-port <port> --ui-session-file <private-json-path>]\nagent-bridge stdio <database-path> --workspace <project> --local-doc-page <relative-html-or-markdown> [--local-doc-page <relative-html-or-markdown>]...\nagent-bridge stdio <database-path> --workspace <project> --local-window-read <dedicated-desktop|macos|x11:N> <absolute-executable> <class-or-bundle-id> <exact-title>\nagent-bridge stdio <database-path> --workspace <project> --local-learn-url <exact-Microsoft-Learn-HTTPS-URL>\nagent-bridge stdio <database-path> --workspace <project> --local-chrome-page <project-relative-html> [--local-chrome-page <project-relative-html>...] [--local-chrome-origin https://learn.microsoft.com]\nagent-bridge serve <database-path> --port <number> [--ui-port <port> --ui-session-file <private-json-path>]\nagent-bridge ui [--port <number>] [--database <path>] [--settings-dir <dir>] [--oauth-state <dir> --oauth-origin <https-origin> --oauth-audience <missions|workstation>] [--project <dir>] [--open]";
+const USAGE: &str = "agent-bridge start [--state-dir <directory>] [--database <path>] [--port <number>]\nagent-bridge stop [--state-dir <directory>]\nagent-bridge web open <private-directory> <chatgpt|gemini> <mission-id> <subtask-id> <ChatGPT-project-URL|Gemini-notebook-URL>\nagent-bridge import <database-path> <task-room.json> [--historical-source-provider <provider>]\nagent-bridge settings init <private-directory>\nagent-bridge oauth enroll <private-oauth-state> <https-origin> <missions|workstation>\nagent-bridge oauth requests <private-oauth-state> <https-origin> <missions|workstation>\nagent-bridge oauth approve <private-oauth-state> <https-origin> <missions|workstation> <request-id> <exact-callback-from-client-interface>\nagent-bridge workspace inspect <absolute-project-directory> [--git-revision <database> <private-settings-directory>]\nagent-bridge gemini serve <database> <private-state> <https-origin> <loopback-port>\nagent-bridge gemini project-read <db-boundary> <workstation-oauth-state> <https-workstation-origin> <loopback-port> --read-project <absolute-project> --missions-state <missions-oauth-state> --missions-origin <https-missions-origin> --settings-dir <private-settings-directory> --lifecycle-dir <private-lifecycle-directory>\nagent-bridge gemini workstation <db-boundary> <NEW-private-workstation-oauth-state> <DISTINCT-https-workstation-origin> <loopback-port> --project <absolute-project> --profile <read-only|workspace-write|full-control|fully-unlocked> --missions-state <missions-oauth-state> --missions-origin <https-missions-origin> --settings-dir <private-settings-directory> --lifecycle-dir <private-lifecycle-directory> [--enable-task-rooms] [--enable-settings-tools] [--enable-processes] [--unified-v1] [--ui-port <port> [--ui-open]] [--local-window-read <dedicated-desktop|macos|x11:N> <absolute-executable> <class-or-bundle-id> <exact-title>] [--local-doc-page <relative-html-or-markdown> ... | --local-learn-url <exact-Microsoft-Learn-HTTPS-URL> | --local-chrome-page <project-relative-html> ... [--local-chrome-origin https://learn.microsoft.com]]\nagent-bridge extensions describe <private-directory> <server> <tool>\nagent-bridge extensions refresh-check <private-directory> <server>\nagent-bridge extensions reload <private-directory>\nagent-bridge extensions requests <private-directory>\nagent-bridge extensions request <private-directory> <request-id>\nagent-bridge extensions approve <private-directory> <request-id> [<request-id>...]\nagent-bridge extensions refuse <private-directory> <request-id>\nagent-bridge extensions compact <private-directory>\nagent-bridge extensions forget-absent <private-directory> <server-name>\nagent-bridge extensions import <private-directory> <mcp-json-path> [--inherit-path <stdio-server>]...\nagent-bridge db <inspect|init|migrate> <database-path>\nagent-bridge skills discover <absolute-approved-source-root>\nagent-bridge skills import <private-directory> <absolute-approved-source-root> <child-directory> [--activate]\nagent-bridge skills revoke <private-directory> <imported-name>\nagent-bridge stdio <database-path> [--catalogue <unified|core|code|desktop|automation|extensions>] [--workspace <directory> | --write-workspace <directory>] [--settings <private-directory>] [--ui-port <port> --ui-session-file <private-json-path>]\nagent-bridge skills discover <absolute-approved-source-root>\nagent-bridge skills import <private-directory> <absolute-approved-source-root> <child-directory> [--activate]\nagent-bridge skills revoke <private-directory> <imported-name>\nagent-bridge stdio <database-path> --workspace <project> --local-doc-page <relative-html-or-markdown> [--local-doc-page <relative-html-or-markdown>]...\nagent-bridge skills discover <absolute-approved-source-root>\nagent-bridge skills import <private-directory> <absolute-approved-source-root> <child-directory> [--activate]\nagent-bridge skills revoke <private-directory> <imported-name>\nagent-bridge stdio <database-path> --workspace <project> --local-window-read <dedicated-desktop|macos|x11:N> <absolute-executable> <class-or-bundle-id> <exact-title>\nagent-bridge skills discover <absolute-approved-source-root>\nagent-bridge skills import <private-directory> <absolute-approved-source-root> <child-directory> [--activate]\nagent-bridge skills revoke <private-directory> <imported-name>\nagent-bridge stdio <database-path> --workspace <project> --local-learn-url <exact-Microsoft-Learn-HTTPS-URL>\nagent-bridge skills discover <absolute-approved-source-root>\nagent-bridge skills import <private-directory> <absolute-approved-source-root> <child-directory> [--activate]\nagent-bridge skills revoke <private-directory> <imported-name>\nagent-bridge stdio <database-path> --workspace <project> --local-chrome-page <project-relative-html> [--local-chrome-page <project-relative-html>...] [--local-chrome-origin https://learn.microsoft.com]\nagent-bridge serve <database-path> --port <number> [--ui-port <port> --ui-session-file <private-json-path>]\nagent-bridge ui [--port <number>] [--database <path>] [--settings-dir <dir>] [--oauth-state <dir> --oauth-origin <https-origin> --oauth-audience <missions|workstation>] [--project <dir>] [--open]";
 
 // This workflow runs ONLY as an explicitly selected LOCAL CLI command.
 // OAuth HTTP/MCP handlers cannot invoke this function. A visible interactive
@@ -204,9 +208,82 @@ fn database_command(action: &str, path: &Path) -> Result<(), RuntimeError> {
     Ok(())
 }
 
+/// Local documentary imports have no remote entry point. Consent precedes
+/// source access, and the exact in-memory package is separately approved.
+fn skills_owner_cli(args: &[OsString]) -> Result<(), RuntimeError> {
+    use agent_bridge_desktop::skills::SkillManager;
+    if !io::stdin().is_terminal() || !io::stderr().is_terminal() {
+        return Err("LOCAL_SKILL_CONSENT_REQUIRED: use a directly operated terminal".into());
+    }
+    let receipt = match args {
+        [action, root] if action == "discover" => {
+            let root=Path::new(root);
+            SkillManager::discover_operator_root(root, || local_console_confirmation(&format!(
+                "Inspect immediate child directory names and SKILL.md presence only in {:?}?", root)))?
+        }
+        [action, settings, root, package, options @ ..] if action == "import" => {
+            let root=Path::new(root);
+            let package=package.to_str().ok_or(USAGE)?;
+            let activate=match options {
+                []=>false,
+                [flag] if flag=="--activate"=>true,
+                _=>return Err(USAGE.into()),
+            };
+            if !local_console_confirmation(&format!(
+                "Read one documentary skill directory {:?} / {:?}? No source scripts will run.",
+                root,package)) {
+                return Err("LOCAL_SKILL_CONSENT_REQUIRED".into());
+            }
+            let store=agent_bridge_lifecycle::operator_skill_directory(Path::new(settings))?;
+            SkillManager::import_operator_directory(&store,root,package,activate,||true,|preview|{
+                // Display only bounded structured metadata and the exact
+                // content digest, not arbitrary source instructions.
+                let summary=serde_json::json!({
+                    "name":preview["name"],"version":preview["version"],
+                    "declared_version":preview["declared_version"],
+                    "source_ref":preview["source_ref"],"license":preview["license"],
+                    "file_count":preview["file_count"],"total_bytes":preview["total_bytes"],
+                    "files":preview["files"],"activate":activate,
+                });
+                local_console_confirmation(&format!(
+                    "Copy this exact documentary revision into the private registry? Review the declared license (null means unknown) and resource list. No runtime permissions are granted.\n{}",
+                    summary))
+            })?
+        }
+        [action, settings, name] if action == "revoke" => {
+            let name=name.to_str().ok_or(USAGE)?;
+            if !local_console_confirmation(&format!(
+                "Revoke all registry access to imported skill {:?}, including historical revisions and future reimport of this name? Stored evidence is retained.",name)) {
+                return Err("LOCAL_SKILL_CONSENT_REQUIRED".into());
+            }
+            let store=agent_bridge_lifecycle::operator_skill_directory(Path::new(settings))?;
+            SkillManager::revoke_operator_import(&store,name,||true)?
+        }
+        _=>return Err(USAGE.into()),
+    };
+    println!("{}", serde_json::to_string_pretty(&receipt)?);
+    Ok(())
+}
+
+#[cfg(test)]
+#[test]
+fn specialized_stdio_rejects_unknown_or_duplicate_startup_option_before_opening_core() {
+    for args in [
+        vec!["stdio","not-a-database","--catalogue","unknown"],
+        vec!["stdio","not-a-database","--catalogue","core","--catalogue","code"],
+        vec!["stdio","not-a-database","--catalogue"],
+    ]{
+        let args=args.into_iter().map(OsString::from).collect::<Vec<_>>();
+        let err=run_cli(&args).unwrap_err().to_string();
+        assert!(err=="CATALOGUE_SELECTION_UNKNOWN" || err==USAGE);
+    }
+}
+
 pub fn run_cli(args: &[OsString]) -> Result<(), RuntimeError> {
     if backend::dispatch_private_child(args)?.is_some() { return Ok(()); }
     match args {
+        [cmd, options @ ..] if cmd == "audit" => audit_cli::run(options),
+        [cmd, options @ ..] if cmd == "skills" => skills_owner_cli(options),
         [cmd, options @ ..] if cmd == "oauth" => oauth_owner_cli(options),
         [cmd, options @ ..] if cmd == "ui" => ui::run_cli(options),
         [cmd, rest @ ..] if cmd == "start" || cmd == "stop" => lifecycle::control(cmd, rest),
@@ -215,7 +292,7 @@ pub fn run_cli(args: &[OsString]) -> Result<(), RuntimeError> {
             Ok(())
         }
         [arg] if arg == "--help" || arg == "-h" => {
-            println!("{USAGE}");
+            println!("{USAGE}\n{}", audit_cli::USAGE);
             Ok(())
         }
         [cmd, action, dir, provider, mission, task, extra @ ..] if cmd == "web" && action == "open" => {
@@ -296,6 +373,9 @@ pub fn run_cli(args: &[OsString]) -> Result<(), RuntimeError> {
         [cmd, action, dir, server] if cmd == "extensions" && action == "refresh-check" => {
             extensions::refresh_check(Path::new(dir), server.to_str().ok_or(USAGE)?)
         }
+        [cmd, action, dir] if cmd == "extensions" && action == "reload" => {
+            extensions::reload_cli(Path::new(dir))
+        }
         [cmd, action, dir, server, tool] if cmd == "extensions" && action == "describe" => {
             let registry = extensions::read(Path::new(dir))?;
             println!("{}", registry.describe_for_operator(server.to_str().ok_or(USAGE)?, tool.to_str().ok_or(USAGE)?)?);
@@ -325,6 +405,7 @@ pub fn run_cli(args: &[OsString]) -> Result<(), RuntimeError> {
             extensions::local(Path::new(dir), action.to_str().ok_or(USAGE)?, Some(id.to_str().ok_or(USAGE)?))
         }
         [cmd, path, options @ ..] if cmd == "stdio" => {
+            let mut selected = None;
             let mut workspace = None;
             let mut settings = None;
             let mut local_window = None;
@@ -337,6 +418,10 @@ pub fn run_cli(args: &[OsString]) -> Result<(), RuntimeError> {
             let mut iter = options.iter();
             while let Some(flag) = iter.next() {
                 match flag.to_str() {
+                    Some("--catalogue") if selected.is_none() => {
+                        selected=Some(catalogue_selection::CatalogueSelection::parse(
+                            iter.next().and_then(|value|value.to_str()).ok_or(USAGE)?)?);
+                    }
                     Some("--workspace") if workspace.is_none() => {
                         workspace = Some((Path::new(iter.next().ok_or(USAGE)?), false));
                     }
@@ -410,7 +495,7 @@ pub fn run_cli(args: &[OsString]) -> Result<(), RuntimeError> {
                 (None, None) => None,
                 _ => return Err("--ui-port and --ui-session-file must be specified together".into()),
             };
-            runtime::serve_stdio(Path::new(path), workspace, settings,
+            runtime::serve_stdio(Path::new(path), selected.unwrap_or_default(), workspace, settings,
                 local_window, local_doc_pages, local_learn_url,
                 local_chrome_pages, local_chrome_origins, ui)
         }

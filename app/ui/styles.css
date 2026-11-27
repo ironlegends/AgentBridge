@@ -1540,3 +1540,10 @@ input[type="checkbox"]:focus-visible {
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation: none !important; transition: none !important; }
 }
+
+@media (pointer: coarse) {
+  #onboardingModal button {
+    min-width: 44px;
+    min-height: 44px;
+  }
+}

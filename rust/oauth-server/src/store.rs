@@ -275,8 +275,9 @@ fn atomic_write(path:&Path,body:&[u8],replace:bool)->Result<()>{
     }
     let parent=path.parent().ok_or(OAuthError::PrivateState("missing_state_parent"))?;
     platform::verify_directory_for_store(parent)?;
-    let name=path.file_name().ok_or(OAuthError::PrivateState("missing_file_name"))?;
-    let temporary=parent.join(format!(".{}.{}.tmp",name.to_string_lossy(),random_token()?));
+    path.file_name().ok_or(OAuthError::PrivateState("missing_file_name"))?;
+    // A same-directory random name keeps valid destinations usable near OS path limits.
+    let temporary=parent.join(format!(".oauth-{}.tmp",random_token()?));
     let write_result=(||->Result<()>{
         let mut file=open_new(&temporary)?;
         file.write_all(body)?;

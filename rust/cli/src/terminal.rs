@@ -214,6 +214,31 @@ pub(super) fn inspect_revision(settings: &Path, root: &Path, database: &Path) ->
     Ok(json!({"workspace":root, "image":entry.executable, "access_check":"passed", "process_started":false}))
 }
 
+/// Reuse the existing fixed diagnostic approval, without reading repository
+/// metadata or starting any process during attempt registration.
+#[cfg(windows)]
+pub(crate) fn qualify_attempt_revision(settings:&Path,root:&Path,
+    commands:&CommandCatalogueSnapshot)->Result<(),RuntimeError>{
+    let _ = configured_command_with_snapshot(settings,root,"git-revision","git",true,Some(commands))?;
+    Ok(())
+}
+
+/// Only the restricted native HEAD resolver is admitted for #123. In
+/// particular the Fully Unlocked profile cannot select a subprocess fallback.
+#[cfg(windows)]
+pub(crate) fn verify_attempt_revision(settings:&Path,root:&Path,database:&Path,
+    commands:&CommandCatalogueSnapshot)->Result<String,RuntimeError>{
+    let current=CommandCatalogueSnapshot::load(settings)?;
+    if current.digest()!=commands.digest(){return Err("ATTEMPT_APPROVAL_CHANGED".into());}
+    let result=run_with_snapshot(settings,root,database,"git-revision",Some(commands),false)?;
+    if result["exit_code"]!=0 || result["git_process_started"]!=false
+        || result["stdout_truncated"]!=false {
+        return Err("ATTEMPT_NATIVE_RECEIPT_REQUIRED".into());
+    }
+    result["stdout"].as_str().map(str::trim).map(str::to_owned)
+        .ok_or_else(||"ATTEMPT_NATIVE_RECEIPT_REQUIRED".into())
+}
+
 /// These project commands have a fixed argument vector and bounded output.
 /// A configurable command string can never be substituted for their argv.
 fn run_with_snapshot(settings:&Path,root:&Path,database:&Path,action:&str,

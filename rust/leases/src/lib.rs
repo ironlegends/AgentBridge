@@ -357,6 +357,21 @@ impl<C: Clock> LeaseCoordinator<C> {
         operation_id: &str,
         ttl: Duration,
     ) -> Result<ResourceLeaseGrant, LeaseError> {
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let grant = self.acquire_in_transaction(&tx, resource_keys, operation_id, ttl)?;
+        tx.commit()?;
+        Ok(grant)
+    }
+
+    /// Compose the same lease acquisition with a caller-owned IMMEDIATE
+    /// transaction. The caller must roll back the entire transaction on error.
+    pub fn acquire_in_transaction(
+        &self,
+        tx: &rusqlite::Transaction<'_>,
+        resource_keys: &[String],
+        operation_id: &str,
+        ttl: Duration,
+    ) -> Result<ResourceLeaseGrant, LeaseError> {
         validate_ttl(ttl)?;
         if operation_id.trim().is_empty() || operation_id.len() > MAX_OPERATION_ID_LEN {
             return Err(LeaseError::invalid_argument(
@@ -370,7 +385,6 @@ impl<C: Clock> LeaseCoordinator<C> {
         let now_str = now.to_iso8601_o();
         let exp_str = expires.to_iso8601_o();
 
-        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let mut fences = BTreeMap::new();
 
         for key in &keys {
@@ -414,8 +428,6 @@ impl<C: Clock> LeaseCoordinator<C> {
             fences.insert(key.clone(), fence);
         }
 
-        tx.commit()?;
-
         Ok(ResourceLeaseGrant {
             operation_id: operation_id.to_string(),
             keys,
@@ -432,6 +444,16 @@ impl<C: Clock> LeaseCoordinator<C> {
         grant: &ResourceLeaseGrant,
         ttl: Duration,
     ) -> Result<ResourceLeaseGrant, LeaseError> {
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let renewed = self.renew_in_transaction(&tx, grant, ttl)?;
+        tx.commit()?;
+        Ok(renewed)
+    }
+
+    /// Renew under the same transaction as an attempt revision update.
+    pub fn renew_in_transaction(
+        &self, tx: &rusqlite::Transaction<'_>, grant: &ResourceLeaseGrant, ttl: Duration,
+    ) -> Result<ResourceLeaseGrant, LeaseError> {
         validate_ttl(ttl)?;
         validate_grant_shape(grant)?;
 
@@ -440,14 +462,13 @@ impl<C: Clock> LeaseCoordinator<C> {
         let now_str = now.to_iso8601_o();
         let exp_str = expires.to_iso8601_o();
 
-        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         for key in &grant.keys {
             let fence = grant.fences.get(key).copied().ok_or_else(|| {
                 LeaseError::invalid_argument("Grant is missing fencing token for resource key.")
             })?;
             let updated = tx.execute(
                 "UPDATE resource_leases SET expires_at = ?1, renew_at = ?2 \
-                 WHERE resource_key = ?3 AND owner_operation = ?4 AND token = ?5 AND expires_at > ?2",
+                 WHERE resource_key = ?3 AND owner_operation = ?4 AND token = ?5 AND generation = ?5 AND expires_at > ?2",
                 params![&exp_str, &now_str, key, &grant.operation_id, fence],
             )?;
             if updated != 1 {
@@ -458,8 +479,6 @@ impl<C: Clock> LeaseCoordinator<C> {
                 ));
             }
         }
-        tx.commit()?;
-
         let mut renewed = grant.clone();
         renewed.expires_at = expires;
         Ok(renewed)
@@ -472,9 +491,18 @@ impl<C: Clock> LeaseCoordinator<C> {
         conn: &mut Connection,
         grant: &ResourceLeaseGrant,
     ) -> Result<(), LeaseError> {
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        self.release_in_transaction(&tx, grant)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Release only the original owner/fence inside the caller's transaction.
+    pub fn release_in_transaction(
+        &self, tx: &rusqlite::Transaction<'_>, grant: &ResourceLeaseGrant,
+    ) -> Result<(), LeaseError> {
         validate_grant_shape(grant)?;
 
-        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         for key in &grant.keys {
             let fence = grant.fences.get(key).copied().ok_or_else(|| {
                 LeaseError::invalid_argument("Grant is missing fencing token for resource key.")
@@ -482,11 +510,10 @@ impl<C: Clock> LeaseCoordinator<C> {
             let now_str = self.clock.utc_now().to_iso8601_o();
             tx.execute(
                 "UPDATE resource_leases SET owner_operation = '', expires_at = ?1 \
-                 WHERE resource_key = ?2 AND owner_operation = ?3 AND token = ?4",
+                 WHERE resource_key = ?2 AND owner_operation = ?3 AND token = ?4 AND generation = ?4",
                 params![&now_str, key, &grant.operation_id, fence],
             )?;
         }
-        tx.commit()?;
         Ok(())
     }
 
@@ -506,7 +533,7 @@ impl<C: Clock> LeaseCoordinator<C> {
             let now_str = self.clock.utc_now().to_iso8601_o();
             let count: i64 = conn.query_row(
                 "SELECT count(*) FROM resource_leases \
-                 WHERE resource_key = ?1 AND owner_operation = ?2 AND token = ?3 AND expires_at > ?4",
+                 WHERE resource_key = ?1 AND owner_operation = ?2 AND token = ?3 AND generation = ?3 AND expires_at > ?4",
                 params![key, &grant.operation_id, fence, &now_str],
                 |row| row.get(0),
             )?;

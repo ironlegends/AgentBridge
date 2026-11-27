@@ -19,7 +19,7 @@ mod http;
 mod capability_tests;
 
 pub use agent_bridge_oauth_compat::{Audience, CapabilityIdentity};
-pub use http::{HttpAction, HttpRequest, HttpResponse};
+pub use http::{HttpAction, HttpRequest, HttpResponse, VerifiedOAuthClient};
 pub use model::ConnectorClient;
 
 use model::{

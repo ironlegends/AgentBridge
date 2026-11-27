@@ -9,18 +9,19 @@ use std::sync::Arc;
 
 const MISSION_READS: &[&str] = &[
     "agent_bridge_mission_get", "agent_bridge_mission_observe", "agent_bridge_mission_list",
-    "agent_bridge_mission_checkpoints", "agent_bridge_mission_subtask_list",
+    "agent_bridge_mission_checkpoints", "agent_bridge_mission_subtask_list", "agent_bridge_mission_handoff",
 ];
 
 pub(crate) fn attach(
     database: SharedCoreDatabase, project: &Path,
     commands: Arc<crate::command_catalogue::CommandCatalogueSnapshot>,
-    profile: ProfileControl, allow_import: bool,
+    profile: ProfileControl, allow_import: bool, mission_handoff: bool,
     catalogue: &mut Vec<ToolDefinition>, handlers: &mut ToolMapHandler,
 ) -> Result<(), RuntimeError> {
     let definitions: Vec<ToolDefinition> =
         serde_json::from_str(include_str!("../../../contracts/mission-tools-v1.json"))?;
-    for definition in definitions.into_iter().filter(|tool|tool.name!="agent_bridge_status") {
+    for definition in definitions.into_iter().filter(|tool|tool.name!="agent_bridge_status"
+        && (mission_handoff || tool.name!="agent_bridge_mission_handoff")) {
         let name=definition.name.clone();
         let connection=Arc::clone(&database);
         let live=profile.clone();
@@ -30,8 +31,8 @@ pub(crate) fn attach(
                 return Ok(ToolCallResult::tool_error("WRITE_ACCESS_REQUIRED: mission mutation refused"));
             }
             let mut db=connection.lock().map_err(|_|ToolDispatchError::internal("CORE_UNAVAILABLE"))?;
-            Ok(match agent_bridge_missions::dispatch_tool_observed(
-                db.connection_mut(), &name, &Value::Object(arguments), crate::client_sessions::link_context,
+            Ok(match agent_bridge_missions::dispatch_tool_activity_observed(
+                db.connection_mut(), &name, &Value::Object(arguments), crate::client_sessions::link_activity,
             ) {
                 Ok(value)=>ToolCallResult::text(value.to_string()),
                 Err(error)=>ToolCallResult::tool_error(format!("CORE_{}: {}",error.code,error.message)),
@@ -134,7 +135,8 @@ fn import_task(database:&SharedCoreDatabase,binding:&str,args:&Value)->Result<Va
         events:normalized_events,steps:normalized_steps,
     };
     let result = serde_json::to_value(agent_bridge_import::import_snapshot(conn, &snapshot)?)?;
-    actor.observe_success(conn, crate::client_sessions::link_context);
+    // Imported missions deliberately have no actor membership. Attribute only the authenticated importer.
+    actor.observe_activity_success(conn, crate::client_sessions::link_activity);
     Ok(result)
 }
 
@@ -177,7 +179,7 @@ mod tests {
             let mut catalogue = Vec::new(); let mut handlers = ToolMapHandler::new();
             attach(database.clone(),&std::fs::canonicalize(root.0.join("project")).unwrap(),
                 Arc::new(crate::command_catalogue::CommandCatalogueSnapshot::load(&root.0.join("settings")).unwrap()),
-                profile.clone(),allow_import,&mut catalogue,&mut handlers)
+                profile.clone(),allow_import,false,&mut catalogue,&mut handlers)
                 .expect("real Core handlers must be composed over the shared owner");
             assert_eq!(catalogue.len(),17);
             Self {router:McpGateway::new(GatewayConfig::new("core-fixture","1"),catalogue,handlers),
@@ -219,6 +221,8 @@ mod tests {
         assert_eq!(fixture.success("agent_bridge_mission_create",args)["mission_id"],created["mission_id"]);
         let own=json!({"actor_context_handle":first["context_handle"],"mission_id":created["mission_id"]});
         assert_eq!(fixture.success("agent_bridge_mission_get",own.clone())["mission_id"],created["mission_id"]);
+        assert!(!fixture.router.published_tools().iter().any(|tool|tool.name=="agent_bridge_mission_handoff"));
+        assert!(denied(&fixture.call("agent_bridge_mission_handoff",own.clone())));
         assert!(denied(&fixture.call("agent_bridge_mission_get",json!({
             "actor_context_handle":other["context_handle"],"mission_id":created["mission_id"]}))));
         assert!(denied(&fixture.call("agent_bridge_mission_checkpoint",json!({
@@ -262,7 +266,7 @@ mod tests {
         let mut other_catalogue=Vec::new(); let mut other_handlers=ToolMapHandler::new();
         attach(fixture.database.clone(),&std::fs::canonicalize(&other_project).unwrap(),
             Arc::new(crate::command_catalogue::CommandCatalogueSnapshot::load(&fixture.root.0.join("settings")).unwrap()),
-            fixture.profile.clone(),true,
+            fixture.profile.clone(),true,false,
             &mut other_catalogue,&mut other_handlers).unwrap();
         let other_router=McpGateway::new(GatewayConfig::new("other-project","1"),other_catalogue,other_handlers);
         let wrong_project:Value=serde_json::from_str(&other_router.handle_str(&json!({
@@ -395,7 +399,7 @@ mod tests {
         let mut catalogue=Vec::new();let mut handlers=ToolMapHandler::new();
         attach(fixture.database.clone(),&std::fs::canonicalize(fixture.root.0.join("project")).unwrap(),
             Arc::new(crate::command_catalogue::CommandCatalogueSnapshot::load(&settings).unwrap()),
-            fixture.profile.clone(),true,&mut catalogue,&mut handlers).unwrap();
+            fixture.profile.clone(),true,false,&mut catalogue,&mut handlers).unwrap();
         // Selection is complete. Replace the file before the real handler
         // consumes the selected catalogue, rather than before validation.
         std::fs::write(settings.join("commands.json"),replacement.to_string()).unwrap();

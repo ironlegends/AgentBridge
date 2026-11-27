@@ -26,8 +26,22 @@ pub(crate) fn root(path: &Path) -> Result<PathBuf> {
             return Err(OAuthError::PrivateState("state_path_alias_or_non_directory"));
         }
     }
-    verify_directory(path)?;
-    Ok(path.to_path_buf())
+    // Keep the Win32 extended spelling internal. The public path and every
+    // ancestor have already passed the local-disk and reparse checks above.
+    #[cfg(windows)]
+    let qualified = {
+        use std::path::Prefix;
+        let physical = fs::canonicalize(path)?;
+        if !matches!(physical.components().next(), Some(Component::Prefix(p))
+            if matches!(p.kind(), Prefix::VerbatimDisk(_))) {
+            return Err(OAuthError::PrivateState("remote_or_device_path_refused"));
+        }
+        physical
+    };
+    #[cfg(not(windows))]
+    let qualified = path.to_path_buf();
+    verify_directory(&qualified)?;
+    Ok(qualified)
 }
 
 pub(crate) fn create_requests(path: &Path) -> Result<()> {

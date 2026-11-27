@@ -12,8 +12,56 @@ fn bin() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_agent-bridge"))
 }
 
+#[test]
+fn audit_history_cli_checks_filters_before_opening_the_store() {
+    let owner = TempSandbox::new("audit-cli");
+    let absent = owner.path().join("no-history");
+    for options in [
+        &["--limit", "0"][..],
+        &["--client-hash", "private-client"][..],
+        &["--since-ms", "11", "--until-ms", "10"][..],
+        &["--method", "ping", "--method", "ping"][..],
+        &["--context-id", "unverified"][..],
+        &["--mission-id", "ctx_invalid"][..],
+    ] {
+        let result = Command::new(bin()).args(["audit", "recent"]).arg(&absent)
+            .args(options).output().unwrap();
+        assert!(!result.status.success());
+        assert!(String::from_utf8_lossy(&result.stderr).contains("Invalid audit filter"));
+        assert!(result.stdout.is_empty());
+        assert!(!absent.exists());
+    }
+}
+
 struct TempSandbox {
     dir: PathBuf,
+}
+
+#[test]
+fn audit_recent_reads_a_completed_local_call_after_the_stdio_process_exits() {
+    let sandbox = TempSandbox::new("audit-local-call");
+    let (workspace, database, settings) = init_env(&sandbox);
+    let mut bridge = StdioMcp::spawn(&[
+        "stdio", database.to_str().unwrap(), "--workspace", workspace.to_str().unwrap(),
+        "--settings", settings.to_str().unwrap(),
+    ], &workspace, "full-control");
+    let (failed, _) = bridge.call_tool("agent_bridge_status", json!({}));
+    assert!(!failed);
+    assert_eq!(bridge.close(), 0);
+
+    let result = Command::new(bin()).args(["audit", "recent"]).arg(&settings)
+        .args(["--provider", "local", "--method", "tools/call", "--outcome", "success", "--limit", "8"])
+        .output().unwrap();
+    assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+    let history: Value = serde_json::from_slice(&result.stdout).unwrap();
+    assert_eq!(history["available"], true);
+    let rows = history["records"].as_array().unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["tool_name"], "agent_bridge_status");
+    assert_eq!(rows[0]["provider"], "local");
+    assert_eq!(rows[0]["session_id"].as_str().unwrap().len(), 32);
+    assert!(rows[0].get("arguments").is_none());
+    assert!(rows[0].get("result").is_none());
 }
 
 impl TempSandbox {

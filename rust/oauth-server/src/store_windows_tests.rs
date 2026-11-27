@@ -94,6 +94,55 @@ fn owner_child() {
 }
 
 #[test]
+fn atomic_staging_does_not_extend_a_valid_windows_destination() {
+    use std::os::windows::ffi::OsStrExt;
+
+    let fixture = Fixture::new();
+    // Leave enough space for the final file, but not for another token
+    // appended to that same name at the legacy Win32 path boundary.
+    let prefix_units = fixture.0.as_os_str().encode_wide().count() + 1;
+    let name_units = 240usize.saturating_sub(prefix_units).max(1);
+    let path = fixture.0.join("x".repeat(name_units));
+
+    super::atomic_write(&path, b"first", false).unwrap();
+    assert!(matches!(super::atomic_write(&path, b"duplicate", false), Err(crate::OAuthError::Busy)));
+    assert_eq!(read_private(&path, MAX_SMALL).unwrap().unwrap(), b"first");
+    super::atomic_write(&path, b"second", true).unwrap();
+    assert_eq!(read_private(&path, MAX_SMALL).unwrap().unwrap(), b"second");
+    assert_eq!(fs::read_dir(&fixture.0).unwrap().count(), 1);
+}
+
+#[test]
+fn private_store_can_publish_and_replace_below_a_deep_local_directory() {
+    use std::os::windows::ffi::OsStrExt;
+
+    let fixture = Fixture::new();
+    let policy = Policy::new("https://oauth-gate.example.invalid", Audience::Workstation).unwrap();
+    let mut root = fixture.0.clone();
+    for target in [211, 280] {
+        while root.as_os_str().encode_wide().count() < target {
+            let remaining = target - root.as_os_str().encode_wide().count();
+            let name = "d".repeat(remaining.saturating_sub(1).clamp(1, 48));
+            // The caller supplies a pre-existing private directory through
+            // the ordinary DOS spelling, including when the fixture is deep.
+            let physical = fs::canonicalize(&root).unwrap().join(&name);
+            platform::create_requests(&physical).unwrap();
+            root.push(name);
+        }
+        assert!(matches!(platform::root(&fs::canonicalize(&root).unwrap()),
+            Err(crate::OAuthError::PrivateState("remote_or_device_path_refused"))));
+        let (store, data) = Store::open(&root, &policy, 1_800_000_000_000).unwrap();
+        store.save(&data).unwrap();
+        let hash = "a".repeat(64);
+        store.bind_manifest(&hash, b"synthetic manifest").unwrap();
+        store.bind_manifest(&hash, b"synthetic manifest").unwrap();
+        assert!(store.bind_manifest(&hash, b"different").is_err());
+        drop(store);
+        assert_eq!(Store::open(&root, &policy, 1_800_000_000_000).unwrap().1, data);
+    }
+}
+
+#[test]
 fn windows_gate_releases_after_forced_owner_exit_and_reopens_state() {
     let fixture = Fixture::new();
     let mut child = OwnerChild::start(&fixture);

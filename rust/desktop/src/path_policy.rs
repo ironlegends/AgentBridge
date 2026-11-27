@@ -74,7 +74,7 @@ impl ProtectedPaths {
 }
 
 #[cfg(windows)]
-fn physical_directory_path(directory: &Dir) -> Result<PathBuf> {
+pub(super) fn physical_directory_path(directory: &Dir) -> Result<PathBuf> {
     use std::os::windows::{ffi::OsStringExt, io::AsRawHandle};
     use windows_sys::Win32::Storage::FileSystem::{GetFinalPathNameByHandleW, VOLUME_NAME_NT};
     // NT volume names resolve DOS aliases, including aliases whose root is

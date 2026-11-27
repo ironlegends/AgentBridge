@@ -51,9 +51,10 @@ class Element {
   get innerHTML() { return this._innerHTML; }
   querySelectorAll(selector) { return this.children.filter((el) => matches(el, selector)); }
   querySelector(selector) { return this.querySelectorAll(selector)[0] || null; }
-  async fire(name) {
+  closest(selector) { return matches(this, selector) ? this : null; }
+  async fire(name, target = this) {
     if (name === "click" && this.disabled) return;
-    await Promise.all((this.listeners.get(name) || []).map((fn) => fn({ target: this, currentTarget: this })));
+    await Promise.all((this.listeners.get(name) || []).map((fn) => fn({ target, currentTarget: this })));
   }
 }
 
@@ -102,6 +103,7 @@ function createUi({ events = true } = {}) {
   let nextTimer = 0;
   const timers = new Map();
   const openedUrls = [];
+  const clipboard = [];
   const eventHandlers = new Map();
   let hiddenWindows = 0;
   const invoke = (command, args) => new Promise((resolve, reject) => {
@@ -114,7 +116,7 @@ function createUi({ events = true } = {}) {
       opener: { openUrl: async (url) => { openedUrls.push(url); } },
       event: events ? { listen: async (name, handler) => { eventHandlers.set(name, handler); return () => eventHandlers.delete(name); } } : undefined,
     } },
-    navigator: { clipboard: { writeText: async () => {} } },
+    navigator: { clipboard: { writeText: async (value) => { clipboard.push(value); } } },
     setInterval: (fn) => { poll = fn; return 1; },
     setTimeout: (fn, delay) => { const id = ++nextTimer; timers.set(id, { fn, delay }); return id; },
     clearTimeout: (id) => timers.delete(id),
@@ -125,6 +127,7 @@ function createUi({ events = true } = {}) {
   return {
     calls,
     openedUrls,
+    clipboard,
     hiddenWindows: () => hiddenWindows,
     emit: async (name, payload) => {
       assert.ok(eventHandlers.has(name), "Missing event listener " + name);
@@ -164,9 +167,26 @@ function createUi({ events = true } = {}) {
   };
 }
 
+function statusCardFixture(overrides = {}) {
+  const current = {
+    title: "Running", tone: "on", tooltip: "Local port 18856", detail: "Run by an independent Bridge.",
+    showNotice: true, showActions: false, showStop: false, canPower: false, canStop: false,
+    powerLabel: "Restart Bridge", powerSecondary: true, quitLabel: "Quit", ...overrides,
+  };
+  const pending = {};
+  for (const [phase, label] of [["starting", "Starting"], ["stopping", "Stopping"], ["restarting", "Restarting"]]) {
+    pending[phase] = { ...current, title: label + "…", tone: "busy",
+      detail: "Bridge is " + phase + "…", powerLabel: label + " Bridge…",
+      showActions: true, canPower: false, canStop: false, showStop: phase !== "starting", powerSecondary: true };
+  }
+  return { current, pending, readError: { ...current, title: "Unavailable", tone: "error",
+    tooltip: "", detail: "The configured Bridge session is unavailable.", canPower: false, canStop: false } };
+}
+
 function panel(activeProfile = "read-only", overrides = {}) {
   return {
     version: "2.0.0-test",
+    statusCard: statusCardFixture(),
     settings: {
       theme: "system",
       profile: "read-only",
@@ -201,12 +221,95 @@ function panel(activeProfile = "read-only", overrides = {}) {
 async function ready(data = panel(), options) {
   const ui = createUi(options);
   await ui.settle(ui.pending("get_panel_state"), data);
+  await ui.settle(ui.pending("get_sessions"), { available: true, totals: { live: 0 }, sessions: [], earlier: [] });
   return ui;
 }
+
+test("the status card displays the Rust presentation without deriving it from gateway liveness", async () => {
+  const current = {
+    title: "Starting…", tone: "busy", tooltip: "", detail: "Bridge is starting…",
+    showNotice: true, showActions: true, showStop: false, canPower: false, canStop: false,
+    powerLabel: "Starting Bridge…", powerSecondary: true, quitLabel: "Quit and stop Bridge",
+  };
+  const ui = await ready(panel("read-only", { statusCard: { current } }));
+  assert.equal(ui.el("gwStatus").textContent, "Starting…");
+  assert.equal(ui.el("statusCard").getAttribute("data-tone"), "busy");
+  assert.equal(ui.el("externalGatewayNotice").textContent, "Bridge is starting…");
+  assert.equal(ui.el("powerBtn").disabled, true);
+  assert.equal(ui.el("stopBtn").classList.contains("hidden"), true);
+});
 
 test("attached panel renders the runtime profile instead of the saved startup preference", async () => {
   const ui = await ready(panel("fully-unlocked"));
   assert.deepEqual(ui.active(), ["fully-unlocked"]);
+});
+
+test("the live Sessions badge remains available while the panel is pending or unavailable", async () => {
+  const ui = createUi();
+  const panelRead = ui.pending("get_panel_state");
+  const sessions = (live) => ({ available: true, totals: { live }, sessions: [], earlier: [] });
+  await ui.settle(ui.pending("get_sessions"), sessions(2));
+  const badge = ui.el("sessionsBadge");
+  assert.equal(panelRead.settled, false);
+  assert.equal(badge.getAttribute("aria-label"), "2 live sessions");
+  assert.equal(badge.classList.contains("hidden"), false);
+  await ui.settle(panelRead, Error("Panel unavailable"), true);
+  assert.equal(badge.textContent, "2");
+
+  for (const [snapshot, rejected] of [[sessions(0), false], [{ available: false }, false],
+    [{ available: true, totals: {} }, false], [Error("Sessions unavailable"), true], [sessions(3), false]]) {
+    const refresh = ui.poll();
+    await ui.settle(ui.pending("get_sessions"), snapshot, rejected);
+    await ui.settle(ui.pending("get_panel_state"), panel("read-only", { database: { activeMissions: 99 } }));
+    await refresh;
+    const visible = snapshot.totals?.live === 3;
+    assert.equal(badge.classList.contains("hidden"), !visible);
+    assert.equal(badge.getAttribute("aria-label"), visible ? "3 live sessions" : null);
+  }
+});
+
+test("opening Sessions shares the pending read and an old generation cannot replace a newer badge", async () => {
+  const ui = createUi();
+  const old = ui.pending("get_sessions");
+  await ui.settle(ui.pending("get_panel_state"), panel());
+  await ui.el("missionsNavBtn").fire("click");
+  assert.equal(ui.calls.filter(c => c.command === "get_sessions").length, 1);
+  await ui.emit("workstation-state", panel());
+  await ui.el("refreshMissionsBtn").fire("click");
+  const current = ui.calls.filter(c => c.command === "get_sessions").at(-1);
+  assert.notEqual(current, old);
+  await ui.settle(current, { available: true, totals: { live: 4 }, sessions: [] });
+  await ui.settle(old, { available: true, totals: { live: 97 }, sessions: [] });
+  assert.equal(ui.el("sessionsBadge").getAttribute("aria-label"), "4 live sessions");
+});
+
+test("a service replacement clears the old Sessions list and detail before the next read settles", async () => {
+  for (const detail of [false, true]) {
+    const ui = await ready(nativePanel());
+    const oldSnapshot = { available: true, totals: { live: 1 },
+      sessions: [{ sessionId: "old", provider: "chatgpt", live: true, clientLabel: "Old client" }] };
+    await ui.el("missionsNavBtn").fire("click");
+    await ui.settle(ui.pending("get_sessions"), oldSnapshot);
+    const list = ui.el("sessionsBody");
+    if (detail) {
+      const row = list.querySelector("[data-session]");
+      list.listeners.get("click")[0]({ target: { closest: () => row } });
+    } else {
+      await ui.el("refreshMissionsBtn").fire("click");
+    }
+    const oldRead = ui.pending("get_sessions");
+    const body = detail ? ui.el("sessionBody") : list;
+    assert.match(body.innerHTML, /Old client/);
+    await ui.emit("workstation-state", nativePanel("read-only", 2));
+    await ui.settle(ui.pending("get_panel_state"), nativePanel("read-only", 2));
+    assert.match(body.innerHTML, /Loading sessions/);
+    assert.doesNotMatch(body.innerHTML, /Old client|Live now/);
+    if (detail) assert.equal(ui.el("sessionTitle").textContent, "Session");
+    await ui.settle(oldRead, oldSnapshot);
+    assert.match(body.innerHTML, /Loading sessions/);
+    await ui.settle(ui.pending("get_sessions"), { available: true, totals: { live: 0 }, sessions: [] });
+    assert.match(body.innerHTML, detail ? /Session no longer listed/ : /No AI connected yet/);
+  }
 });
 
 test("live elevation is one click and leaves the confirmed mode unchanged while pending", async () => {
@@ -591,6 +694,13 @@ function supervisedPanel({ live = true, phase = null, canStart = !live, canStop 
     controls: { canStart, canStop, canRestart, phase, reason },
   };
   data.liveProfile.connected = live;
+  data.statusCard = statusCardFixture({
+    title: live ? "Running" : "Unavailable", tone: live ? "on" : "error",
+    powerLabel: live ? "Restart Bridge" : "Start Bridge", powerSecondary: live,
+    canPower: live ? canRestart : canStart, canStop, showStop: canStop, showActions: canStart || canStop || canRestart,
+    detail: reason || (live ? "Restart resets access to the startup profile." : "Bridge starts with its startup profile."),
+  });
+  if (phase) data.statusCard.current = data.statusCard.pending[phase];
   return data;
 }
 
@@ -971,6 +1081,11 @@ function nativePanel(activeProfile = "read-only", generation = 1, controls = {})
     },
   };
   data.tunnel = { configured: true, childRunning: true, state: "running", remoteReady: null, error: null };
+  data.statusCard = statusCardFixture({
+    canPower: data.gateway.controls.canRestart, canStop: data.gateway.controls.canStop,
+    showActions: true, showStop: data.gateway.controls.canStop, quitLabel: "Quit and stop Bridge",
+    detail: "Web tunnel running (remote access not verified).",
+  });
   return data;
 }
 
@@ -1057,6 +1172,8 @@ test("a confirmed native Stop is displayed as stopped without a connection error
     maxProfile: null, availableProfiles: [], error: null };
   stopped.tunnel.childRunning = false;
   stopped.tunnel.state = "stopped";
+  stopped.statusCard = statusCardFixture({ title: "Stopped", tone: "off", detail: "Start it to connect your AI.",
+    showActions: true, canPower: true, powerLabel: "Start Bridge", powerSecondary: false });
   const ui = await ready(stopped);
   assert.equal(ui.el("statusCard").getAttribute("data-tone"), "off");
   assert.equal(ui.el("gwStatus").textContent, "Stopped");
@@ -1147,17 +1264,48 @@ test("native Approvals invalidation during a mode mutation is reconciled after c
 
 test("open Tasks page refreshes automatically and shows real task progress", async () => {
   const ui = await ready();
-  const snapshot = (completed) => ({ configured: true, exists: true, missions: [],
+  const snapshot = (completed, active) => ({ configured: true, exists: true, missions: [], mission_counts: { active },
     task_rooms: [{ title: "Local work", status: "active", steps_completed: completed, steps_total: 4 }] });
   await ui.el("missionsNavBtn").fire("click");
-  await ui.settle(ui.pending("get_missions_snapshot"), snapshot(1));
+  await ui.settle(ui.pending("get_missions_snapshot"), snapshot(1, 7));
+  assert.equal(ui.el("tasksHeading").textContent, "Tasks (7 active)");
   assert.match(ui.el("missionsBody").innerHTML, /value="1"/);
   const refresh = ui.runTimer(3000);
   assert.match(ui.el("missionsBody").innerHTML, /value="1"/);
-  await ui.settle(ui.pending("get_missions_snapshot"), snapshot(3));
+  await ui.settle(ui.pending("get_missions_snapshot"), snapshot(3, 0));
   await refresh;
+  assert.equal(ui.el("tasksHeading").textContent, "Tasks (0 active)");
   assert.match(ui.el("missionsBody").innerHTML, /value="3"/);
   assert.ok(ui.timer(3000));
+});
+
+test("session audit uses both opaque ids and discards a reply after navigation", async () => {
+  const ui = await ready(nativePanel());
+  const boot = "a".repeat(32);
+  const session = "b".repeat(32);
+  const snapshot = { available:true, bootId:boot, totals:{live:1},
+    sessions:[{sessionId:session,provider:"chatgpt",live:true}] };
+  await ui.el("missionsNavBtn").fire("click");
+  await ui.settle(ui.pending("get_sessions"), snapshot);
+  const list = ui.el("sessionsBody");
+  const open = () => list.listeners.get("click")[0]({target:{closest:()=>list.querySelector("[data-session]")}});
+  open();
+  const first = ui.pending("get_session_history");
+  assert.deepEqual(JSON.parse(JSON.stringify(first.args)), {bootId:boot,sessionId:session});
+  const record = {boot_id:boot,session_id:session,method:"tools/call",tool_name:"agent_bridge_status",
+    outcome:"success",duration_ms:27,arguments:"sensitive-marker"};
+  await ui.el("sessionBackBtn").fire("click");
+  await ui.settle(first, {available:true,lost:0,records:[record]});
+  assert.doesNotMatch(ui.el("sessionBody").innerHTML, /27 ms/);
+  open();
+  await ui.settle(ui.pending("get_session_history"), {available:true,lost:2,records:[
+    record, {...record,boot_id:"c".repeat(32),tool_name:"desktop_read_file"},
+    {...record,session_id:"d".repeat(32),tool_name:"desktop_write_file"}]});
+  const html = ui.el("sessionBody").innerHTML;
+  assert.match(html,/agent_bridge_status/);
+  assert.match(html,/27 ms/);
+  assert.match(html,/2 audit records lost/);
+  assert.doesNotMatch(html,/sensitive-marker|desktop_read_file|desktop_write_file/);
 });
 
 test("Sessions list renders the Rust snapshot escaped and grouped by its live flag", async () => {
@@ -1233,6 +1381,7 @@ test("Settings diagnostics refresh while open and stop polling after leaving", a
   await ui.settle(ui.pending("get_skills_overview"), { skills: [] });
   const box = ui.el("skillsAndDiagBox");
   assert.match(box.innerHTML, /No requests recorded/);
+  assert.match(box.innerHTML, /Audit history unavailable/);
 
   const audit = {
     boot_id: "abcdef0123456789abcdef0123456789",
@@ -1242,10 +1391,12 @@ test("Settings diagnostics refresh while open and stop polling after leaving", a
     records: [],
   };
   const refresh = ui.runTimer(3000);
-  await ui.settle(ui.pending("get_diagnostics"), { oauthKeystore: "Protected", mcpRequestAudit: audit });
+  await ui.settle(ui.pending("get_diagnostics"), { oauthKeystore: "Protected", mcpRequestAudit: audit,
+    auditHistory:{available:true,lost:0,records:[]} });
   await ui.settle(ui.pending("get_skills_overview"), { skills: [] });
   await refresh;
   assert.match(box.innerHTML, /<dt>Records kept<\/dt><dd>0<\/dd>/);
+  assert.match(box.innerHTML, /No retained audit records/);
   assert.match(box.innerHTML, /No requests recorded/);
 
   const records = Array.from({ length: 21 }, (_, index) => ({
@@ -1303,4 +1454,310 @@ test("Settings diagnostics refresh while open and stop polling after leaving", a
   assert.match(box.innerHTML, /<strong>ping<\/strong> <span class="pill">-<\/span><\/div><div class="audit-meta">- · HTTP - · Unverified<\/div>/);
   await ui.select("[data-back]")[0].fire("click");
   assert.equal(ui.timer(3000), undefined);
+});
+
+test("Mission handoff button is gated by a backend member grant and copies only its authorized result", async () => {
+  const ui = await ready();
+  const mid = "mis_" + "a".repeat(32);
+  const snapshot = (grant) => ({ configured: true, exists: true, missions: [
+    { mission_id: mid, revision: 8, status: "active", goal: "Private goal", ...(grant === undefined ? {} : {copy_handoff: grant}) }
+  ], task_rooms: [] });
+  await ui.el("missionsNavBtn").fire("click");
+  await ui.settle(ui.pending("get_sessions"), { available:true, totals:{live:0}, sessions:[], earlier:[] });
+  await ui.settle(ui.pending("get_missions_snapshot"), snapshot(undefined));
+  assert.equal(ui.select("[data-copy-handoff]").length, 0, "legacy snapshot grants nothing");
+  await ui.el("refreshMissionsBtn").fire("click");
+  await ui.settle(ui.pending("get_sessions"), {available:true, totals:{live:0}, sessions:[], earlier:[]});
+  await ui.settle(ui.pending("get_missions_snapshot"), snapshot(true));
+  const button=ui.el("missionsBody").querySelector("[data-copy-handoff]");
+  assert.ok(button);
+  const copy=button.fire("click");
+  const call=ui.pending("get_mission_handoff");
+  assert.deepEqual(JSON.parse(JSON.stringify(call.args)),{missionId:mid,revision:8});
+  await ui.settle(call,{handoff:"Safe handoff only",truncated:false,max_bytes:4096});
+  await copy;
+  assert.deepEqual(ui.clipboard,["Safe handoff only"]);
+  const revoked=button.fire("click");
+  await ui.settle(ui.pending("get_mission_handoff"),new Error("HANDOFF_NOT_AUTHORIZED"),true);
+  await revoked;
+  assert.deepEqual(ui.clipboard,["Safe handoff only"]);
+  await ui.el("refreshMissionsBtn").fire("click");
+  await ui.settle(ui.pending("get_sessions"),{available:true,totals:{live:0},sessions:[],earlier:[]});
+  await ui.settle(ui.pending("get_missions_snapshot"),snapshot(false));
+  assert.equal(ui.select("[data-copy-handoff]").length,0);
+  assert.match(ui.el("missionsBody").innerHTML, /disabled[^>]*>Copy handoff/);
+  assert.match(ui.el("missionsBody").innerHTML, /handoff: desktop-copy/);
+});
+
+test("Session detail handoff uses only the backend permission and discards a reply after navigation", async () => {
+  const ui=await ready();
+  const mid="mis_"+"b".repeat(32);
+  const snapshot=(grant)=>({available:true,totals:{live:1},sessions:[
+    {sessionId:"s1",provider:"chatgpt",live:true,contexts:[
+      {contextId:"ctx_"+"a".repeat(32),missions:[
+        {missionId:mid,revision:9,goal:"Private",status:"active",copyHandoff:grant}
+      ]}
+    ],commands:[],toolCalls:[]}
+  ],earlier:[]});
+  await ui.el("missionsNavBtn").fire("click");
+  await ui.settle(ui.pending("get_missions_snapshot"),{configured:true,exists:true,missions:[],task_rooms:[]});
+  await ui.settle(ui.pending("get_sessions"),snapshot(false));
+  const row=ui.el("sessionsBody").querySelector("[data-session]");
+  await ui.el("sessionsBody").fire("click",row);
+  assert.equal(ui.el("sessionBody").querySelectorAll("[data-copy-handoff]").length,0);
+  await ui.settle(ui.pending("get_sessions"),snapshot(true));
+  const button=ui.el("sessionBody").querySelector("[data-copy-handoff]");
+  assert.ok(button);
+  const copy=button.fire("click");
+  const call=ui.pending("get_mission_handoff");
+  assert.deepEqual(JSON.parse(JSON.stringify(call.args)),{missionId:mid,revision:9});
+  await ui.el("sessionBackBtn").fire("click");
+  await ui.settle(call,{handoff:"Obsolete",truncated:false,max_bytes:4096});
+  await copy;
+  assert.deepEqual(ui.clipboard,[]);
+});
+
+test("extension Test button probes enabled servers and stays disabled when off or detached", async () => {
+  const data = extensionPanel(null, {
+    servers: [
+      { id: "enabled_srv", enabled: true, endpoint: "https://mcp.example.invalid/api" },
+      { id: "disabled_srv", enabled: false, endpoint: "https://off.example.invalid/api" },
+    ],
+    requests: [],
+  });
+  const ui = await ready(data);
+  await showApprovals(ui, data);
+  const testEnabled = ui.select('[data-ext-test="enabled_srv"]')[0];
+  const testDisabled = ui.select('[data-ext-test="disabled_srv"]')[0];
+  assert.ok(testEnabled && testDisabled);
+  assert.equal(testEnabled.disabled, false);
+  assert.equal(testDisabled.disabled, true);
+
+  await testDisabled.fire("click");
+  assert.equal(ui.calls.filter((call) => call.command === "test_extension_connection").length, 0);
+
+  const probe = testEnabled.fire("click");
+  const pending = ui.pending("test_extension_connection");
+  assert.equal(pending.args.server, "enabled_srv");
+  await ui.settle(pending, {
+    ok: true,
+    status: "ok",
+    latency_ms: 14,
+    protocol_version: "2026-07-28",
+  });
+  await ui.settle(ui.pending("get_oauth_pending"), { configured: true, pending: [] });
+  await ui.settle(ui.pending("get_panel_state"), data);
+  await probe;
+  assert.match(ui.el("toast").textContent, /enabled_srv connected \(14 ms\)/);
+  assert.match(ui.el("approvalsBody").innerHTML, /Check OK · 14 ms · 2026-07-28/);
+});
+
+test("settings diagnostics renders extension server status states and escapes values", async () => {
+  const ui = await ready();
+  await ui.el("settingsNavBtn").fire("click");
+  await ui.settle(ui.pending("get_diagnostics"), {
+    oauthKeystore: "Protected",
+    mcpBrowserProfiles: [],
+    extensionStatus: {
+      tracked_servers: 2,
+      slow_threshold_ms: 2000,
+      servers: [
+        { server: "docs_srv", state: "ready", last_latency_ms: 19, pool_idle_sessions: 1 },
+        { server: "bad<srv>", state: "error", last_error_class: "timeout<&>", last_latency_ms: 2500, pool_idle_sessions: 0 },
+      ],
+    },
+  });
+  await ui.settle(ui.pending("get_skills_overview"), { skills: [] });
+  const html = ui.el("skillsAndDiagBox").innerHTML;
+  assert.match(html, /Extension servers/);
+  assert.match(html, /<code>docs_srv<\/code> <span class="pill pill-ok">ready<\/span>/);
+  assert.match(html, /19 ms · pool 1 idle/);
+  assert.match(html, /<code>bad&lt;srv&gt;<\/code> <span class="pill pill-warn">error<\/span>/);
+  assert.match(html, /2500 ms · error timeout&lt;&amp;&gt; · pool 0 idle/);
+  assert.doesNotMatch(html, /<srv>|timeout<&>/);
+});
+
+test("extension Reload button invokes reload_extensions and resets stale probes", async () => {
+  const data = extensionPanel(null, {
+    servers: [{ id: "enabled_srv", enabled: true, endpoint: "https://mcp.example.invalid/api" }],
+    requests: [],
+  });
+  const ui = await ready(data);
+  await showApprovals(ui, data);
+  const reloadBtn = ui.select("[data-ext-reload]")[0];
+  assert.ok(reloadBtn);
+  assert.equal(reloadBtn.disabled, false);
+
+  const reload = reloadBtn.fire("click");
+  await ui.settle(ui.pending("reload_extensions"), {
+    ok: true,
+    generation: 2,
+    server_count: 1,
+  });
+  await ui.settle(ui.pending("get_oauth_pending"), { configured: true, pending: [] });
+  await ui.settle(ui.pending("get_panel_state"), data);
+  await reload;
+  assert.match(ui.el("toast").textContent, /Extensions reloaded \(1 server\(s\) · gen 2\)/);
+});
+
+test("extension Check OK clears when server becomes disabled or config changes, and diagnostics shows disabled", async () => {
+  const shaOne = "11".repeat(32);
+  const shaTwo = "22".repeat(32);
+  const dataOne = extensionPanel(null, {
+    generation: 1,
+    servers: [
+      { id: "srv_alpha", enabled: true, endpoint: "https://one.example.invalid/mcp", config_sha256: shaOne },
+    ],
+    requests: [],
+  });
+  const ui = await ready(dataOne);
+  await showApprovals(ui, dataOne);
+
+  const probe = ui.select('[data-ext-test="srv_alpha"]')[0].fire("click");
+  await ui.settle(ui.pending("test_extension_connection"), {
+    ok: true,
+    status: "ok",
+    latency_ms: 12,
+    protocol_version: "2026-07-28",
+    config_sha256: shaOne,
+    generation: 1,
+  });
+  await ui.settle(ui.pending("get_oauth_pending"), { configured: true, pending: [] });
+  await ui.settle(ui.pending("get_panel_state"), dataOne);
+  await probe;
+  assert.match(ui.el("approvalsBody").innerHTML, /Check OK · 12 ms/);
+
+  // 1. Server disabled -> Check OK must disappear immediately on approvals refresh.
+  const dataDisabled = extensionPanel(null, {
+    generation: 2,
+    servers: [
+      { id: "srv_alpha", enabled: false, endpoint: "https://one.example.invalid/mcp", config_sha256: shaOne },
+    ],
+    requests: [],
+  });
+  const refreshDisabled = ui.el("refreshApprovalsBtn").fire("click");
+  await ui.settle(ui.pending("get_oauth_pending"), { configured: true, pending: [] });
+  await ui.settle(ui.pending("get_panel_state"), dataDisabled);
+  await refreshDisabled;
+  assert.doesNotMatch(ui.el("approvalsBody").innerHTML, /Check OK/);
+
+  // 2. Re-enable with shaOne, probe OK, then replace config with shaTwo -> Check OK clears.
+  const refreshOne = ui.el("refreshApprovalsBtn").fire("click");
+  await ui.settle(ui.pending("get_oauth_pending"), { configured: true, pending: [] });
+  await ui.settle(ui.pending("get_panel_state"), dataOne);
+  await refreshOne;
+  const probe2 = ui.select('[data-ext-test="srv_alpha"]')[0].fire("click");
+  await ui.settle(ui.pending("test_extension_connection"), {
+    ok: true,
+    status: "ok",
+    latency_ms: 15,
+    config_sha256: shaOne,
+    generation: 1,
+  });
+  await ui.settle(ui.pending("get_oauth_pending"), { configured: true, pending: [] });
+  await ui.settle(ui.pending("get_panel_state"), dataOne);
+  await probe2;
+  assert.match(ui.el("approvalsBody").innerHTML, /Check OK · 15 ms/);
+
+  const dataReplaced = extensionPanel(null, {
+    generation: 3,
+    servers: [
+      { id: "srv_alpha", enabled: true, endpoint: "https://two.example.invalid/mcp", config_sha256: shaTwo },
+    ],
+    requests: [],
+  });
+  const refreshReplaced = ui.el("refreshApprovalsBtn").fire("click");
+  await ui.settle(ui.pending("get_oauth_pending"), { configured: true, pending: [] });
+  await ui.settle(ui.pending("get_panel_state"), dataReplaced);
+  await refreshReplaced;
+  assert.doesNotMatch(ui.el("approvalsBody").innerHTML, /Check OK/);
+
+  // 3. Diagnostics renders disabled pill with zero stale latency/pool metrics.
+  await ui.el("settingsNavBtn").fire("click");
+  await ui.settle(ui.pending("get_diagnostics"), {
+    oauthKeystore: "Protected",
+    mcpBrowserProfiles: [],
+    extensionStatus: {
+      tracked_servers: 1,
+      slow_threshold_ms: 2000,
+      servers: [
+        { server: "srv_alpha", enabled: false, state: "disabled", last_latency_ms: 99, pool_idle_sessions: 3 },
+      ],
+    },
+  });
+  await ui.settle(ui.pending("get_skills_overview"), { skills: [] });
+  const diagHtml = ui.el("skillsAndDiagBox").innerHTML;
+  assert.match(diagHtml, /<code>srv_alpha<\/code> <span class="pill">disabled<\/span>/);
+  assert.doesNotMatch(diagHtml, /99 ms|pool 3 idle|pill-ok|pill-warn/);
+});
+
+test("late extension Test response from old generation or replaced config is discarded", async () => {
+  const shaOne = "33".repeat(32);
+  const shaTwo = "44".repeat(32);
+  const dataOne = extensionPanel(null, {
+    generation: 1,
+    servers: [
+      { id: "srv_late", enabled: true, endpoint: "https://one.example.invalid/mcp", config_sha256: shaOne },
+    ],
+    requests: [],
+  });
+  const ui = await ready(dataOne);
+  await showApprovals(ui, dataOne);
+
+  // 1. Start probe on generation 1 / shaOne, then transition authority to generation 2 / shaTwo while in flight.
+  const lateProbe = ui.select('[data-ext-test="srv_late"]')[0].fire("click");
+  const pendingTest = ui.pending("test_extension_connection");
+
+  const dataTwo = extensionPanel(null, {
+    generation: 2,
+    servers: [
+      { id: "srv_late", enabled: true, endpoint: "https://two.example.invalid/mcp", config_sha256: shaTwo },
+    ],
+    requests: [],
+  });
+  await ui.emit("workstation-state", dataTwo);
+
+  // Now the late response for gen 1 / shaOne arrives: it must be ignored completely.
+  await ui.settle(pendingTest, {
+    ok: true,
+    status: "ok",
+    latency_ms: 7,
+    protocol_version: "2026-07-28",
+    config_sha256: shaOne,
+    generation: 1,
+  });
+  await ui.settle(ui.pending("get_oauth_pending"), { configured: true, pending: [] });
+  await ui.settle(ui.pending("get_panel_state"), dataTwo);
+  await lateProbe;
+
+  assert.doesNotMatch(ui.el("approvalsBody").innerHTML, /Check OK/);
+  assert.doesNotMatch(ui.el("toast").textContent, /srv_late connected/);
+
+  // 2. Start probe on generation 2 / shaTwo, then disable server while in flight -> late response discarded.
+  const lateProbeDisabled = ui.select('[data-ext-test="srv_late"]')[0].fire("click");
+  const pendingTestDisabled = ui.pending("test_extension_connection");
+
+  const dataDisabled = extensionPanel(null, {
+    generation: 3,
+    servers: [
+      { id: "srv_late", enabled: false, endpoint: "https://two.example.invalid/mcp", config_sha256: shaTwo },
+    ],
+    requests: [],
+  });
+  await ui.emit("workstation-state", dataDisabled);
+
+  await ui.settle(pendingTestDisabled, {
+    ok: true,
+    status: "ok",
+    latency_ms: 9,
+    protocol_version: "2026-07-28",
+    config_sha256: shaTwo,
+    generation: 2,
+  });
+  await ui.settle(ui.pending("get_oauth_pending"), { configured: true, pending: [] });
+  await ui.settle(ui.pending("get_panel_state"), dataDisabled);
+  await lateProbeDisabled;
+
+  assert.doesNotMatch(ui.el("approvalsBody").innerHTML, /Check OK/);
+  assert.doesNotMatch(ui.el("toast").textContent, /srv_late connected/);
 });

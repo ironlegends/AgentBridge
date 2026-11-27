@@ -19,6 +19,7 @@ dependencies = [
  "agent-bridge-web-launch",
  "axum",
  "getrandom 0.4.3",
+ "hex",
  "libc",
  "regex",
  "serde",
@@ -148,6 +149,7 @@ name = "agent-bridge-missions"
 version = "0.1.0"
 dependencies = [
  "agent-bridge-core",
+ "agent-bridge-leases",
  "chrono",
  "rand",
  "rusqlite",
@@ -172,6 +174,7 @@ dependencies = [
  "base64 0.23.1",
  "fs2",
  "getrandom 0.4.3",
+ "hex",
  "libc",
  "serde",
  "serde_json",

@@ -106,12 +106,20 @@ trait ExtBackend {
         effective_bytes: &[u8],
         controls: Option<&BTreeMap<String, ServerControl>>,
     ) -> io::Result<Self::Reg>;
+    // The real in-process owner applies committed restrictions before
+    // releasing the journal lock. Synthetic backends have no live routes.
+    fn committed(&self, _settings: &Path, _journal: &Journal) -> io::Result<super::RevocationAckReceipt> {
+        Ok(super::RevocationAckReceipt::default())
+    }
 }
 
 struct RealBackend;
 
 impl ExtBackend for RealBackend {
     type Reg = Registry;
+    fn committed(&self, settings: &Path, journal: &Journal) -> io::Result<super::RevocationAckReceipt> {
+        super::journal_committed(settings, journal)
+    }
     fn validate_stdio_spec(&self, spec: &StdioSpec) -> io::Result<()> {
         spec.validate()
     }
@@ -194,6 +202,16 @@ enum Proposal {
 }
 
 impl Proposal {
+    fn requires_acknowledged_base(&self) -> bool {
+        match self {
+            Self::Disable { .. } | Self::Remove { .. } | Self::AuthDisconnect { .. }
+            | Self::AuthStatus { .. } | Self::SetOauth { oauth: false, .. } => false,
+            Self::Add { .. } | Self::AddStdio { .. } | Self::Enable { .. }
+            | Self::SetOauth { oauth: true, .. } | Self::AuthStart { .. }
+            | Self::Refresh { .. } => true,
+        }
+    }
+
     fn name(&self) -> &str {
         match self {
             Self::Add { name, .. } | Self::AddStdio { name, .. } | Self::Remove { name }
@@ -344,7 +362,7 @@ enum ServerEntry {
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Journal {
+pub(super) struct Journal {
     version: u8,
     revision: u64,
     controls: BTreeMap<String, ServerControl>,
@@ -493,8 +511,16 @@ fn check_private_file(meta: &Metadata) -> io::Result<()> {
     Ok(())
 }
 
-fn private_options(options: &mut OpenOptions) {
+pub(super) fn apply_private_open_options(options: &mut OpenOptions) {
     admin_platform::options(options);
+}
+
+pub(super) fn check_private_handle(file: &File) -> io::Result<()> {
+    admin_platform::check(file)
+}
+
+fn private_options(options: &mut OpenOptions) {
+    apply_private_open_options(options);
 }
 
 fn existing_private(path: &Path) -> io::Result<Option<File>> {
@@ -639,8 +665,39 @@ impl OperatorLock {
 /// modifying `extensions.json`.
 pub(super) fn apply_local(settings: &Path, base_bytes: &[u8]) -> io::Result<Registry> {
     let journal = load(settings)?;
-    let effective = effective_registry_bytes(base_bytes, &journal)?;
+    apply_journal(base_bytes, &journal)
+}
+
+pub(super) fn apply_journal(base_bytes: &[u8], journal: &Journal) -> io::Result<Registry> {
+    let effective = effective_registry_bytes(base_bytes, journal)?;
     Registry::parse(&effective)?.with_controls(&journal.controls)
+}
+
+pub(super) fn journal_stamp(journal: &Journal) -> io::Result<(u64, String)> {
+    Ok((journal.revision, state_hash(journal)?))
+}
+
+/// The same OS lock as local decisions. Check the private settings boundary
+/// before creating/opening the lock. Parsing the base is deliberately left
+/// to the caller so an invalid candidate cannot hide a valid revocation.
+pub(super) fn with_current<T>(
+    settings: &Path, f: impl FnOnce(&[u8], &Journal) -> io::Result<T>,
+) -> io::Result<T> {
+    let read = || agent_bridge_lifecycle::read_operator_setting(settings, "extensions.json")
+        .map_err(|_| denied("Qualified private operator settings required"));
+    let _ = read().map_err(|err| { super::journal_unavailable(settings); err })?;
+    let _lock = OperatorLock::acquire(settings)?;
+    let bytes = read().map_err(|err| { super::journal_unavailable(settings); err })?;
+    let journal = load(settings).map_err(|err| { super::journal_unavailable(settings); err })?;
+    f(&bytes, &journal)
+}
+
+/// Read the already-committed private journal without acquiring `OperatorLock`
+/// (used by attached peers while the operator holds `OperatorLock` waiting for acks).
+pub(super) fn read_committed_for_reconcile(settings: &Path) -> io::Result<Journal> {
+    let _ = agent_bridge_lifecycle::read_operator_setting(settings, "extensions.json")
+        .map_err(|_| denied("Qualified private operator settings required"))?;
+    load(settings)
 }
 
 /// Web may *only* enqueue. All operation variants, including read-like
@@ -813,7 +870,12 @@ mod unified_header_admin_tests {
 /// Keep the CURRENT finalized decision and its effect together in one
 /// atomic journal replacement. Old finalized records may be compacted, but
 /// never discard the current receipt to squeeze in an unrecorded effect.
-fn persist_decision_with<B: ExtBackend>(backend: &B, settings: &Path, state: &mut Journal, ids: &[&str]) -> io::Result<()> {
+fn persist_decision_with<B: ExtBackend>(
+    backend: &B,
+    settings: &Path,
+    state: &mut Journal,
+    ids: &[&str],
+) -> io::Result<super::RevocationAckReceipt> {
     let size = |state: &Journal| -> io::Result<usize> {
         Ok(serde_json::to_vec(state)
             .map_err(|_| denied("Cannot encode extension journal"))?.len())
@@ -828,7 +890,18 @@ fn persist_decision_with<B: ExtBackend>(backend: &B, settings: &Path, state: &mu
     if size(state)? > MAX_JOURNAL {
         return Err(denied("Private journal full: cannot commit decision and effect atomically"));
     }
-    save_with(backend, settings, state)
+    save_with(backend, settings, state)?;
+    backend.committed(settings, state)
+}
+
+/// While the operator holds the writer lock, all live views must observe the
+/// last durable restrictions before a grant or remote action can supersede them.
+/// Reading the journal also covers a prior writer that exited before sending IPC.
+fn acknowledge_base<B: ExtBackend>(backend: &B, settings: &Path, journal: &Journal) -> io::Result<()> {
+    if journal.revision != 0 {
+        backend.committed(settings, journal)?;
+    }
+    Ok(())
 }
 
 /// Manual recovery: finished requests only. Pending requests and every
@@ -901,12 +974,14 @@ fn forget_absent(settings: &Path, name: &str) -> io::Result<Value> {
     {
         return Err(denied("Confirmation or server configuration changed"));
     }
+    acknowledge_base(&RealBackend, settings, &journal)?;
     journal.controls.remove(name);
     journal.revision = journal.revision.checked_add(1)
         .ok_or_else(|| denied("Decision revision exhausted"))?;
     save(settings, &journal)?;
+    let revocation_ack = RealBackend.committed(settings, &journal)?;
     Ok(json!({"forgotten":name,"configuration_changed":false,
-        "executed_network_operation":false}))
+        "executed_network_operation":false,"revocation_ack":revocation_ack}))
 }
 
 fn confirm_locally(verb: &str, id: &str, record: &Record) -> io::Result<()> {
@@ -978,8 +1053,10 @@ where
     let mut journal = load_with(backend, settings)?;
     let record = journal.requests.get(id).ok_or_else(|| denied("Unknown local proposal"))?;
     if record.status != Decision::Pending {
+        let revocation_ack = backend.committed(settings, &journal)?;
         let mut answer = json!({"request_id":id,"decision":record.status,
-            "effect_now":"none","reason":record.reason,"already_decided":true});
+            "effect_now":"none","reason":record.reason,"already_decided":true,
+            "revocation_ack":revocation_ack});
         if let Some(receipt) = &record.refresh_receipt {
             answer["refresh"] = receipt.clone();
             answer["remote_refreshed"] = json!(receipt.get("remote_refreshed")
@@ -1011,7 +1088,11 @@ where
     {
         Applied::refused(REASON_STALE)
     } else {
-        apply_approved(backend, settings, &current, &mut journal, id, revision, &payload, open_auth_url)?
+        let proposal = proposal_with(backend, &payload)?;
+        if proposal.requires_acknowledged_base() {
+            acknowledge_base(backend, settings, &journal)?;
+        }
+        apply_approved(backend, settings, &current, &mut journal, id, revision, proposal, open_auth_url)?
     };
     let record = journal.requests.get_mut(id).ok_or_else(|| denied("Unknown local proposal"))?;
     record.status = status;
@@ -1021,13 +1102,14 @@ where
         .ok_or_else(|| denied("Operator decision revision exhausted"))?;
     // The decision and its effective registry change are one durable journal
     // replacement. A failed write cannot acknowledge the operator's approval.
-    persist_decision_with(backend, settings, &mut journal, &[id])?;
+    let revocation_ack = persist_decision_with(backend, settings, &mut journal, &[id])?;
     let mut response = json!({
         "request_id":id,
         "decision_recorded":true,
         "decision":status,
         "effect_now":effect,
         "reason":reason,
+        "revocation_ack":revocation_ack,
         "executed_network_operation":refresh_receipt.is_some() || oauth_receipt.is_some(),
         "remote_refreshed":refresh_receipt.is_some(),
         "outbound_oauth_executed":oauth_receipt.is_some()
@@ -1094,7 +1176,7 @@ fn apply_approved<B, F>(
     journal: &mut Journal,
     id: &str,
     revision: u64,
-    payload: &Value,
+    proposal: Proposal,
     open_auth_url: F,
 ) -> io::Result<Applied>
 where
@@ -1107,7 +1189,7 @@ where
     let mut authentication = None;
     let mut oauth_receipt: Option<Value> = None;
     let mut refresh_receipt: Option<Value> = None;
-    let (status, reason) = match proposal_with(backend, payload)? {
+    let (status, reason) = match proposal {
         Proposal::Add { description: Some(_), .. } =>
             (Decision::Unsupported, Some("unapplied_parameters")),
         Proposal::Add {
@@ -1466,9 +1548,11 @@ fn decide_batch_with<B: ExtBackend>(
         return Err(denied("A proposal of this batch is stale; import again and approve the new proposals"));
     }
     let revision = journal.revision;
+    acknowledge_base(backend, settings, &journal)?;
     let mut decisions = Vec::new();
     for (id, (_, _, _, payload)) in ids.iter().zip(&records) {
-        let applied = apply_approved(backend, settings, &current, &mut journal, id, revision, payload,
+        let proposal = proposal_with(backend, payload)?;
+        let applied = apply_approved(backend, settings, &current, &mut journal, id, revision, proposal,
             |_| Err(denied("A batch approval never starts an OAuth flow")))?;
         if applied.status != Decision::Approved {
             let name = payload.get("name").and_then(Value::as_str).unwrap_or_default();
@@ -1488,8 +1572,9 @@ fn decide_batch_with<B: ExtBackend>(
     }
     journal.revision = journal.revision.checked_add(1)
         .ok_or_else(|| denied("Operator decision revision exhausted"))?;
-    persist_decision_with(backend, settings, &mut journal, ids)?;
+    let revocation_ack = persist_decision_with(backend, settings, &mut journal, ids)?;
     Ok(json!({"decision_recorded": true, "decisions": decisions,
+        "revocation_ack": revocation_ack,
         "executed_network_operation": false}))
 }
 
@@ -1533,10 +1618,12 @@ fn ui_overview_with<B: ExtBackend>(backend: &B, owner: &UiOAuthOwner, settings: 
             let id = server.get("id").and_then(Value::as_str);
             let endpoint = id.and_then(|id| registry.server_endpoint(id));
             let stdio = id.and_then(|id| server_stdio_spec(&registry, &journal, id));
+            let config_sha256 = id.and_then(|id| registry.server_sha256(id).ok().flatten());
             server["transport"] = json!(if stdio.is_some() { "stdio" } else { "http" });
             server["endpoint"] = json!(endpoint);
             server["executable"] = json!(stdio.map(|s| s.executable.as_str()));
             server["executable_sha256"] = json!(stdio.map(|s| s.executable_sha256.as_str()));
+            server["config_sha256"] = json!(config_sha256);
         }
     }
     let mut oauth_summary = Map::new();

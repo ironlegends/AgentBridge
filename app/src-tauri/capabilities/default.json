@@ -65,14 +65,18 @@
     "allow-start-or-restart-gateway",
     "allow-stop-gateway",
     "allow-get-missions-snapshot",
+    "allow-get-mission-handoff",
     "allow-get-oauth-pending",
     "allow-enable-oauth-enrollment",
     "allow-approve-oauth-request",
     "allow-decide-extension-request",
+    "allow-test-extension-connection",
+    "allow-reload-extensions",
     "allow-get-skills-overview",
     "allow-run-skill-action",
     "allow-get-diagnostics",
     "allow-get-sessions",
+    "allow-get-session-history",
     "allow-quit-app"
   ]
 }

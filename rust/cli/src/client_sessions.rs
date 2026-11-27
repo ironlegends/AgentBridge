@@ -1,5 +1,6 @@
 //! Per-boot observations of admitted MCP clients. No request payload is retained.
 
+use agent_bridge_missions::ActivityAttribution;
 use serde::de::IgnoredAny;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -37,6 +38,8 @@ struct ToolCall {
     tool_name: String,
     outcome: &'static str,
     time: String,
+    #[serde(flatten)]
+    activity: Option<ActivityAttribution>,
 }
 
 #[derive(Debug)]
@@ -48,6 +51,7 @@ struct Session {
     request_count: u64,
     in_flight: usize,
     tool_calls: VecDeque<ToolCall>,
+    tool_calls_evicted: u64,
     links: Links,
 }
 
@@ -61,6 +65,7 @@ impl Session {
             request_count: 0,
             in_flight: 0,
             tool_calls: VecDeque::new(),
+            tool_calls_evicted: 0,
             links: Links::default(),
         }
     }
@@ -72,6 +77,8 @@ impl Session {
 
 #[derive(Debug, Default)]
 struct Links {
+    activity: Option<ActivityAttribution>,
+    ambiguous_activity: bool,
     contexts: VecDeque<String>,
     commands: VecDeque<Arc<CommandRecord>>,
 }
@@ -90,6 +97,26 @@ thread_local! {
     static REQUEST_LINKS: RefCell<Option<Links>> = const { RefCell::new(None) };
 }
 
+/// Called only with the mission engine's typed authorization receipt.
+pub(crate) fn link_activity(activity: ActivityAttribution) {
+    REQUEST_LINKS.with_borrow_mut(|current| {
+        if let Some(links) = current {
+            if links.activity.as_ref().is_some_and(|prior| prior != &activity) {
+                links.ambiguous_activity = true;
+            }
+            if !links.ambiguous_activity {
+                remember(&mut links.contexts, activity.context_id().to_owned(), PartialEq::eq);
+                links.activity = Some(activity);
+            } else {
+                links.activity = None;
+                links.contexts.clear();
+            }
+        }
+    });
+}
+
+// Raw IDs are used only by the existing synthetic session-boundary fixtures.
+#[cfg(test)]
 pub(crate) fn link_context(id: &str) {
     if id.len() > 64 {
         return;
@@ -133,6 +160,8 @@ struct Registry {
     // Exclude even contexts whose session or link was evicted this boot.
     // On overflow, omit earlier contexts rather than mislabel them.
     seen_contexts: Option<BTreeSet<String>>,
+    sessions_evicted: u64,
+    admissions_dropped: u64,
 }
 
 impl Default for Registry {
@@ -141,6 +170,8 @@ impl Default for Registry {
             sessions: HashMap::new(),
             pending: HashMap::new(),
             seen_contexts: Some(BTreeSet::new()),
+            sessions_evicted: 0,
+            admissions_dropped: 0,
         }
     }
 }
@@ -156,6 +187,28 @@ struct Request<'a> {
     started: Instant,
     wall_time: String,
     registered: bool,
+}
+
+/// A response-admission receipt owned by its transport until the output boundary.
+/// Dropping it does not admit activity; Request::drop releases in-flight accounting.
+pub(crate) struct DispatchAdmission<'a> {
+    request: Request<'a>,
+    admitted: Option<(Links, Option<String>)>,
+}
+
+impl DispatchAdmission<'_> {
+    pub(crate) fn finish(self, delivered: bool) -> (Option<String>, Option<ActivityAttribution>) {
+        let Self { request, admitted } = self;
+        if delivered {
+            if let Some((links, tool)) = admitted {
+                let activity = links.activity.clone();
+                return (request.finish(links, tool, Instant::now()), activity);
+            }
+        }
+        let session_id = request.owner.session_id(&request.client);
+        drop(request);
+        (session_id, None)
+    }
 }
 
 impl ClientSessions {
@@ -182,6 +235,10 @@ impl ClientSessions {
         Request { owner: self, client, started, wall_time, registered }
     }
 
+    pub(crate) fn session_id(&self, client: &Client) -> Option<String> {
+        self.lock().sessions.get(client).map(|session| session.id.clone())
+    }
+
     pub(crate) fn dispatch(
         &self,
         client: Client,
@@ -190,6 +247,30 @@ impl ClientSessions {
         response_limit: usize,
         dispatch: impl FnOnce() -> Option<String>,
     ) -> Option<String> {
+        self.dispatch_observed(client, router, frame, response_limit, dispatch).0
+    }
+
+    pub(crate) fn dispatch_observed(
+        &self,
+        client: Client,
+        router: &crate::runtime::Router,
+        frame: &str,
+        response_limit: usize,
+        dispatch: impl FnOnce() -> Option<String>,
+    ) -> (Option<String>, Option<String>, Option<ActivityAttribution>) {
+        let (response, admission) = self.prepare_dispatch(client, router, frame, response_limit, dispatch);
+        let (session_id, activity) = admission.finish(true);
+        (response, session_id, activity)
+    }
+
+    pub(crate) fn prepare_dispatch(
+        &self,
+        client: Client,
+        router: &crate::runtime::Router,
+        frame: &str,
+        response_limit: usize,
+        dispatch: impl FnOnce() -> Option<String>,
+    ) -> (Option<String>, DispatchAdmission<'_>) {
         #[derive(Deserialize)]
         struct Frame<'a> {
             #[serde(borrow)]
@@ -208,14 +289,14 @@ impl ClientSessions {
         }
 
         let request = self.begin(client, Instant::now());
-        let (response, links) = collect_links(dispatch);
+        let (response, mut links) = collect_links(dispatch);
         // Only a successful router reply within the transport limit admits
         // activity. A silent notification supplies no admission outcome.
         let admitted = response.as_deref().filter(|body| body.len() <= response_limit)
             .and_then(|body| serde_json::from_str::<Reply<'_>>(body).ok())
             .is_some_and(|reply| reply.jsonrpc == "2.0" && reply.error.is_none() && !reply.result.is_error);
         if !admitted {
-            return response;
+            return (response, DispatchAdmission { request, admitted: None });
         }
         let tool = serde_json::from_str::<Frame<'_>>(frame).ok()
             .filter(|frame| frame.method.as_deref() == Some("tools/call"))
@@ -225,8 +306,11 @@ impl ClientSessions {
                     .find(|tool| tool.name == name)
                     .map(|tool| tool.name.chars().take(128).collect())
             });
-        request.finish(links, tool, Instant::now());
-        response
+        if !tool.as_deref().is_some_and(crate::audit_history::is_activity_tool) {
+            links.activity = None;
+            links.contexts.clear();
+        }
+        (response, DispatchAdmission { request, admitted: Some((links, tool)) })
     }
 
     fn views(&self, now: Instant) -> (Vec<SessionView>, Option<BTreeSet<String>>) {
@@ -240,6 +324,7 @@ impl ClientSessions {
                 live: session.live(now), request_count: session.request_count,
                 in_flight: session.in_flight,
                 tool_calls: session.tool_calls.iter().rev().cloned().collect(),
+                tool_calls_evicted: session.tool_calls_evicted,
                 context_ids: session.links.contexts.iter().rev().cloned().collect(),
                 terminal_session_ids: session.links.commands.iter().rev().map(|command| command.display_id.clone()).collect(),
                 contexts: Vec::new(),
@@ -281,7 +366,12 @@ impl ClientSessions {
         } else {
             Vec::new()
         };
+        let (sessions_evicted, admissions_dropped) = {
+            let registry = self.lock();
+            (registry.sessions_evicted, registry.admissions_dropped)
+        };
         Ok(json!({
+            "losses": {"sessions_evicted": sessions_evicted, "admissions_dropped": admissions_dropped},
             "boot_id": boot_id,
             "generated_at": timestamp(SystemTime::now()),
             "live_window_seconds": LIVE_WINDOW.as_secs(),
@@ -307,7 +397,7 @@ pub(crate) fn earlier_from_database(
 }
 
 impl Request<'_> {
-    fn finish(mut self, links: Links, tool: Option<String>, now: Instant) {
+    fn finish(mut self, links: Links, tool: Option<String>, now: Instant) -> Option<String> {
         let mut registry = self.owner.lock();
         if let Some(seen) = &mut registry.seen_contexts {
             seen.extend(links.contexts.iter().cloned());
@@ -321,9 +411,11 @@ impl Request<'_> {
                 .min_by_key(|(_, session)| (session.last_activity, &session.id))
                 .map(|(client, _)| client.clone())
             else {
-                return;
+                registry.admissions_dropped = registry.admissions_dropped.saturating_add(1);
+                return None;
             };
             registry.sessions.remove(&evict);
+            registry.sessions_evicted = registry.sessions_evicted.saturating_add(1);
         }
         if !registry.sessions.contains_key(&self.client) {
             let mut session = Session::new(self.started, self.wall_time.clone());
@@ -344,8 +436,9 @@ impl Request<'_> {
         if let Some(tool_name) = tool {
             if session.tool_calls.len() == MAX_CALLS {
                 session.tool_calls.pop_front();
+                session.tool_calls_evicted = session.tool_calls_evicted.saturating_add(1);
             }
-            session.tool_calls.push_back(ToolCall { tool_name, outcome: "success", time: completed });
+            session.tool_calls.push_back(ToolCall { tool_name, outcome: "success", time: completed, activity: links.activity });
         }
         for id in links.contexts {
             remember(&mut session.links.contexts, id, PartialEq::eq);
@@ -353,6 +446,7 @@ impl Request<'_> {
         for command in links.commands {
             remember(&mut session.links.commands, command, same_command);
         }
+        Some(session.id.clone())
     }
 }
 
@@ -384,6 +478,7 @@ struct SessionView {
     in_flight: usize,
     live: bool,
     tool_calls: Vec<ToolCall>,
+    tool_calls_evicted: u64,
     context_ids: Vec<String>,
     terminal_session_ids: Vec<String>,
     contexts: Vec<Value>,
@@ -473,6 +568,7 @@ mod tests {
         assert_eq!(entries.sessions[&client(0)].in_flight, 1);
         assert!(!entries.sessions.contains_key(&client(1)));
         assert!(entries.sessions.contains_key(&client(MAX_SESSIONS)));
+        assert_eq!(entries.sessions_evicted, 1);
         drop(entries);
         drop(held);
     }
@@ -490,12 +586,13 @@ mod tests {
         assert_eq!(entries.sessions.len(), 64);
         assert!(entries.sessions.values().all(|session| session.in_flight == 1));
         assert!(!entries.sessions.contains_key(&client(64)));
+        assert_eq!(entries.admissions_dropped, 1);
     }
 
     #[test]
     fn connected_sessions_live_window_counts_running_requests_after_expiry() {
         let registry = ClientSessions::default();
-        let start = Instant::now();
+        let start = Instant::now() - LIVE_WINDOW - Duration::from_secs(3);
         accept(&registry, Client::Local("http"), start);
         accept(&registry, Client::Local("stdio"), start + Duration::from_secs(1));
         assert!(registry.views(start + Duration::from_secs(120)).0.iter().all(|s| s.live));
@@ -506,8 +603,12 @@ mod tests {
         assert_eq!(views[0].transport, "http");
         assert!(views[0].live);
         assert!(!views[1].live);
+        let snapshot = registry.snapshot("example-boot", None, None).unwrap();
+        assert_eq!(snapshot["totals"], json!({ "live": 1, "connected": 2 }));
         drop(held);
         assert!(registry.views(after).0.iter().all(|s| !s.live));
+        let snapshot = registry.snapshot("example-boot", None, None).unwrap();
+        assert_eq!(snapshot["totals"], json!({ "live": 0, "connected": 2 }));
     }
 
     #[test]
@@ -607,6 +708,7 @@ mod tests {
         assert_eq!(session.context_ids.len(), 16);
         assert_eq!(session.terminal_session_ids.len(), 16);
         assert_eq!(session.tool_calls.len(), 10);
+        assert_eq!(session.tool_calls_evicted, 8);
         assert_eq!(session.context_ids[15], "example-context-2");
         assert_eq!(session.terminal_session_ids[15], expected_oldest_command.unwrap());
         assert_eq!(session.tool_calls[9].tool_name, "example-tool-8");

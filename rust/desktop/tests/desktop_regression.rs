@@ -667,3 +667,257 @@ fn skills_remote_provider_verified_sha256_and_mismatch_regressions() {
         .expect_err("oversized remote zip must fail");
     assert_eq!(err_sz.code, SkillErrorCode::LimitExceeded);
 }
+
+
+fn write_import_skill(root: &Path, package: &str, name: &str, version: &str, body: &str) {
+    let dir = root.join(package);
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(dir.join("SKILL.md"), format!(
+        "---\nname: {name}\ndescription: Synthetic documentary skill\nversion: {version}\nlicense: Apache-2.0\n---\n{body}\n"
+    )).unwrap();
+}
+
+#[test]
+fn operator_skill_import_reuses_seven_actions_and_immutable_provenance() {
+    let tmp=TempDir::new("operator-skill");
+    let root=tmp.path().join(".agents/skills");
+    let alternate=tmp.path().join(".claude/skills");
+    let store=tmp.path().join("store");
+    fs::create_dir_all(&store).unwrap();
+    write_import_skill(&root,"demo","demo","1","First revision");
+    write_import_skill(&alternate,"demo","demo","1","First revision");
+    let dir=root.join("demo");
+    fs::create_dir_all(dir.join("references")).unwrap();
+    fs::create_dir_all(dir.join("scripts")).unwrap();
+    fs::write(dir.join("references/readme.md"),"éclair fixture").unwrap();
+    fs::write(dir.join("scripts/example.py"),"raise RuntimeError('documentary only')\n").unwrap();
+    fs::write(dir.join("LICENSE"),"Synthetic license witness").unwrap();
+    let discovered=SkillManager::discover_operator_root(&root,||true).unwrap();
+    assert_eq!(discovered["candidates"],json!(["demo"]));
+    assert!(!discovered.to_string().contains(&root.display().to_string()));
+    assert!(SkillManager::discover_operator_root(&root,||false).is_err());
+    assert!(SkillManager::import_operator_directory(&store,&root,"demo",true,
+        ||false, |_|panic!("declined source must not be read")).is_err());
+    assert!(SkillManager::import_operator_directory(&store,&root,"demo",true,
+        ||true, |_|false).is_err());
+    assert!(!store.join("registry.json").exists());
+    let first=SkillManager::import_operator_directory(&store,&root,"demo",true,||true,|preview|{
+        assert_eq!(preview["source_kind"],"operator_approved_directory");
+        assert_eq!(preview["license"],"Apache-2.0");
+        assert_eq!(preview["file_count"],4);
+        assert_eq!(preview["bundled_scripts"],json!(["scripts/example.py"]));
+        true
+    }).unwrap();
+    let version=first["version"].as_str().unwrap().to_owned();
+    assert_eq!(first["active_version"],version);
+    assert_eq!(first["license"],"Apache-2.0");
+    let original_registry=fs::read(store.join("registry.json")).unwrap();
+    assert_eq!(serde_json::from_slice::<Value>(&original_registry).unwrap()["schema_version"],2);
+    let repeated=SkillManager::import_operator_directory(&store,&root,"demo",true,||true,|_|true).unwrap();
+    assert_eq!(repeated["already_installed"],true);
+    assert_eq!(repeated["activated"],false);
+    assert_eq!(fs::read(store.join("registry.json")).unwrap(),original_registry);
+
+    // A separate manager created by the existing tool path sees the same
+    // store; the external directory is not in its workspace capability.
+    let work=tmp.path().join("workspace");
+    fs::create_dir_all(&work).unwrap();
+    let files=DesktopFiles::open(DesktopConfig::new(&work)).unwrap();
+    let mgr=files.documentary_skills(&store).unwrap();
+    let listed=mgr.dispatch(&json!({"action":"list"})).unwrap();
+    assert_eq!(listed["skills"][0]["name"],"demo");
+    let got=mgr.dispatch(&json!({"action":"get","name":"demo"})).unwrap();
+    assert_eq!(got["manifest"]["license"],"Apache-2.0");
+    assert_eq!(got["manifest"]["source_ref"],first["source_ref"]);
+    assert_eq!(got["manifest"]["version"],version);
+    assert!(!got.to_string().contains(&root.display().to_string()));
+    assert!(got["manifest"]["files"].as_array().unwrap().iter()
+        .any(|entry|entry["path"]=="LICENSE"));
+    let resource=mgr.dispatch(&json!({"action":"read","name":"demo","version":version,
+        "resource_path":"references/readme.md","max_chars":3})).unwrap();
+    assert_eq!(resource["content"],"écl");
+    assert_eq!(resource["truncated"],true);
+    let script=mgr.dispatch(&json!({"action":"read","name":"demo","resource_path":"scripts/example.py"})).unwrap();
+    assert_eq!(script["is_script_document"],true);
+    assert_eq!(script["execution_policy"],"never_executed");
+    #[cfg(unix)] {
+        use std::os::unix::fs::PermissionsExt;
+        let path=store.join("skills/demo/revisions").join(version.strip_prefix("sha256:").unwrap())
+            .join("files/scripts/example.py");
+        assert_eq!(fs::metadata(path).unwrap().permissions().mode() & 0o111,0);
+    }
+    assert_eq!(mgr.dispatch(&json!({"action":"validate","name":"demo"})).unwrap()["valid"],true);
+    assert!(mgr.dispatch(&json!({"action":"validate","source_path":root.join("demo")})).is_err());
+    assert!(SkillManager::import_operator_directory(&store,&alternate,"demo",true,||true,|_|true).is_err());
+    write_import_skill(&work,"demo","demo","3","Foreign workspace");
+    assert!(mgr.dispatch(&json!({"action":"install","source_path":"demo"})).is_err());
+
+    // Snapshot approval binds the actual loaded bytes, not a second read.
+    write_import_skill(&root,"demo","demo","2","Second approved revision");
+    let second=SkillManager::import_operator_directory(&store,&root,"demo",false,||true,|_|{
+        write_import_skill(&root,"demo","demo","3","Changed after approval");
+        true
+    }).unwrap();
+    let v2=second["version"].as_str().unwrap();
+    assert_ne!(v2,version);
+    assert_eq!(second["active_version"],version);
+    mgr.dispatch(&json!({"action":"activate","name":"demo","version":v2})).unwrap();
+    let text=mgr.dispatch(&json!({"action":"read","name":"demo"})).unwrap();
+    assert!(text["content"].as_str().unwrap().contains("Second approved revision"));
+    assert!(!text["content"].as_str().unwrap().contains("Changed after approval"));
+    assert_eq!(mgr.dispatch(&json!({"action":"rollback","name":"demo"})).unwrap()["active_version"],version);
+    assert!(SkillManager::revoke_operator_import(&store,"demo",||false).is_err());
+    assert_eq!(SkillManager::revoke_operator_import(&store,"demo",||true).unwrap()["changed"],true);
+    assert_eq!(SkillManager::revoke_operator_import(&store,"demo",||true).unwrap()["changed"],false);
+    let reopened=files.documentary_skills(&store).unwrap();
+    assert_eq!(reopened.dispatch(&json!({"action":"list"})).unwrap()["count"],0);
+    for action in ["get","read","validate","activate","rollback"] {
+        assert!(reopened.dispatch(&json!({"action":action,"name":"demo","version":version})).is_err(),
+            "revoked revision exposed by {action}");
+    }
+    assert!(reopened.dispatch(&json!({"action":"install","source_path":"demo"})).is_err());
+    assert!(SkillManager::import_operator_directory(&store,&root,"demo",true,||true,|_|true).is_err());
+    write_import_skill(&root,"demo","renamed","4","Renamed revoked source");
+    assert!(SkillManager::import_operator_directory(&store,&root,"demo",true,||true,|_|true).is_err());
+    assert!(dir.join("SKILL.md").exists());
+}
+
+#[test]
+fn operator_skill_import_refuses_traversal_collisions_and_size_budgets() {
+    let tmp=TempDir::new("operator-skill-bounds");
+    let root=tmp.path().join("source");
+    let store=tmp.path().join("store");
+    fs::create_dir_all(&store).unwrap();
+    write_import_skill(&root,"good","demo","1","Example");
+    let import=|name:&str| SkillManager::import_operator_directory(&store,&root,name,false,||true,|_|true);
+    for bad in ["../good","good/../good","good\\references",".","..","/good","C:good",".hidden"] {
+        assert!(import(bad).is_err(),"{bad}");
+    }
+    let dir=root.join("good");
+    fs::write(dir.join("SKILL.md"),vec![b'a';512*1024+1]).unwrap();
+    assert_eq!(import("good").unwrap_err().code,SkillErrorCode::LimitExceeded);
+    write_import_skill(&root,"good","demo","1","Example");
+    fs::write(dir.join(".env"),"synthetic-do-not-read").unwrap();
+    assert!(import("good").is_err());
+    fs::remove_file(dir.join(".env")).unwrap();
+    fs::write(dir.join("blob.exe"),b"synthetic").unwrap();
+    assert!(import("good").is_err());
+    fs::remove_file(dir.join("blob.exe")).unwrap();
+    fs::write(dir.join("too-large.md"),vec![b'a';2*1024*1024+1]).unwrap();
+    assert_eq!(import("good").unwrap_err().code,SkillErrorCode::LimitExceeded);
+    fs::remove_file(dir.join("too-large.md")).unwrap();
+    for i in 0..256 { fs::write(dir.join(format!("ref-{i}.md")),"fixture").unwrap(); }
+    assert_eq!(import("good").unwrap_err().code,SkillErrorCode::LimitExceeded);
+    for i in 0..256 { fs::remove_file(dir.join(format!("ref-{i}.md"))).unwrap(); }
+    #[cfg(unix)] {
+        // Windows case-insensitive filesystems cannot create both names;
+        // the shared assembler rejects these on any case-sensitive host.
+        fs::write(dir.join("Resource.md"),"a").unwrap();
+        match fs::OpenOptions::new().write(true).create_new(true).open(dir.join("resource.md")) {
+            Ok(mut file) => {
+                file.write_all(b"b").unwrap();
+                drop(file);
+                assert!(import("good").is_err());
+                fs::remove_file(dir.join("resource.md")).unwrap();
+            }
+            Err(error) => assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists),
+        }
+        fs::remove_file(dir.join("Resource.md")).unwrap();
+    }
+    let mut deep=dir.clone();
+    for _ in 0..9 { deep=deep.join("nested"); }
+    fs::create_dir_all(&deep).unwrap();
+    fs::write(deep.join("ref.md"),"fixture").unwrap();
+    assert_eq!(import("good").unwrap_err().code,SkillErrorCode::LimitExceeded);
+    fs::remove_dir_all(dir.join("nested")).unwrap();
+    let chunk=vec![b'a';2*1024*1024];
+    for i in 0..8 { fs::write(dir.join(format!("large-{i}.md")),&chunk).unwrap(); }
+    assert_eq!(import("good").unwrap_err().code,SkillErrorCode::LimitExceeded);
+    for i in 0..8 { fs::remove_file(dir.join(format!("large-{i}.md"))).unwrap(); }
+    for i in 0..257 { fs::create_dir(root.join(format!("empty-{i}"))).unwrap(); }
+    assert_eq!(SkillManager::discover_operator_root(&root,||true).unwrap_err().code,SkillErrorCode::LimitExceeded);
+    assert!(!store.join("registry.json").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn operator_skill_import_refuses_linked_root_child_and_resources() {
+    use std::os::unix::fs::symlink;
+    let tmp=TempDir::new("operator-skill-links");
+    let root=tmp.path().join("root");
+    let store=tmp.path().join("store");
+    let outside=tmp.path().join("outside");
+    fs::create_dir_all(&store).unwrap();
+    write_import_skill(&root,"good","demo","1","Example");
+    write_import_skill(&outside,"target","outside","1","Synthetic outside");
+    symlink(outside.join("target"),root.join("linked")).unwrap();
+    let linked_root=tmp.path().join("linked-root");
+    symlink(&root,&linked_root).unwrap();
+    let import=|root:&Path,child:&str| SkillManager::import_operator_directory(&store,root,child,false,||true,|_|true);
+    assert!(import(&linked_root,"good").is_err());
+    assert!(import(&root,"linked").is_err());
+    symlink(outside.join("target/SKILL.md"),root.join("good/reference.md")).unwrap();
+    assert!(import(&root,"good").is_err());
+    fs::remove_file(root.join("good/reference.md")).unwrap();
+    fs::hard_link(outside.join("target/SKILL.md"),root.join("good/reference.md")).unwrap();
+    assert!(import(&root,"good").is_err());
+    assert!(!store.join("registry.json").exists());
+}
+
+#[cfg(windows)]
+#[test]
+fn operator_skill_import_refuses_windows_junction() {
+    use std::os::windows::process::CommandExt;
+    let tmp=TempDir::new("operator-skill-junction");
+    let root=tmp.path().join("root");
+    let store=tmp.path().join("store");
+    let outside=tmp.path().join("outside");
+    fs::create_dir_all(&store).unwrap();
+    write_import_skill(&root,"good","demo","1","Example");
+    write_import_skill(&outside,"target","outside","1","Synthetic outside");
+    let junction=root.join("linked");
+    let target=outside.join("target");
+    // A fixture-only junction requires no elevation. Refuse shell
+    // metacharacters in the synthetic temp paths; never use package input.
+    for path in [&junction,&target] {
+        assert!(!path.to_str().unwrap().chars().any(|c|matches!(c,'&'|'|'|'<'|'>'|'^'|'%'|'!'|'"'|'\r'|'\n')));
+    }
+    let output=std::process::Command::new("cmd.exe").args(["/d","/v:off","/c","mklink","/J"])
+        .arg(&junction).arg(&target).creation_flags(0x0800_0000).output().unwrap();
+    assert!(output.status.success(),"junction fixture creation failed");
+    let result=SkillManager::import_operator_directory(&store,&root,"linked",false,||true,|_|true);
+    fs::remove_dir(&junction).unwrap();
+    assert!(result.is_err());
+    assert!(!store.join("registry.json").exists());
+}
+
+#[test]
+fn operator_skill_import_preserves_legacy_records_and_refuses_revocation_downgrade() {
+    let tmp=TempDir::new("operator-skill-v1-v2");
+    let root=tmp.path().join("root");
+    let workspace=tmp.path().join("workspace");
+    let store=tmp.path().join("store");
+    fs::create_dir_all(&store).unwrap();
+    write_import_skill(&workspace,"legacy","legacy","1","Legacy source");
+    write_import_skill(&root,"collision","legacy","2","Foreign legacy replacement");
+    write_import_skill(&root,"approved","approved","1","Approved source");
+    let desktop=DesktopFiles::open(DesktopConfig::new(&workspace)).unwrap();
+    let mgr=desktop.documentary_skills(&store).unwrap();
+    mgr.dispatch(&json!({"action":"install","source_path":"legacy"})).unwrap();
+    let original=fs::read(store.join("registry.json")).unwrap();
+    assert_eq!(serde_json::from_slice::<Value>(&original).unwrap()["schema_version"],1);
+    assert!(SkillManager::import_operator_directory(&store,&root,"collision",true,||true,|_|true).is_err());
+    assert_eq!(fs::read(store.join("registry.json")).unwrap(),original);
+    SkillManager::import_operator_directory(&store,&root,"approved",true,||true,|_|true).unwrap();
+    assert_eq!(mgr.dispatch(&json!({"action":"list"})).unwrap()["count"],2);
+    assert!(mgr.dispatch(&json!({"action":"read","name":"legacy"})).unwrap()["content"]
+        .as_str().unwrap().contains("Legacy source"));
+    assert!(SkillManager::revoke_operator_import(&store,"legacy",||true).is_err());
+    SkillManager::revoke_operator_import(&store,"approved",||true).unwrap();
+    assert_eq!(mgr.dispatch(&json!({"action":"list"})).unwrap()["count"],1);
+    // A V1 marker over V2 fields must not erase a tombstone silently.
+    let mut registry:Value=serde_json::from_slice(&fs::read(store.join("registry.json")).unwrap()).unwrap();
+    registry["schema_version"]=json!(1);
+    fs::write(store.join("registry.json"),serde_json::to_vec(&registry).unwrap()).unwrap();
+    assert_eq!(mgr.dispatch(&json!({"action":"list"})).unwrap_err().code,SkillErrorCode::CorruptStore);
+}

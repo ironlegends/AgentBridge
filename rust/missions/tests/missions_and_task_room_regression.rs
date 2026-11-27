@@ -643,3 +643,289 @@ fn task_room_all_11_actions_isolation_rotation_and_state_guard_regressions() {
     assert!(task_room::dispatch_scoped(conn, &json!({"action": "list", "context_handle": h1}), ws_a).is_err());
     assert!(task_room::dispatch_scoped(conn, &json!({"action": "list", "context_handle": h2}), ws_a).is_ok());
 }
+
+#[test]
+fn mission_handoff_requires_attached_member_and_resumes_without_replay() {
+    let mut fixture = TempDb::new("handoff-resume");
+    let conn = fixture.db.connection_mut();
+    let owner = dispatch_tool(conn, "agent_bridge_context_create", &json!({})).unwrap();
+    let next = dispatch_tool(conn, "agent_bridge_context_create", &json!({})).unwrap();
+    let stranger = dispatch_tool(conn, "agent_bridge_context_create", &json!({})).unwrap();
+    let h1 = owner["context_handle"].as_str().unwrap();
+    let h2 = next["context_handle"].as_str().unwrap();
+    let h3 = stranger["context_handle"].as_str().unwrap();
+    let secret = format!("Bearer synthetic-secret | {h1} | powershell.exe -Command fake-output");
+    let m = dispatch_tool(conn, "agent_bridge_mission_create", &json!({
+        "actor_context_handle": h1, "goal": secret, "idempotency_key": "handoff-mission"
+    })).unwrap();
+    let mid = m["mission_id"].as_str().unwrap();
+    let handoff_args = |handle: &str| json!({"actor_context_handle": handle, "mission_id": mid});
+
+    for handle in [h2, h3, next["context_id"].as_str().unwrap()] {
+        let refused = dispatch_tool(conn, "agent_bridge_mission_handoff", &handoff_args(handle));
+        assert_eq!(refused.err().unwrap().code, "SECURITY_DENIED");
+    }
+    let mut extra = handoff_args(h1);
+    extra["max_bytes"] = json!(100000);
+    assert!(dispatch_tool(conn, "agent_bridge_mission_handoff", &extra).is_err());
+    let invited = dispatch_tool(conn, "agent_bridge_mission_grant", &json!({
+        "actor_context_handle": h1, "mission_id": mid, "if_revision": rev_of(&m),
+        "target_context_id": next["context_id"]
+    })).unwrap();
+    assert_eq!(dispatch_tool(conn, "agent_bridge_mission_handoff", &handoff_args(h2))
+        .err().unwrap().code, "SECURITY_DENIED");
+    let attached = dispatch_tool(conn, "agent_bridge_mission_attach", &json!({
+        "actor_context_handle": h2, "mission_id": mid, "if_revision": rev_of(&invited)
+    })).unwrap();
+    let first = dispatch_tool(conn, "agent_bridge_mission_checkpoint", &json!({
+        "actor_context_handle": h1, "mission_id": mid,
+        "if_revision": rev_of(&attached), "summary": secret
+    })).unwrap();
+    let checkpoint = dispatch_tool(conn, "agent_bridge_mission_checkpoint", &json!({
+        "actor_context_handle": h1, "mission_id": mid,
+        "if_revision": rev_of(&first), "summary": "handoff: verify"
+    })).unwrap();
+    let created = dispatch_tool(conn, "agent_bridge_mission_subtask_create", &json!({
+        "actor_context_handle": h1, "mission_id": mid, "goal": secret,
+        "assignee_context_id": next["context_id"], "idempotency_key": "handoff-task"
+    })).unwrap();
+    let sid = created["subtask"]["subtask_id"].as_str().unwrap();
+    let update = json!({
+        "actor_context_handle": h2, "mission_id": mid, "subtask_id": sid,
+        "if_revision": created["subtask"]["revision"], "status": "in_progress",
+        "summary": secret, "idempotency_key": "handoff-progress"
+    });
+    let progress = dispatch_tool(conn, "agent_bridge_mission_subtask_update", &update).unwrap();
+    let before = dispatch_tool(conn, "agent_bridge_mission_observe", &handoff_args(h2)).unwrap();
+    let handoff = dispatch_tool(conn, "agent_bridge_mission_handoff", &handoff_args(h2)).unwrap();
+    let text = handoff["handoff"].as_str().unwrap();
+    assert!(text.contains(mid));
+    assert!(text.contains(owner["context_id"].as_str().unwrap()));
+    assert!(text.contains(next["context_id"].as_str().unwrap()));
+    assert!(text.contains(sid));
+    assert!(text.contains("in_progress"));
+    assert!(text.contains(&format!("Latest checkpoint at revision {}: Run the agreed verification.", rev_of(&checkpoint))));
+    assert!(text.contains("free-form text omitted"));
+    for forbidden in [h1, h2, h3, m["actor_context_handle"].as_str().unwrap(),
+        "synthetic-secret", "powershell.exe", "fake-output", "handoff-progress"] {
+        assert!(!handoff.to_string().contains(forbidden), "private or raw data escaped the projection");
+    }
+    assert_eq!(dispatch_tool(conn, "agent_bridge_mission_handoff", &handoff_args(h2)).unwrap(), handoff);
+    let after = dispatch_tool(conn, "agent_bridge_mission_observe", &handoff_args(h2)).unwrap();
+    assert_eq!(before, after, "handoff must not alter ownership or mission revision");
+
+    // Resume after an uncertain update by reading, then reconcile the exact
+    // idempotent receipt. A stale ownership decision must still conflict.
+    let replay = dispatch_tool(conn, "agent_bridge_mission_subtask_update", &update).unwrap();
+    assert_eq!(replay["replayed"], true);
+    assert_eq!(replay["subtask"], progress["subtask"]);
+    let stale = dispatch_tool(conn, "agent_bridge_mission_transfer", &json!({
+        "actor_context_handle": h1, "mission_id": mid, "if_revision": rev_of(&attached),
+        "target_context_id": next["context_id"]
+    }));
+    assert_eq!(stale.err().unwrap().code, "CONFLICT_REVISION");
+    let transferred = dispatch_tool(conn, "agent_bridge_mission_transfer", &json!({
+        "actor_context_handle": h1, "mission_id": mid, "if_revision": rev_of(&after),
+        "target_context_id": next["context_id"]
+    })).unwrap();
+    let resumed = dispatch_tool(conn, "agent_bridge_mission_handoff", &handoff_args(h2)).unwrap();
+    assert!(resumed["handoff"].as_str().unwrap().contains(&format!("Owner: {}", next["context_id"].as_str().unwrap())));
+    assert!(resumed["handoff"].as_str().unwrap().contains(&format!("revision {}", rev_of(&transferred))));
+}
+
+#[test]
+fn mission_handoff_caps_the_serialized_utf8_projection_and_omits_unknown_text() {
+    let mut fixture = TempDb::new("handoff-cap");
+    let conn = fixture.db.connection_mut();
+    let owner = dispatch_tool(conn, "agent_bridge_context_create", &json!({})).unwrap();
+    let handle = owner["context_handle"].as_str().unwrap();
+    let mission = dispatch_tool(conn, "agent_bridge_mission_create", &json!({
+        "actor_context_handle": handle, "goal": "handoff: implement", "idempotency_key": "cap-mission"
+    })).unwrap();
+    let mid = mission["mission_id"].as_str().unwrap();
+    let mut first_id = String::new();
+    for n in 0..24 {
+        let task = dispatch_tool(conn, "agent_bridge_mission_subtask_create", &json!({
+            "actor_context_handle": handle, "mission_id": mid,
+            "goal": format!("handoff: review\nsecret-{}-{}", n, "é😀".repeat(400)),
+            "assignee_context_id": owner["context_id"], "idempotency_key": format!("cap-{n}")
+        })).unwrap();
+        if n == 0 { first_id = task["subtask"]["subtask_id"].as_str().unwrap().to_owned(); }
+    }
+    let view = dispatch_tool(conn, "agent_bridge_mission_handoff", &json!({
+        "actor_context_handle": handle, "mission_id": mid
+    })).unwrap();
+    assert_eq!(view["truncated"], true);
+    assert_eq!(view["max_bytes"], agent_bridge_missions::handoff::MAX_HANDOFF_BYTES);
+    let bytes = serde_json::to_vec(&view).unwrap();
+    assert!(bytes.len() <= agent_bridge_missions::handoff::MAX_HANDOFF_BYTES);
+    let serialized = std::str::from_utf8(&bytes).unwrap();
+    assert!(!serialized.contains("secret-"));
+    assert!(!serialized.contains("Request independent review."));
+    assert!(!serialized.contains(handle));
+    let text = view["handoff"].as_str().unwrap();
+    assert!(text.contains("Goal: Continue implementation."));
+    assert!(text.contains(&first_id));
+    assert!(text.ends_with('\n'));
+}
+
+#[test]
+fn handoff_desktop_grant_is_member_bound_current_and_expiring() {
+    use agent_bridge_missions::{handoff, operator};
+    let mut fixture = TempDb::new("handoff-copy");
+    let conn = fixture.db.connection_mut();
+    let owner = dispatch_tool(conn, "agent_bridge_context_create", &json!({})).unwrap();
+    let member = dispatch_tool(conn, "agent_bridge_context_create", &json!({})).unwrap();
+    let h1 = owner["context_handle"].as_str().unwrap();
+    let h2 = member["context_handle"].as_str().unwrap();
+    let m = dispatch_tool(conn, "agent_bridge_mission_create", &json!({
+        "actor_context_handle":h1,"goal":"Finish #170 and qualify #123; synthetic confidential prose",
+        "idempotency_key":"copy-mission"
+    })).unwrap();
+    let mid = m["mission_id"].as_str().unwrap();
+    assert!(handoff::desktop_copy_handoff(conn, mid, rev_of(&m)).is_err());
+    let invited = dispatch_tool(conn, "agent_bridge_mission_grant", &json!({
+        "actor_context_handle":h1,"mission_id":mid,"if_revision":rev_of(&m),
+        "target_context_id":member["context_id"]
+    })).unwrap();
+    let checkpoint = |actor: &str, revision: i64, summary: &str| json!({
+        "actor_context_handle":actor,"mission_id":mid,"if_revision":revision,"summary":summary
+    });
+    assert!(dispatch_tool(conn, "agent_bridge_mission_checkpoint",
+        &checkpoint(h2,rev_of(&invited),"handoff: desktop-copy")).is_err());
+    let attached = dispatch_tool(conn, "agent_bridge_mission_attach", &json!({
+        "actor_context_handle":h2,"mission_id":mid,"if_revision":rev_of(&invited)
+    })).unwrap();
+    let bad_note = dispatch_tool(conn, "agent_bridge_mission_checkpoint",
+        &checkpoint(h2,rev_of(&attached),"handoff: verify #999999")).unwrap();
+    let note = dispatch_tool(conn, "agent_bridge_mission_checkpoint",
+        &checkpoint(h2,rev_of(&bad_note),"handoff: verify #170 #123")).unwrap();
+    let grant = dispatch_tool(conn, "agent_bridge_mission_checkpoint",
+        &checkpoint(h2,rev_of(&note),"handoff: desktop-copy")).unwrap();
+    let rev = rev_of(&grant);
+    let copied = handoff::desktop_copy_handoff(conn, mid, rev).unwrap();
+    let text = copied["handoff"].as_str().unwrap();
+    assert!(text.contains("Goal: Work on #170, #123."));
+    assert!(text.contains("Run the agreed verification. Tickets: #170, #123."));
+    assert!(!text.contains("#999999"));
+    assert!(!text.contains("synthetic confidential prose"));
+    assert!(!copied.to_string().contains(h2));
+    assert!(copied.to_string().len()<=handoff::MAX_HANDOFF_BYTES);
+    let snapshot = operator::inspect_operator_snapshot(conn, 20).unwrap();
+    assert_eq!(snapshot["missions"][0]["copy_handoff"], true);
+    let ids = vec![owner["context_id"].as_str().unwrap().to_owned(),member["context_id"].as_str().unwrap().to_owned()];
+    let (contexts, _) = operator::inspect_session_contexts(conn, &ids, None, 64_000).unwrap();
+    assert_eq!(contexts[0].as_ref().unwrap()["missions"][0]["copy_handoff"], false);
+    assert_eq!(contexts[1].as_ref().unwrap()["missions"][0]["copy_handoff"], true);
+    assert!(handoff::desktop_copy_handoff(conn, mid, rev-1).is_err());
+    let denied = dispatch_tool(conn, "agent_bridge_mission_checkpoint",
+        &checkpoint(h2,rev,"handoff: revoke-copy")).unwrap();
+    assert!(handoff::desktop_copy_handoff(conn, mid, rev).is_err());
+    assert!(handoff::desktop_copy_handoff(conn, mid, rev_of(&denied)).is_err());
+
+    let fresh = dispatch_tool(conn, "agent_bridge_mission_checkpoint",
+        &checkpoint(h2,rev_of(&denied),"handoff: desktop-copy")).unwrap();
+    let fresh_rev=rev_of(&fresh);
+    conn.execute("UPDATE mission_memberships SET state='invited' WHERE mission_id=?1 AND context_hash=(SELECT handle_hash FROM agent_contexts WHERE context_id=?2)",
+        rusqlite::params![mid,ids[1]]).unwrap();
+    assert!(handoff::desktop_copy_handoff(conn,mid,fresh_rev).is_err());
+    conn.execute("UPDATE mission_memberships SET state='attached' WHERE mission_id=?1 AND context_hash=(SELECT handle_hash FROM agent_contexts WHERE context_id=?2)",
+        rusqlite::params![mid,ids[1]]).unwrap();
+    conn.execute("UPDATE mission_checkpoints SET created_at='2999-01-01T00:00:00Z' WHERE mission_id=?1 AND revision=?2",
+        rusqlite::params![mid,fresh_rev]).unwrap();
+    assert!(handoff::desktop_copy_handoff(conn,mid,fresh_rev).is_err());
+    conn.execute("UPDATE mission_checkpoints SET created_at='2000-01-01T00:00:00Z' WHERE mission_id=?1 AND revision=?2",
+        rusqlite::params![mid,fresh_rev]).unwrap();
+    assert!(handoff::desktop_copy_handoff(conn,mid,fresh_rev).is_err());
+    assert_eq!(operator::inspect_operator_snapshot(conn,20).unwrap()["missions"][0]["copy_handoff"], false);
+}
+
+#[test]
+fn handoff_uses_the_member_published_goal_and_blocker_without_copying_raw_prose() {
+    let mut fixture = TempDb::new("handoff-brief");
+    let conn = fixture.db.connection_mut();
+    let owner = dispatch_tool(conn, "agent_bridge_context_create", &json!({})).unwrap();
+    let actor = owner["context_handle"].as_str().unwrap();
+    let mission = dispatch_tool(conn, "agent_bridge_mission_create", &json!({
+        "actor_context_handle":actor, "idempotency_key":"brief-mission",
+        "goal":"Restore session history after restart for #160. Private support transcript."
+    })).unwrap();
+    let mid = mission["mission_id"].as_str().unwrap();
+    let task = dispatch_tool(conn, "agent_bridge_mission_subtask_create", &json!({
+        "actor_context_handle":actor, "mission_id":mid, "idempotency_key":"brief-task",
+        "assignee_context_id":owner["context_id"], "goal":"Check session history for #160."
+    })).unwrap();
+    let sub = task["subtask"]["subtask_id"].as_str().unwrap();
+    let mut revision = rev_of(&task["subtask"]);
+    for (state, key, summary) in [("in_progress","brief-start",""),("blocked","brief-block","handoff: blocked session-history needs approval #160")] {
+        let mut args = json!({"actor_context_handle":actor,"mission_id":mid,"subtask_id":sub,
+            "if_revision":revision,"status":state,"idempotency_key":key});
+        if !summary.is_empty() { args["summary"] = json!(summary); }
+        let update = dispatch_tool(conn, "agent_bridge_mission_subtask_update", &args).unwrap();
+        revision = rev_of(&update["subtask"]);
+    }
+    let observe = json!({"actor_context_handle":actor,"mission_id":mid});
+    for note in ["handoff: goal restore session-history #160","Private support transcript.",
+        "Unrelated result.","Another private result.","handoff: desktop-copy"] {
+        let revision = rev_of(&dispatch_tool(conn, "agent_bridge_mission_observe", &observe).unwrap());
+        dispatch_tool(conn, "agent_bridge_mission_checkpoint", &json!({
+            "actor_context_handle":actor,"mission_id":mid,"if_revision":revision,"summary":note
+        })).unwrap();
+    }
+    let revision = rev_of(&dispatch_tool(conn, "agent_bridge_mission_observe", &observe).unwrap());
+    let view = agent_bridge_missions::handoff::desktop_copy_handoff(conn, mid, revision).unwrap();
+    let text = view["handoff"].as_str().unwrap();
+    assert!(text.contains("Goal: Restore session history. Tickets: #160."), "{text}");
+    assert!(text.contains("Blocked on session history. Needs operator approval. Tickets: #160."), "{text}");
+    assert!(!text.contains("transcript") && !text.contains("private result") && !text.contains(actor));
+}
+
+#[test]
+fn handoff_lease_projection_requires_exact_mission_operation_and_reopen_preserves_receipts() {
+    use agent_bridge_missions::handoff;
+    let mut fixture = TempDb::new("handoff-reopen");
+    let database_path = fixture.db.path().to_owned();
+    let conn = fixture.db.connection_mut();
+    let actor = dispatch_tool(conn,"agent_bridge_context_create",&json!({})).unwrap();
+    let h = actor["context_handle"].as_str().unwrap();
+    let m = dispatch_tool(conn,"agent_bridge_mission_create",&json!({
+        "actor_context_handle":h,"goal":"Complete #170","idempotency_key":"lease-mission"
+    })).unwrap();
+    let mid = m["mission_id"].as_str().unwrap();
+    let other = dispatch_tool(conn,"agent_bridge_mission_create",&json!({
+        "actor_context_handle":h,"goal":"Other mission","idempotency_key":"other-lease-mission"
+    })).unwrap();
+    let other_mid=other["mission_id"].as_str().unwrap();
+    let op: String=conn.query_row("SELECT operation_id FROM operations WHERE mission_id=?1 LIMIT 1",[mid],|r|r.get(0)).unwrap();
+    let other_op: String=conn.query_row("SELECT operation_id FROM operations WHERE mission_id=?1 LIMIT 1",[other_mid],|r|r.get(0)).unwrap();
+    let lease_rows=[
+        ("private-resource-valid",format!("mission:{mid}:op:{op}"),"2099-01-01T00:00:00Z"),
+        ("private-resource-foreign",format!("mission:{other_mid}:op:{other_op}"),"2099-01-01T00:00:00Z"),
+        ("private-resource-mismatched",format!("mission:{mid}:op:{other_op}"),"2099-01-01T00:00:00Z"),
+        ("private-resource-expired",format!("mission:{mid}:op:{op}"),"2000-01-01T00:00:00Z"),
+        ("private-resource-unbound",op.clone(),"2099-01-01T00:00:00Z"),
+    ];
+    for (key,owner,expiry) in lease_rows {
+        conn.execute("INSERT INTO resource_leases(resource_key,owner_operation,generation,token,expires_at,conflict_scope) VALUES(?1,?2,1,1,?3,'exact')",
+            rusqlite::params![key,owner,expiry]).unwrap();
+    }
+    let create = json!({"actor_context_handle":h,"mission_id":mid,"goal":"handoff: implement #170","assignee_context_id":actor["context_id"],"idempotency_key":"reopen-task"});
+    let task = dispatch_tool(conn,"agent_bridge_mission_subtask_create",&create).unwrap();
+    let update = json!({"actor_context_handle":h,"mission_id":mid,"subtask_id":task["subtask"]["subtask_id"],
+        "if_revision":task["subtask"]["revision"],"status":"in_progress","idempotency_key":"reopen-start"});
+    let receipt=dispatch_tool(conn,"agent_bridge_mission_subtask_update",&update).unwrap();
+    let before=handoff::mission_handoff(conn,h,mid).unwrap();
+    assert!(before["handoff"].as_str().unwrap().contains("Mission-bound active lease rows: 1."));
+    assert!(!before.to_string().contains("private-resource"));
+    assert!(!before.to_string().contains(&op));
+    assert!(!before.to_string().contains(other_mid));
+    let spare=CoreDatabase::initialize_new(fixture.dir.join("spare.sqlite")).unwrap();
+    drop(std::mem::replace(&mut fixture.db,spare));
+    let mut reopened=CoreDatabase::open_existing(&database_path).unwrap();
+    let conn=reopened.connection_mut();
+    assert_eq!(handoff::mission_handoff(conn,h,mid).unwrap(),before);
+    let reconciled=dispatch_tool(conn,"agent_bridge_mission_subtask_update",&update).unwrap();
+    assert_eq!(reconciled["replayed"],true);
+    assert_eq!(reconciled["subtask"],receipt["subtask"]);
+    assert_eq!(handoff::mission_handoff(conn,h,mid).unwrap(),before);
+}

@@ -37,7 +37,6 @@ use crate::native_windows::TunnelChild;
 impl TunnelChild {
     fn pid(&self) -> u32 { self.process.pid }
     fn exited(&self) -> Result<Option<u32>, String> { self.process.exited() }
-    fn stop(&mut self) -> Result<(), String> { self.process.stop() }
 }
 
 pub struct ManagedTunnel {

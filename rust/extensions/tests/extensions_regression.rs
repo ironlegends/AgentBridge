@@ -562,3 +562,256 @@ fn http_server_fingerprint_and_overview_unchanged() {
         {"id": "example", "enabled": false, "tools": []},
         {"id": "plain", "enabled": true, "tools": []}]));
 }
+
+#[test]
+fn connection_test_http_covers_success_handshake_failure_and_unapproved_refusal() {
+    use std::io::{BufRead, BufReader, Read, Write};
+    use std::net::{Ipv4Addr, TcpListener};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use std::thread;
+
+    let calls_seen = Arc::new(AtomicUsize::new(0));
+    let calls_seen_srv = Arc::clone(&calls_seen);
+
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let endpoint = format!("http://127.0.0.1:{port}/mcp");
+    let srv = thread::spawn(move || {
+        for _ in 0..2 {
+            let Ok((mut stream, _)) = listener.accept() else { break };
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut len = 0usize;
+            loop {
+                let mut line = String::new();
+                if reader.read_line(&mut line).unwrap_or(0) == 0 || line == "\r\n" {
+                    break;
+                }
+                if let Some((k, v)) = line.split_once(':') {
+                    if k.eq_ignore_ascii_case("content-length") {
+                        len = v.trim().parse().unwrap_or(0);
+                    }
+                }
+            }
+            let mut body = vec![0u8; len];
+            reader.read_exact(&mut body).unwrap();
+            let req: Value = serde_json::from_slice(&body).unwrap();
+            let id = req["id"].clone();
+            let method = req["method"].as_str().unwrap_or("");
+            if method == "tools/call" {
+                calls_seen_srv.fetch_add(1, Ordering::SeqCst);
+            }
+            let resp = match method {
+                "server/discover" => json!({
+                    "jsonrpc": "2.0", "id": id,
+                    "result": {
+                        "resultType": "complete",
+                        "supportedVersions": ["2026-07-28"],
+                        "capabilities": {"tools": {}},
+                        "ttlMs": 0, "cacheScope": "private"
+                    }
+                }),
+                "tools/list" => json!({
+                    "jsonrpc": "2.0", "id": id,
+                    "result": {
+                        "resultType": "complete", "ttlMs": 0, "cacheScope": "private",
+                        "tools": [{"name": "list_items", "inputSchema": {"type": "object"}}]
+                    }
+                }),
+                _ => json!({"jsonrpc": "2.0", "id": id, "error": {"code": -32601, "message": "unexpected"}}),
+            };
+            let text = resp.to_string();
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{text}",
+                text.len()
+            )
+            .unwrap();
+        }
+    });
+
+    let raw = serde_json::to_vec(&json!({
+        "version": 1,
+        "servers": {
+            "approved_http": { "endpoint": endpoint, "tools": {} },
+            "disabled_http": { "endpoint": "http://127.0.0.1:1/mcp", "tools": {} }
+        }
+    }))
+    .unwrap();
+    let parsed = Registry::parse(&raw).unwrap();
+    let dis_fp = parsed.server_sha256("disabled_http").unwrap().unwrap();
+    let controls = BTreeMap::from([(
+        "disabled_http".to_owned(),
+        ServerControl { enabled: false, config_sha256: dis_fp },
+    )]);
+    let reg = Registry::parse(&raw).unwrap().with_controls(&controls).unwrap();
+
+    // Unapproved / unknown and disabled servers refuse before any network probe.
+    assert!(reg.test_connection("unknown_server").is_err());
+    assert!(reg.test_connection("disabled_http").is_err());
+
+    // Approved HTTP server succeeds without granting or calling tools.
+    let ok = reg.test_connection("approved_http").unwrap();
+    srv.join().unwrap();
+    assert_eq!(ok["ok"], true);
+    assert_eq!(ok["status"], "ok");
+    assert_eq!(ok["transport"], "http");
+    assert_eq!(ok["protocol_version"], "2026-07-28");
+    assert_eq!(ok["live_tool_count"], 1);
+    assert_eq!(ok["approved_tool_count"], 0);
+    assert_eq!(ok["approved_grants_changed"], false);
+    assert_eq!(ok["registry_changed"], false);
+    assert_eq!(ok["tool_invoked"], false);
+    assert!(ok["latency_ms"].as_u64().is_some());
+    assert!(ok["error_class"].is_null());
+    assert_eq!(calls_seen.load(Ordering::SeqCst), 0);
+
+    // Handshake failure reports structured error_class and latency_ms without tool call.
+    let bad_listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let bad_port = bad_listener.local_addr().unwrap().port();
+    let bad_srv = thread::spawn(move || {
+        let (mut stream, _) = bad_listener.accept().unwrap();
+        let mut sink = [0u8; 2048];
+        let _ = stream.read(&mut sink);
+        let body = b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+        let _ = stream.write_all(body);
+    });
+    let bad_raw = serde_json::to_vec(&json!({
+        "version": 1,
+        "servers": {
+            "bad_http": { "endpoint": format!("http://127.0.0.1:{bad_port}/mcp"), "tools": {} }
+        }
+    }))
+    .unwrap();
+    let bad_reg = Registry::parse(&bad_raw).unwrap();
+    let failed = bad_reg.test_connection("bad_http").unwrap();
+    bad_srv.join().unwrap();
+    assert_eq!(failed["ok"], false);
+    assert_eq!(failed["status"], "error");
+    assert_eq!(failed["error_class"], "handshake_failed");
+    assert_eq!(failed["tool_invoked"], false);
+    assert_eq!(failed["approved_grants_changed"], false);
+    assert!(failed["latency_ms"].as_u64().is_some());
+}
+
+#[test]
+fn http_probe_admit_and_cancel_on_revocation_during_handshake_and_list() {
+    use agent_bridge_extensions::{LiveExtensionRegistry, StatusTracker};
+    use std::io::{BufRead, BufReader, Read, Write};
+    use std::net::{Ipv4Addr, TcpListener};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use std::thread;
+    use std::time::{Duration, Instant};
+
+    for stall_on_list in [false, true] {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let entered = Arc::new(AtomicBool::new(false));
+        let stop = Arc::new(AtomicBool::new(false));
+        let calls_seen = Arc::new(AtomicUsize::new(0));
+        let entered_srv = Arc::clone(&entered);
+        let stop_srv = Arc::clone(&stop);
+        let calls_srv = Arc::clone(&calls_seen);
+
+        let srv = thread::spawn(move || {
+            let _ = listener.set_nonblocking(false);
+            let mut held = Vec::new();
+            for _ in 0..4 {
+                if stop_srv.load(Ordering::Acquire) {
+                    break;
+                }
+                let Ok((mut stream, _)) = listener.accept() else { break };
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut len = 0usize;
+                loop {
+                    let mut line = String::new();
+                    if reader.read_line(&mut line).unwrap_or(0) == 0 || line == "\r\n" {
+                        break;
+                    }
+                    if let Some((k, v)) = line.split_once(':') {
+                        if k.eq_ignore_ascii_case("content-length") {
+                            len = v.trim().parse().unwrap_or(0);
+                        }
+                    }
+                }
+                if len == 0 {
+                    continue;
+                }
+                let mut body = vec![0u8; len];
+                if reader.read_exact(&mut body).is_err() {
+                    continue;
+                }
+                let req: Value = serde_json::from_slice(&body).unwrap();
+                let id = req["id"].clone();
+                let method = req["method"].as_str().unwrap_or("");
+                if method == "tools/call" {
+                    calls_srv.fetch_add(1, Ordering::SeqCst);
+                }
+                if (!stall_on_list && method == "server/discover") || (stall_on_list && method == "tools/list") {
+                    entered_srv.store(true, Ordering::Release);
+                    held.push((stream, reader));
+                    while !stop_srv.load(Ordering::Acquire) {
+                        thread::sleep(Duration::from_millis(20));
+                    }
+                    break;
+                }
+                if method == "server/discover" {
+                    let text = json!({
+                        "jsonrpc": "2.0", "id": id,
+                        "result": {
+                            "resultType": "complete",
+                            "supportedVersions": ["2026-07-28"],
+                            "capabilities": {"tools": {}},
+                            "ttlMs": 0, "cacheScope": "private"
+                        }
+                    })
+                    .to_string();
+                    let _ = write!(
+                        stream,
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{text}",
+                        text.len()
+                    );
+                } else {
+                    break;
+                }
+            }
+            drop(held);
+        });
+
+        let raw = serde_json::to_vec(&json!({
+            "version": 1,
+            "servers": {
+                "http_srv": { "endpoint": format!("http://127.0.0.1:{port}/mcp"), "tools": {} }
+            }
+        }))
+        .unwrap();
+        let initial = Registry::parse(&raw).unwrap();
+        let pool = agent_bridge_extensions::SessionPool::new();
+        let status = StatusTracker::new();
+        let live = LiveExtensionRegistry::new(initial, pool.clone(), status.clone());
+
+        let admitted = live.admit_probe("http_srv").unwrap();
+        let started = Instant::now();
+        let err = thread::scope(|scope| {
+            let probe = scope.spawn(|| admitted.execute());
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while !entered.load(Ordering::Acquire) {
+                assert!(Instant::now() < deadline, "HTTP probe did not reach stall point");
+                thread::sleep(Duration::from_millis(10));
+            }
+            let revoked = live.revoke_server("http_srv").unwrap();
+            assert_eq!(revoked.removed_or_disabled, 1);
+            assert_eq!(revoked.cancelled_in_flight, 1);
+            probe.join().unwrap().unwrap_err()
+        });
+        assert!(started.elapsed() < Duration::from_secs(3), "HTTP probe cancellation took {:?}", started.elapsed());
+        assert!(err.to_string().contains("cancelled due to revocation"), "{err}");
+        assert_eq!(calls_seen.load(Ordering::SeqCst), 0);
+        let snap = status.snapshot_for_registry(&live.current(), Some(&pool), Some(live.generation()));
+        assert_eq!(snap["servers"][0]["state"], "disabled");
+
+        stop.store(true, Ordering::Release);
+        srv.join().unwrap();
+    }
+}
