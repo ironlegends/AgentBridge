@@ -13,7 +13,7 @@ profile, auxiliary web service or installation step at application startup.
 | --- | --- | --- |
 | Node.js | 24.14.0 win-x64 | Official nodejs.org ZIP and node.exe SHA-256 from SHASUMS256.txt |
 | playwright-core | 1.65.1 | Exact npm archive SHA-512 integrity in package-lock.json |
-| Chromium for Testing | 159.0.8154.6, Playwright revision 1243 | Distribution URL from this Playwright package's browsers.json/installer, exact archive SHA-256 |
+| Chromium for Testing | 159.0.8154.6, Playwright revision 1255 | Distribution URL from this Playwright package's browsers.json/installer, exact archive SHA-256 |
 
 The fixed hashes are constants in `scripts/rust/package-browser-worker.py`.
 The build only accepts offline archives. It rejects traversal, case aliases,
