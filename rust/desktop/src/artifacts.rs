@@ -309,38 +309,32 @@ impl ArtifactStore {
 pub(super) fn tool_spec() -> ToolSpec {
     spec(
         "desktop_artifact_manage",
-        "Keep a temporary, checksum-verified copy of a workspace file for chunked reads. Publish returns artifact metadata; list finds stored IDs, get returns metadata, read returns a chunk and next offset, and delete removes the stored copy. Publishing and deleting require a writable profile. The source file is unchanged.",
+        "Publish a policy-approved workspace file into a temporary checksum-verified agent-bridge artifact, list or inspect artifacts, read bounded chunks, or delete an artifact. Publishing never expands workspace access and requires a writable agent-bridge profile.",
         json!({
             "action": {
-                "description": "Operation to perform. Supply path for publish and artifact_id for get, read or delete; list accepts an optional limit.",
                 "type": "string",
                 "enum": ["publish", "list", "get", "read", "delete"]
             },
             "artifact_id": {
-                "description": "Instance-local ID from publish or list. Required for get, read and delete.",
                 "type": "string",
                 "minLength": 1,
                 "maxLength": MAX_ARTIFACT_ID_BYTES
             },
             "encoding": {
-                "description": "Representation of a read chunk: utf8 for text or base64 for arbitrary bytes.",
                 "type": "string",
                 "enum": ["utf8", "base64"]
             },
             "length": {
-                "description": "Maximum bytes to read in this chunk. Used only with read.",
                 "type": "integer",
                 "minimum": 1,
                 "maximum": MAX_ARTIFACT_READ_BYTES
             },
             "limit": {
-                "description": "Maximum number of artifacts to return for list.",
                 "type": "integer",
                 "minimum": 1,
                 "maximum": MAX_LIST_LIMIT
             },
             "offset": {
-                "description": "Zero-based byte offset for read. Use next_offset from the preceding chunk.",
                 "type": "integer",
                 "minimum": 0,
                 "maximum": MAX_SAFE_INTEGER
@@ -352,7 +346,6 @@ pub(super) fn tool_spec() -> ToolSpec {
                 "description": "Workspace-relative path of a regular file"
             },
             "retention_seconds": {
-                "description": "Lifetime of the stored copy from publication, in seconds. Used only with publish.",
                 "type": "integer",
                 "minimum": MIN_RETENTION_SECONDS,
                 "maximum": MAX_RETENTION_SECONDS

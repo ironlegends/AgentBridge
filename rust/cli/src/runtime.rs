@@ -202,7 +202,9 @@ pub fn project_read_router(
             serde_json::from_value(result)
                 .map_err(|_| ToolDispatchError::internal("PROJECT_READ_UNAVAILABLE"))
         });
-        catalog.push(desktop_definition(spec));
+        catalog.push(ToolDefinition::new(
+            name, Some(spec.description.to_owned()), spec.input_schema,
+        ));
     }
     if catalog.len() != READ_TOOLS.len() {
         return Err("Required read-only DesktopFiles tools are unavailable".into());
@@ -269,20 +271,6 @@ struct DesktopSurface {
     settings_tools: bool,
     terminal_tool: bool,
     processes: bool,
-}
-
-fn desktop_definition(spec: agent_bridge_desktop::ToolSpec) -> ToolDefinition {
-    let mut tool = ToolDefinition::new(spec.name, Some(spec.description.into()), spec.input_schema);
-    tool.annotations = match spec.name {
-        "desktop_get_file_info" | "desktop_list_directory" | "desktop_search" | "desktop_policy_status" =>
-            Some(json!({"readOnlyHint": true, "openWorldHint": false})),
-        // A read may issue an instance-local observation. Artifact actions can publish or delete.
-        "desktop_read_file" => Some(json!({"openWorldHint": false})),
-        "desktop_artifact_manage" => Some(json!({"readOnlyHint": false, "destructiveHint": true,
-            "idempotentHint": false, "openWorldHint": false})),
-        _ => None,
-    };
-    tool
 }
 
 /// Reuse the *same* DesktopFiles, Task Room, skill, extension and terminal
@@ -444,7 +432,7 @@ fn attach_desktop_surface(
             serde_json::from_value(response)
                 .map_err(|_| ToolDispatchError::internal("Invalid workstation tool response"))
         });
-        catalog.push(desktop_definition(tool));
+        catalog.push(ToolDefinition::new(name,Some(tool.description.to_owned()),tool.input_schema));
     }
     if selection.web_read_only
         && catalog.iter().filter(|tool| tool.name.starts_with("desktop_")).count() != 4
@@ -795,6 +783,34 @@ fn guard_live_workstation(
     Ok(guarded)
 }
 
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WorkspaceToolDocs {
+    description: String,
+    annotations: Value,
+    #[serde(default)]
+    parameters: std::collections::BTreeMap<String, String>,
+}
+
+// Only the foreground stdio workspace uses these descriptions. OAuth workstation
+// manifests seal the complete serialized definitions, including their wording.
+fn document_stdio_workspace(catalog: &mut [ToolDefinition]) -> Result<(), RuntimeError> {
+    let docs: std::collections::BTreeMap<String, WorkspaceToolDocs> =
+        serde_json::from_str(include_str!("../../../contracts/stdio-workspace-tool-docs.json"))?;
+    for tool in catalog {
+        let Some(entry) = docs.get(&tool.name) else { continue };
+        tool.description = Some(entry.description.clone());
+        tool.annotations = Some(entry.annotations.clone());
+        for (name, description) in &entry.parameters {
+            let field = tool.input_schema["properties"].get_mut(name)
+                .and_then(Value::as_object_mut)
+                .ok_or("Documented stdio parameter missing from the tool schema")?;
+            field.insert("description".into(), Value::String(description.clone()));
+        }
+    }
+    Ok(())
+}
+
 fn open_qualified(
     database_path: &Path,
     workspace: Option<Workspace>,
@@ -857,6 +873,7 @@ fn open_qualified(
             },
             &mut catalog,&mut handlers,supervisors,None,None,
         )?;
+        document_stdio_workspace(&mut catalog)?;
     } else if let Some(settings) = settings {
         // Preserve the existing mission-only stdio + explicitly selected
         // operator settings behavior; never enabled on the Web mission route.

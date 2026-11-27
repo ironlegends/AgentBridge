@@ -1,0 +1,286 @@
+{
+  "agent_bridge_status": {
+    "description": "Check the gateway's version, Rust backend, database schema, and active desktop profile before diagnosing a connection. Use desktop_policy_status for workspace limits and permitted file operations.",
+    "annotations": {
+      "readOnlyHint": true,
+      "openWorldHint": false
+    }
+  },
+  "agent_bridge_context_create": {
+    "description": "Register a new actor before creating or joining a mission. Returns a public context_id for invitations and a private context_handle for subsequent calls. Keep the handle secret and reuse it; another call creates a different identity.",
+    "annotations": {
+      "readOnlyHint": false,
+      "openWorldHint": false,
+      "destructiveHint": false,
+      "idempotentHint": false
+    }
+  },
+  "agent_bridge_mission_create": {
+    "description": "Start a durable mission owned by your context. Returns the mission ID, goal, status and revision. Use mission_list to find existing work. For a retry, reuse the original goal and idempotency key.",
+    "annotations": {
+      "readOnlyHint": false,
+      "openWorldHint": false,
+      "destructiveHint": false,
+      "idempotentHint": true
+    },
+    "parameters": {
+      "actor_context_handle": "Private context_handle returned by agent_bridge_context_create. Authenticate as its owner; never share this value.",
+      "goal": "Work to be accomplished, written for the agents participating in this mission.",
+      "idempotency_key": "Caller-chosen key for this operation. Reuse it only with the same arguments when retrying."
+    }
+  },
+  "agent_bridge_mission_get": {
+    "description": "Read one mission's goal, status, revision and timestamps as an attached member. Use mission_observe to check an invitation or identify the current owner; it also works before attachment.",
+    "annotations": {
+      "readOnlyHint": true,
+      "openWorldHint": false
+    },
+    "parameters": {
+      "actor_context_handle": "Private context_handle returned by agent_bridge_context_create. Authenticate as its owner; never share this value.",
+      "mission_id": "ID of the target mission, returned by mission_create or mission_list."
+    }
+  },
+  "agent_bridge_mission_observe": {
+    "description": "Check your invitation or membership before a handoff. Returns the mission revision, current owner's public ID, your role and attachment state. For the goal and work status, attached members can use mission_get.",
+    "annotations": {
+      "readOnlyHint": true,
+      "openWorldHint": false
+    },
+    "parameters": {
+      "actor_context_handle": "Private context_handle returned by agent_bridge_context_create. Authenticate as its owner; never share this value.",
+      "mission_id": "ID of the target mission, returned by mission_create or mission_list."
+    }
+  },
+  "agent_bridge_mission_grant": {
+    "description": "Invite another context to an existing mission as its current owner. This records an invitation; the target must call mission_attach to join. Use the mission revision from mission_observe and reconcile an uncertain reply before retrying.",
+    "annotations": {
+      "readOnlyHint": false,
+      "openWorldHint": false,
+      "destructiveHint": false,
+      "idempotentHint": false
+    },
+    "parameters": {
+      "actor_context_handle": "Private context_handle returned by agent_bridge_context_create. Authenticate as its owner; never share this value.",
+      "mission_id": "ID of the target mission, returned by mission_create or mission_list.",
+      "if_revision": "Current mission revision from mission_observe. A stale revision is rejected.",
+      "target_context_id": "Public context_id of the other actor. A private context_handle is not accepted here."
+    }
+  },
+  "agent_bridge_mission_attach": {
+    "description": "Accept your invitation at the observed mission revision. Returns the current mission. If you are already attached, repeating this call returns the mission without changing it, even with an older revision.",
+    "annotations": {
+      "readOnlyHint": false,
+      "openWorldHint": false,
+      "destructiveHint": false,
+      "idempotentHint": true
+    },
+    "parameters": {
+      "actor_context_handle": "Private context_handle returned by agent_bridge_context_create. Authenticate as its owner; never share this value.",
+      "mission_id": "ID of the target mission, returned by mission_create or mission_list.",
+      "if_revision": "Mission revision from mission_observe. Required for first attachment. An already attached member may repeat the call with an older revision."
+    }
+  },
+  "agent_bridge_mission_transfer": {
+    "description": "Transfer ownership to a different, already attached member. This changes who can assign work or complete the mission. Check the owner and revision with mission_observe after an uncertain reply.",
+    "annotations": {
+      "readOnlyHint": false,
+      "openWorldHint": false,
+      "destructiveHint": true,
+      "idempotentHint": false
+    },
+    "parameters": {
+      "actor_context_handle": "Private context_handle returned by agent_bridge_context_create. Authenticate as its owner; never share this value.",
+      "mission_id": "ID of the target mission, returned by mission_create or mission_list.",
+      "if_revision": "Current mission revision from mission_observe. A stale revision is rejected.",
+      "target_context_id": "Public context_id of the other actor. A private context_handle is not accepted here."
+    }
+  },
+  "agent_bridge_mission_list": {
+    "description": "Find missions to which your context is attached, most recently created first. Returns up to the requested number of mission records. For one known mission, use mission_get.",
+    "annotations": {
+      "readOnlyHint": true,
+      "openWorldHint": false
+    },
+    "parameters": {
+      "actor_context_handle": "Private context_handle returned by agent_bridge_context_create. Authenticate as its owner; never share this value.",
+      "limit": "Maximum number of records to return; defaults to 20."
+    }
+  },
+  "agent_bridge_mission_checkpoints": {
+    "description": "Read saved result summaries for a mission you have joined, newest revision first. Returns checkpoint IDs, summaries and revisions, including an empty list when none exist. To append a summary, use the singular mission_checkpoint tool.",
+    "annotations": {
+      "readOnlyHint": true,
+      "openWorldHint": false
+    },
+    "parameters": {
+      "actor_context_handle": "Private context_handle returned by agent_bridge_context_create. Authenticate as its owner; never share this value.",
+      "mission_id": "ID of the target mission, returned by mission_create or mission_list.",
+      "limit": "Maximum number of records to return; defaults to 20."
+    }
+  },
+  "agent_bridge_mission_checkpoint": {
+    "description": "Append one durable progress summary to a mission you have joined. This advances the mission revision and returns the updated mission record. For history, or to check whether a write succeeded before retrying, use the plural mission_checkpoints tool.",
+    "annotations": {
+      "readOnlyHint": false,
+      "openWorldHint": false,
+      "destructiveHint": false,
+      "idempotentHint": false
+    },
+    "parameters": {
+      "actor_context_handle": "Private context_handle returned by agent_bridge_context_create. Authenticate as its owner; never share this value.",
+      "mission_id": "ID of the target mission, returned by mission_create or mission_list.",
+      "summary": "Progress or result to record for this mission.",
+      "if_revision": "Current mission revision from mission_observe. A stale revision is rejected."
+    }
+  },
+  "agent_bridge_mission_subtask_create": {
+    "description": "Create one unit of work inside a mission you own. Leave it unassigned or name an attached member. Returns the subtask and a replay indicator. Reuse the same key and arguments for a retry.",
+    "annotations": {
+      "readOnlyHint": false,
+      "openWorldHint": false,
+      "destructiveHint": false,
+      "idempotentHint": true
+    },
+    "parameters": {
+      "actor_context_handle": "Private context_handle returned by agent_bridge_context_create. Authenticate as its owner; never share this value.",
+      "mission_id": "ID of the target mission, returned by mission_create or mission_list.",
+      "goal": "Specific assignment to create within the mission.",
+      "assignee_context_id": "Public context_id of an attached mission member who should perform this work.",
+      "idempotency_key": "Caller-chosen key for this operation. Reuse it only with the same arguments when retrying."
+    }
+  },
+  "agent_bridge_mission_subtask_assign": {
+    "description": "Assign pending or blocked work to an attached member as the mission owner. Supply the subtask revision from mission_subtask_list. Returns the updated subtask and a replay indicator.",
+    "annotations": {
+      "readOnlyHint": false,
+      "openWorldHint": false,
+      "destructiveHint": true,
+      "idempotentHint": true
+    },
+    "parameters": {
+      "actor_context_handle": "Private context_handle returned by agent_bridge_context_create. Authenticate as its owner; never share this value.",
+      "mission_id": "ID of the target mission, returned by mission_create or mission_list.",
+      "subtask_id": "ID of the assignment returned by mission_subtask_create or mission_subtask_list.",
+      "idempotency_key": "Caller-chosen key for this operation. Reuse it only with the same arguments when retrying.",
+      "if_revision": "Current revision of this subtask from mission_subtask_list, distinct from the mission revision.",
+      "assignee_context_id": "Public context_id of an attached mission member who should perform this work."
+    }
+  },
+  "agent_bridge_mission_subtask_list": {
+    "description": "Read a mission's assignments, progress and result summaries as an attached member. Use a subtask ID for one assignment, or page through creation order with the returned cursor.",
+    "annotations": {
+      "readOnlyHint": true,
+      "openWorldHint": false
+    },
+    "parameters": {
+      "actor_context_handle": "Private context_handle returned by agent_bridge_context_create. Authenticate as its owner; never share this value.",
+      "mission_id": "ID of the target mission, returned by mission_create or mission_list.",
+      "subtask_id": "Return only this assignment. Omit to list the mission's assignments.",
+      "limit": "Maximum number of records to return; defaults to 20.",
+      "after_created_revision": "Pagination cursor. Pass next_after_created_revision from the previous page to continue."
+    }
+  },
+  "agent_bridge_mission_subtask_update": {
+    "description": "Update your assigned work using its current subtask revision. Start with in_progress, then record blocked or completed with a summary. The mission owner can also release another assignee's in-progress work as blocked. Returns the subtask and a replay indicator.",
+    "annotations": {
+      "readOnlyHint": false,
+      "openWorldHint": false,
+      "destructiveHint": true,
+      "idempotentHint": true
+    },
+    "parameters": {
+      "actor_context_handle": "Private context_handle returned by agent_bridge_context_create. Authenticate as its owner; never share this value.",
+      "mission_id": "ID of the target mission, returned by mission_create or mission_list.",
+      "subtask_id": "ID of the assignment returned by mission_subtask_create or mission_subtask_list.",
+      "idempotency_key": "Caller-chosen key for this operation. Reuse it only with the same arguments when retrying.",
+      "if_revision": "Current revision of this subtask from mission_subtask_list, distinct from the mission revision.",
+      "status": "Next state of this assignment. Start work with in_progress before reporting blocked or completed.",
+      "summary": "Required for blocked or completed work. Describe the blocker, reason for release or result. Optional for in_progress."
+    }
+  },
+  "agent_bridge_mission_complete": {
+    "description": "Close a mission you own at its current revision. This changes the mission status to completed and returns the mission record. Use mission_subtask_update to finish only one assignment; reuse the original key and arguments for a retry.",
+    "annotations": {
+      "readOnlyHint": false,
+      "openWorldHint": false,
+      "destructiveHint": true,
+      "idempotentHint": true
+    },
+    "parameters": {
+      "actor_context_handle": "Private context_handle returned by agent_bridge_context_create. Authenticate as its owner; never share this value.",
+      "mission_id": "ID of the target mission, returned by mission_create or mission_list.",
+      "if_revision": "Current mission revision from mission_observe. A stale revision is rejected.",
+      "idempotency_key": "Caller-chosen key for this operation. Reuse it only with the same arguments when retrying."
+    }
+  },
+  "desktop_policy_status": {
+    "description": "Inspect the selected workspace's file access, enabled tools and operation limits before choosing a file operation. This reads policy; it does not change permissions. For gateway version and health, use agent_bridge_status.",
+    "annotations": {
+      "readOnlyHint": true,
+      "openWorldHint": false
+    }
+  },
+  "desktop_get_file_info": {
+    "description": "Inspect one workspace entry without reading its contents. Returns its kind, file size when applicable, read-only flag and modification time when available. Use desktop_list_directory for children or desktop_read_file for text.",
+    "annotations": {
+      "readOnlyHint": true,
+      "openWorldHint": false
+    }
+  },
+  "desktop_list_directory": {
+    "description": "Browse children of a workspace directory. Returns entry metadata and a truncation flag when traversal reaches a limit. Use desktop_search to find names matching a pattern rather than enumerating a whole subtree.",
+    "annotations": {
+      "readOnlyHint": true,
+      "openWorldHint": false
+    },
+    "parameters": {
+      "depth": "Number of directory levels to traverse. Use 1 for immediate children."
+    }
+  },
+  "desktop_read_file": {
+    "description": "Read a window of lines from a UTF-8 file. Returns content, line counts, truncation, a SHA-256 digest and a five-minute observation ID for this instance. Reading leaves the file unchanged. Use desktop_get_file_info for metadata alone.",
+    "annotations": {
+      "openWorldHint": false
+    },
+    "parameters": {
+      "path": "Workspace-relative path to a regular UTF-8 file.",
+      "offset": "Zero-based line index. A negative offset counts from the end of the file.",
+      "length": "Maximum number of text lines to return."
+    }
+  },
+  "desktop_search": {
+    "description": "Find matching filenames or UTF-8 text under a workspace directory in a single bounded search. Returns matches and a truncation flag. Narrow the path or filename filter for incomplete results; use desktop_read_file to inspect a match.",
+    "annotations": {
+      "readOnlyHint": true,
+      "openWorldHint": false
+    },
+    "parameters": {
+      "pattern": "Expression to match against a filename or a line of text. Interpreted as a regex unless literal_search is true.",
+      "search_type": "Match filenames with files, or text lines with content when the active profile permits it.",
+      "file_pattern": "Optional filename glob restricting the files examined.",
+      "ignore_case": "Match regardless of letter case when true.",
+      "include_hidden": "Include hidden entries only when supported by the workspace policy.",
+      "literal_search": "Treat pattern as literal text instead of a regular expression.",
+      "max_results": "Stop collecting after this many matches.",
+      "timeout_ms": "Search time budget in milliseconds; a partial result can be truncated."
+    }
+  },
+  "desktop_artifact_manage": {
+    "description": "Keep a temporary, checksum-verified copy of a workspace file for chunked reads. Publish returns artifact metadata; list finds stored IDs, get returns metadata, read returns a chunk and next offset, and delete removes the stored copy. Publishing and deleting require a writable profile. The source file is unchanged.",
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "idempotentHint": false,
+      "openWorldHint": false
+    },
+    "parameters": {
+      "action": "Operation to perform. Supply path for publish and artifact_id for get, read or delete; list accepts an optional limit.",
+      "artifact_id": "Instance-local ID from publish or list. Required for get, read and delete.",
+      "encoding": "Representation of a read chunk: utf8 for text or base64 for arbitrary bytes.",
+      "length": "Maximum bytes to read in this chunk. Used only with read.",
+      "limit": "Maximum number of artifacts to return for list.",
+      "offset": "Zero-based byte offset for read. Use next_offset from the preceding chunk.",
+      "retention_seconds": "Lifetime of the stored copy from publication, in seconds. Used only with publish."
+    }
+  }
+}
