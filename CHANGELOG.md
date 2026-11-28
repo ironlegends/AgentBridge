@@ -4,6 +4,14 @@ User-visible changes are grouped by version and dated using the UTC publication 
 
 ## [Unreleased]
 
+## [2.3.3] - 2026-11-28
+
+### Security
+
+- OAuth extension discovery requires HTTPS when moving between origins. Local development can use HTTP on the same configured loopback scheme, host and port. [Change #40](https://github.com/ironlegends/AgentBridge/pull/40)
+
+[Release notes](docs/RELEASE-v2.3.3.md)
+
 ## [2.3.2] - 2026-11-27
 
 ### Changed
