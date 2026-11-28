@@ -834,6 +834,16 @@ fn origin_url(endpoint: &Url, path: &str) -> Result<Url> {
     Ok(base)
 }
 
+// A local development server may delegate to HTTPS. Cleartext is confined
+// to the same already approved loopback origin at each discovery step.
+fn discovered_endpoint(parent: &Url, raw: &str) -> Result<Url> {
+    let endpoint = transport::endpoint(raw)?;
+    if endpoint.scheme() == "http" && endpoint.origin() != parent.origin() {
+        return Err(error("OAuth discovery requires HTTPS outside the approved loopback origin"));
+    }
+    Ok(endpoint)
+}
+
 pub fn discover_oauth_metadata(endpoint_str: &str) -> Result<OAuthMetadata> {
     let endpoint = transport::endpoint(endpoint_str)?;
     let client = oauth_http_client()?;
@@ -848,7 +858,7 @@ pub fn discover_oauth_metadata(endpoint_str: &str) -> Result<OAuthMetadata> {
                 .and_then(|arr| arr.first())
                 .and_then(Value::as_str)
             {
-                auth_server_base = transport::endpoint(first)?;
+                auth_server_base = discovered_endpoint(&endpoint, first)?;
             }
         }
     }
@@ -876,8 +886,8 @@ pub fn discover_oauth_metadata(endpoint_str: &str) -> Result<OAuthMetadata> {
         .and_then(Value::as_str)
         .ok_or_else(|| error("Missing token_endpoint in OAuth metadata"))?;
 
-    let authorization_endpoint = transport::endpoint(auth_raw)?;
-    let token_endpoint = transport::endpoint(token_raw)?;
+    let authorization_endpoint = discovered_endpoint(&auth_server_base, auth_raw)?;
+    let token_endpoint = discovered_endpoint(&auth_server_base, token_raw)?;
 
     Ok(OAuthMetadata {
         authorization_endpoint,
@@ -1162,4 +1172,22 @@ where
         "granted_scope": summary.granted_scope,
         "storage_protection": summary.storage_protection,
     }))
+}
+
+#[cfg(test)]
+mod discovery_tests {
+    use super::*;
+
+    #[test]
+    fn discovery_preserves_https_and_the_approved_loopback_origin() {
+        let remote = Url::parse("https://resource.example").unwrap();
+        let local = Url::parse("http://127.0.0.1:8080/mcp").unwrap();
+        let local_token = "http://127.0.0.1:8080/token";
+        let issuer = "https://identity.example/authorize";
+        assert!(discovered_endpoint(&remote, issuer).is_ok());
+        assert!(discovered_endpoint(&local, issuer).is_ok());
+        assert!(discovered_endpoint(&local, local_token).is_ok());
+        assert!(discovered_endpoint(&remote, local_token).is_err());
+        assert!(discovered_endpoint(&local, "http://127.0.0.1:8081/token").is_err());
+    }
 }

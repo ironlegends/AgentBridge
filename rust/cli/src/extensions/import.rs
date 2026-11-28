@@ -1156,7 +1156,7 @@ mod tests {
         ] {
             assert!(
                 !report_text.contains(forbidden),
-                "report leaked {forbidden}: {report_text}"
+                "import report contains a refused fixture value"
             );
         }
 

@@ -1320,7 +1320,7 @@ test("Sessions list renders the Rust snapshot escaped and grouped by its live fl
   assert.match(html, /Live now<\/h3>.*ChatGPT · &lt;b&gt;x&lt;\/b&gt;.*1 mission · 2 commands.*Connected earlier<\/h3>.*AI client/s);
   assert.match(html, /data-session="s:s1&quot;&gt;&lt;img&gt;"/);
   assert.match(html, /&lt;i&gt;agent&lt;\/i&gt; context/);
-  assert.doesNotMatch(html, /<b>|<img>|<script>|<i>/);
+  assert.doesNotMatch(html, /<b>|<img>|<script>|<i>/i);
   await ui.el("refreshMissionsBtn").fire("click");
   await ui.settle(ui.calls.filter((call) => call.command === "get_sessions" && !call.settled).at(-1),
     { available: false, reason: "Bridge is <stopped>." });
